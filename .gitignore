@@ -1,3 +1,4 @@
+.vscode
 target/
 pom.xml.tag
 pom.xml.releaseBackup
@@ -148,3 +149,13 @@ local.properties
 # Typically, this file would be tracked if it contains build/dependency configurations:
 .project
 /flink-cyber/flink-stellar/src/main/java/org/apache/metron/stellar/common/generated/*
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml

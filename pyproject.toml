@@ -1,0 +1,22 @@
+[project]
+name = "cybersec"
+version = "0.1.0"
+description = "Cybersec toolkit with Flink processing and Iceberg storage"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyarrow>=15.0.0",
+    "pandas>=2.2.0",
+    "psycopg2-binary>=2.9.9",
+    "boto3>=1.34.0",
+    "pyiceberg[s3fs,sql-postgres,pyiceberg-core]>=0.10.0",
+    "apache-flink>=2.2.0",
+    "kafka-python>=2.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "black>=24.0.0",
+    "ruff>=0.2.0",
+]
