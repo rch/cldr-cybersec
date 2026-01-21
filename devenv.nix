@@ -50,6 +50,7 @@
     initialDatabases = [
       { name = "cybersec"; }
       { name = "metaflow"; }
+      { name = "iceberg"; }
     ];
     port = 5438;
     listen_addresses = "*";  # Enable TCP from K8s pods and local clients
@@ -58,6 +59,14 @@
       "cron.database_name" = "cybersec";
     };
     initialScript = ''
+      -- Create cybersec user with login privileges
+      CREATE USER cybersec WITH PASSWORD 'cybersec' LOGIN;
+      
+      -- Grant privileges on cybersec database
+      GRANT ALL PRIVILEGES ON DATABASE cybersec TO cybersec;
+      GRANT ALL PRIVILEGES ON DATABASE iceberg TO cybersec;
+      
+      -- Create extensions
       CREATE EXTENSION IF NOT EXISTS pg_cron;
       -- AGE extension is created per-database in migrations
     '';
@@ -100,13 +109,14 @@
   processes = {
     flink-jobmanager = {
       exec = ''
-        # Set up writable Flink state directory
-        export FLINK_HOME="${pkgs.flink}/opt/flink"
+        # Use custom-built Apache Flink 1.20.1 (for Iceberg compatibility)
+        export FLINK_HOME="$PWD/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1"
         export FLINK_STATE_DIR="$DEVENV_STATE/flink"
+        export HADOOP_CONF_DIR="$FLINK_HOME/conf"
         mkdir -p "$FLINK_STATE_DIR"/{logs,checkpoints,savepoints}
         
         # Run JobManager in foreground mode
-        exec ${pkgs.flink}/opt/flink/bin/jobmanager.sh start-foreground \
+        exec "$FLINK_HOME/bin/jobmanager.sh" start-foreground \
           -D jobmanager.rpc.address=localhost \
           -D rest.port=8081 \
           -D state.checkpoints.dir=file://$FLINK_STATE_DIR/checkpoints \
@@ -128,13 +138,16 @@
 
     flink-taskmanager = {
       exec = ''
-        # Set up writable Flink state directory  
-        export FLINK_HOME="${pkgs.flink}/opt/flink"
+        # Use custom-built Apache Flink 1.20.1 (for Iceberg compatibility)
+        export FLINK_HOME="$PWD/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1"
         export FLINK_STATE_DIR="$DEVENV_STATE/flink"
         mkdir -p "$FLINK_STATE_DIR"/{logs,tmp}
         
+        # Configure S3A for MinIO
+        export HADOOP_CONF_DIR="$FLINK_HOME/conf"
+        
         # Run TaskManager in foreground mode
-        exec ${pkgs.flink}/opt/flink/bin/taskmanager.sh start-foreground \
+        exec "$FLINK_HOME/bin/taskmanager.sh" start-foreground \
           -D jobmanager.rpc.address=localhost \
           -D taskmanager.numberOfTaskSlots=4 \
           -D taskmanager.tmp.dirs=$FLINK_STATE_DIR/tmp
@@ -147,12 +160,76 @@
         };
       };
     };
+
+    iceberg-browser = {
+      exec = ''
+        # Wait for required services
+        echo "Starting Iceberg Browser..."
+        echo "Web UI will be available at http://localhost:5050"
+        
+        # Run the Flask application
+        exec python iceberg_browser.py
+      '';
+      process-compose = {
+        depends_on = {
+          polaris = {
+            condition = "process_healthy";
+          };
+        };
+        readiness_probe = {
+          http_get = {
+            host = "localhost";
+            port = 5050;
+            path = "/";
+          };
+          initial_delay_seconds = 3;
+          period_seconds = 2;
+          failure_threshold = 15;
+        };
+      };
+    };
+
+    polaris = {
+      exec = ''
+        cd thirdparty/polaris/polaris-bin-1.3.0-incubating
+        echo "Starting Apache Polaris REST catalog..."
+        echo "REST API will be available at http://localhost:8181"
+        echo "Admin API will be available at http://localhost:8182"
+        
+        # Set bootstrap credentials (realm: POLARIS, client_id: admin, secret: admin)
+        export POLARIS_JAVA_OPTS="-Dpolaris.bootstrap.credentials=POLARIS,admin,admin"
+        
+        # Configure AWS SDK for MinIO access
+        export AWS_ENDPOINT_URL=http://localhost:9010
+        export AWS_REGION=us-east-1
+        export AWS_ACCESS_KEY_ID=minioadmin
+        export AWS_SECRET_ACCESS_KEY=minioadmin
+        
+        # AWS SDK v2 properties for S3 endpoint override
+        export JAVA_TOOL_OPTIONS="-Daws.endpointUrl=http://localhost:9010 -Daws.region=us-east-1"
+        
+        # Run Polaris server with config file
+        exec ./bin/server ../../polaris-server.yml
+      '';
+      process-compose = {
+        readiness_probe = {
+          http_get = {
+            host = "localhost";
+            port = 8182;
+            path = "/q/health/ready";
+          };
+          initial_delay_seconds = 15;
+          period_seconds = 3;
+          failure_threshold = 30;
+        };
+      };
+    };
   };
 
   # Initialize Iceberg catalog in PostgreSQL
   scripts.init-iceberg.exec = ''
     echo "Initializing Iceberg catalog in PostgreSQL..."
-    psql -h localhost -p 5438 -U postgres -d cybersec -c "
+    PGPASSWORD=cybersec psql -h localhost -p 5438 -U cybersec -d iceberg -c "
       CREATE SCHEMA IF NOT EXISTS iceberg;
       CREATE TABLE IF NOT EXISTS iceberg.catalog_tables (
         catalog_name VARCHAR(255) NOT NULL,

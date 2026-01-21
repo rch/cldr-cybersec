@@ -12,6 +12,7 @@ dependencies = [
     "pyiceberg[s3fs,sql-postgres,pyiceberg-core]>=0.10.0",
     "apache-flink>=2.2.0",
     "kafka-python>=2.0.2",
+    "flask>=3.0.0",
 ]
 
 [project.optional-dependencies]

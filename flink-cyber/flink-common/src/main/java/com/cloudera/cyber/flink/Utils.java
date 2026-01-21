@@ -30,7 +30,8 @@ import org.apache.flink.core.fs.FSDataInputStream;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.util.Preconditions;
-import org.apache.flink.util.encrypttool.EncryptTool;
+// Removed Cloudera-specific EncryptTool - not available in Apache Flink
+// import org.apache.flink.util.encrypttool.EncryptTool;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 
@@ -229,7 +230,10 @@ public class Utils {
 
     public static String decrypt(String input) {
         Preconditions.checkNotNull(input, "key is null");
-        return EncryptTool.getInstance(getConfiguration()).decrypt(input);
+        // EncryptTool not available in Apache Flink - return input as-is
+        // In production, implement proper encryption/decryption here
+        return input;
+        // return EncryptTool.getInstance(getConfiguration()).decrypt(input);
     }
 
     public static Configuration getConfiguration() {
