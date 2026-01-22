@@ -49,3 +49,49 @@ cd cybersec/flink-cyber
 mvn clean install -DskipTests
 ```
 
+## Local Development Environment
+
+This repository includes a complete local development environment using [devenv](https://devenv.sh/).
+
+### Quick Start
+
+```bash
+devenv up  # Start all services (Polaris catalog initializes automatically)
+```
+
+That's it! All services start and configure themselves automatically:
+- PostgreSQL initializes with required databases
+- Polaris starts and creates the catalog with proper permissions
+- MinIO, Flink, and Iceberg Browser become available
+
+### Verification
+
+```bash
+devenv tasks run polaris:check  # Verify Polaris configuration
+```
+
+### Clean Restart
+
+```bash
+devenv tasks run restart:clean  # Stop all processes and restart
+```
+
+### Services
+
+- **Apache Flink**: Job management at http://localhost:8081
+- **Iceberg Browser**: CloudTrail events UI at http://localhost:5050
+- **MinIO Console**: Object storage at http://localhost:9011 (minioadmin/minioadmin)
+- **Apache Polaris**: REST catalog at http://localhost:8181
+- **PostgreSQL**: Metadata storage on port 5438
+
+### Key Tasks
+
+- `polaris:check` - Verify Polaris is properly configured
+- `polaris:init` - Manually re-initialize Polaris (if needed)
+- `restart:clean` - Clean restart of all services
+- `docs:build` - Build documentation
+
+**Note**: Polaris initialization happens automatically on `devenv up`. The `polaris:init` task is only needed if automatic initialization fails.
+
+See [docs/POLARIS_SETUP.md](docs/POLARIS_SETUP.md) for detailed Polaris configuration and troubleshooting.
+

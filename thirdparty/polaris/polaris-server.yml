@@ -1,50 +1,65 @@
-# Polaris configuration for PostgreSQL metadata store and MinIO storage
-server:
-  applicationConnectors:
-    - type: http
-      port: 8181
-  adminConnectors:
-    - type: http
-      port: 8182
-
-metaStoreManager:
-  type: eclipse-link
-  persistence-unit: polaris
-  conf:
-    # PostgreSQL connection
-    jakarta.persistence.jdbc.driver: org.postgresql.Driver
-    jakarta.persistence.jdbc.url: jdbc:postgresql://localhost:5438/iceberg
-    jakarta.persistence.jdbc.user: cybersec
-    jakarta.persistence.jdbc.password: cybersec
+# Polaris Quarkus configuration for PostgreSQL persistence
+quarkus:
+  http:
+    port: 8181
+  management:
+    enabled: true
+    port: 8182
+  
+  datasource:
+    db-kind: postgresql
+    jdbc:
+      url: jdbc:postgresql://localhost:5438/iceberg
+    username: cybersec
+    password: cybersec
+  
+  hibernate-orm:
+    database:
+      generation: update
+    
+polaris:
+  persistence:
+    type: eclipse-link
+  
+  feature-configuration:
+    ENFORCE_PRINCIPAL_CREDENTIAL_ROTATION_REQUIRED_CHECKING: false
 
 # AWS SDK configuration for MinIO access
-callContext:
-  resolverClassName: org.apache.polaris.service.context.CallContextResolverImpl
+call-context:
+  resolver-class-name: org.apache.polaris.service.context.CallContextResolverImpl
 
-# Set default catalog to avoid needing warehouse parameter
-featureConfiguration:
-  ENFORCE_PRINCIPAL_CREDENTIAL_ROTATION_REQUIRED_CHECKING: false
-  DEFAULT_CATALOG: cybersec
-
-# Default storage config for MinIO
-defaultRealms:
-  - realmName: default-realm
-    serviceAdmin:
+# Bootstrap realm and catalog on first startup
+default-realms:
+  - realm-name: POLARIS
+    service-admin:
       type: password
-      clientId: admin
-      clientSecret: admin
+      client-id: admin
+      client-secret: admin
     catalogs:
       - name: cybersec
         type: INTERNAL
-        storageType: S3
+        storage-type: S3
         properties:
           s3.endpoint: http://localhost:9010
           s3.access-key-id: minioadmin
           s3.secret-access-key: minioadmin
           s3.path-style-access: "true"
           s3.region: us-east-1
-        baseLocation: s3://cybersec/iceberg/warehouse
-        storageConfigInfo:
-          storageType: S3
-          allowedLocations:
-            - s3://cybersec
+        base-location: s3://cybersec/iceberg/warehouse
+        storage-config-info:
+          storage-type: S3
+          allowed-locations:
+            - s3://cybersec/            - s3://cybersec/
+        # Grant full access to the service admin principal
+        catalog-roles:
+          - name: full_access
+            privileges:
+              - CATALOG_MANAGE_CONTENT
+              - CATALOG_MANAGE_ACCESS
+              - TABLE_READ_DATA
+              - TABLE_WRITE_DATA
+              - TABLE_FULL_METADATA
+              - NAMESPACE_FULL_METADATA
+        principal-role-assignments:
+          - principal-role: service_admin
+            catalog-role: full_access

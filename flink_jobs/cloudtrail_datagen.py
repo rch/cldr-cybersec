@@ -75,26 +75,80 @@ class CloudTrailDataGen:
 
 
 def create_cloudtrail_datagen_job():
-    """
+    """Create and run CloudTrail data generation job"""
+    import os
+    
+    # Set Flink configuration to use JARs from the Flink distribution
+    flink_home = os.path.join(os.getcwd(), "thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1")
+    os.environ.setdefault('FLINK_HOME', flink_home)
+    
     # Create streaming environment
-    env_settings = EnvironmentSettings.in_streaming_mode()
-    t_env = StreamTableEnvironment.create(environment_settings=env_settings)
+    env = StreamExecutionEnvironment.get_execution_environment()
+    env.set_parallelism(1)
     
-    # Set parallelism
-    t_env.get_config().set("parallelism.default", "1"
+    # Enable checkpointing for data commits
+    # Checkpoints trigger Iceberg commits - without this, data stays buffered!
+    env.enable_checkpointing(10000)  # Checkpoint every 10 seconds
     
-    t_env = StreamTableEnvironment.create(env)
+    # Create table environment with streaming settings
+    settings = EnvironmentSettings.in_streaming_mode()
+    t_env = StreamTableEnvironment.create(env, settings)
+    
+    # Set table configuration for faster commits
+    t_env.get_config().set("table.exec.sink.not-null-enforcer", "drop")
+    t_env.get_config().set("execution.checkpointing.interval", "10s")
+    
+    # Set pipeline JAR configuration
+    iceberg_jar = os.path.join(flink_home, "lib/iceberg-flink-runtime-1.20-1.7.1.jar")
+    if os.path.exists(iceberg_jar):
+        t_env.get_config().set("pipeline.jars", f"file://{iceberg_jar}")
     
     # Register UDF for generating CloudTrail events
-    @udf(result_type=DataTypes.STRING())
-    def generate_cloudtrail_event():
-        return CloudTrailDataGen.generate_event()
+    t_env.create_temporary_system_function(
+        "generate_cloudtrail", 
+        udf(lambda: CloudTrailDataGen.generate_event(), result_type=DataTypes.STRING())
+    )
     
-    t_env.create_temporary_function("generate_cloudtrail", generate_cloudtrail_event)
-    
-    # Create a datagen source table that generates events
+    # Create Iceberg catalog for Polaris REST
+    # In Polaris REST API, the catalog is accessed at /api/catalog/warehouse_name
+    # The catalog name in Flink must match the warehouse name in Polaris
     t_env.execute_sql("""
-        CREATE TABLE datagen_source (
+        CREATE CATALOG cybersec WITH (
+            'type' = 'iceberg',
+            'catalog-type' = 'rest',
+            'uri' = 'http://localhost:8181/api/catalog',
+            'credential' = 'admin:admin',
+            'scope' = 'PRINCIPAL_ROLE:ALL',
+            'warehouse' = 'cybersec',
+            's3.endpoint' = 'http://localhost:9010',
+            's3.path-style-access' = 'true',
+            's3.access-key-id' = 'minioadmin',
+            's3.secret-access-key' = 'minioadmin'
+        )
+    """)
+    
+    # Use the catalog
+    t_env.use_catalog('cybersec')
+    
+    # Create database if not exists (default is a reserved keyword, must be quoted)
+    t_env.execute_sql("CREATE DATABASE IF NOT EXISTS `default`")
+    t_env.use_database('default')
+    
+    # Create Iceberg sink table for CloudTrail events
+    # Disable write.metadata.metrics.default to avoid classloader conflicts
+    t_env.execute_sql("""
+        CREATE TABLE IF NOT EXISTS cloudtrail_events (
+            event_data STRING,
+            event_time TIMESTAMP(3)
+        ) WITH (
+            'write.metadata.metrics.default' = 'none'
+        )
+    """)
+    
+    # Create a temporary datagen source table (not persisted to Iceberg catalog)
+    # Temporary tables support computed columns and connectors like datagen
+    t_env.execute_sql("""
+        CREATE TEMPORARY TABLE datagen_source (
             event_id BIGINT,
             event_timestamp AS PROCTIME()
         ) WITH (
@@ -103,21 +157,6 @@ def create_cloudtrail_datagen_job():
             'fields.event_id.kind' = 'sequence',
             'fields.event_id.start' = '1',
             'fields.event_id.end' = '1000000'
-        )
-    """)
-    
-    # Create Kafka sink table for CloudTrail events
-    t_env.execute_sql("""
-        CREATE TABLE cloudtrail_events (
-            event_data STRING,
-            event_time TIMESTAMP(3)
-        ) WITH (
-            'connector' = 'kafka',
-            'topic' = 'cloudtrail-raw',
-            'properties.bootstrap.servers' = 'localhost:9092',
-            'format' = 'json',
-            'json.fail-on-missing-field' = 'false',
-            'json.ignore-parse-errors' = 'true'
         )
     """)
     

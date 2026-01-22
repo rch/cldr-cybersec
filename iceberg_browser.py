@@ -17,17 +17,17 @@ import threading
 
 app = Flask(__name__)
 
-# Iceberg catalog configuration - using SQL catalog (PostgreSQL)
-# This avoids OAuth complexity and works reliably with Polaris
+# Iceberg catalog configuration - using REST catalog to connect to Polaris
 CATALOG_CONFIG = {
-    "type": "sql",
-    "uri": "postgresql://cybersec:cybersec@localhost:5438/iceberg",
-    "warehouse": "s3://cybersec/iceberg/warehouse",
+    "type": "rest",
+    "uri": "http://localhost:8181/api/catalog",
+    "credential": "admin:admin",
+    "scope": "PRINCIPAL_ROLE:ALL",
+    "warehouse": "cybersec",
     "s3.endpoint": "http://localhost:9010",
     "s3.path-style-access": "true",
     "s3.access-key-id": "minioadmin",
     "s3.secret-access-key": "minioadmin",
-    "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO"
 }
 
 # Global catalog instance (singleton to avoid re-initialization)
@@ -46,9 +46,9 @@ def get_table():
     """Get the first available table in the catalog"""
     try:
         catalog = get_catalog()
-        # Try to load cloudtrail_events first
+        # Try to load cloudtrail_events from default namespace
         try:
-            return catalog.load_table("cybersec.cloudtrail_events")
+            return catalog.load_table("default.cloudtrail_events")
         except NoSuchTableError:
             pass
         
@@ -303,14 +303,15 @@ def get_summary():
         return jsonify({"error": str(e)}), 500
 
 
-# Store last known snapshot ID for change detection
+# Store metrics for change detection and rate calculation
 _last_snapshot_id = None
 _last_event_count = 0
+_event_timestamps = []  # Track event times for rate calculation
 
 
 def get_table_changes():
-    """Check if table has changed since last check"""
-    global _last_snapshot_id, _last_event_count
+    """Check if table has changed and calculate events per minute"""
+    global _last_snapshot_id, _last_event_count, _event_timestamps
     
     try:
         table = get_table()
@@ -320,41 +321,33 @@ def get_table_changes():
         metadata = table.metadata
         current_snapshot_id = metadata.current_snapshot_id
         
-        # Check if snapshot changed
-        if current_snapshot_id != _last_snapshot_id:
-            _last_snapshot_id = current_snapshot_id
-            
-            # Get latest stats
-            scan = table.scan()
-            df = scan.to_pandas()
-            current_count = len(df)
-            
-            new_events = current_count - _last_event_count
+        # Get current count
+        scan = table.scan()
+        df = scan.to_pandas()
+        current_count = len(df)
+        
+        # Calculate new events
+        new_events = current_count - _last_event_count
+        
+        # Update tracking
+        if new_events > 0:
+            now = time.time()
+            # Add timestamp for each new event
+            _event_timestamps.extend([now] * new_events)
             _last_event_count = current_count
-            
-            # Get latest events if new data exists
-            latest_events = []
-            if new_events > 0 and not df.empty:
-                if "event_time" in df.columns:
-                    df = df.sort_values("event_time", ascending=False)
-                latest_df = df.head(min(5, new_events))
-                
-                for _, row in latest_df.iterrows():
-                    event = row.to_dict()
-                    for key, value in event.items():
-                        if isinstance(value, pd.Timestamp):
-                            event[key] = value.isoformat()
-                        elif pd.isna(value):
-                            event[key] = None
-                    latest_events.append(event)
-            
-            return {
-                "snapshot_id": current_snapshot_id,
-                "total_events": current_count,
-                "new_events": new_events,
-                "latest_events": latest_events,
-                "timestamp": datetime.now().isoformat()
-            }
+            _last_snapshot_id = current_snapshot_id
+        
+        # Calculate events per minute (last 60 seconds)
+        now = time.time()
+        cutoff = now - 60
+        _event_timestamps[:] = [ts for ts in _event_timestamps if ts > cutoff]
+        events_per_minute = len(_event_timestamps)
+        
+        return {
+            "total_events": current_count,
+            "events_per_minute": events_per_minute,
+            "timestamp": datetime.now().isoformat()
+        }
     except Exception as e:
         return {"error": str(e)}
     
@@ -374,11 +367,8 @@ def stream_updates():
                 changes = get_table_changes()
                 
                 if changes:
-                    # Send update event
-                    yield f"data: {json.dumps({'type': 'update', 'data': changes})}\n\n"
-                
-                # Send heartbeat every iteration
-                yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now().isoformat()})}\n\n"
+                    # Send metrics update (total events and events per minute)
+                    yield f"data: {json.dumps({'type': 'metrics', 'data': changes})}\n\n"
                 
                 time.sleep(2)
             except GeneratorExit:

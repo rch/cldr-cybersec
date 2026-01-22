@@ -743,8 +743,8 @@
                 <div class="value" id="snapshot-count">-</div>
             </div>
             <div class="stat-card">
-                <h3>Event Types</h3>
-                <div class="value" id="event-types">-</div>
+                <h3>Events/Min</h3>
+                <div class="value" id="events-per-min">0</div>
             </div>
             <div class="stat-card">
                 <h3>Last Updated</h3>
@@ -985,8 +985,8 @@
 
                 document.getElementById('total-events').textContent = summary.total_events || 0;
                 document.getElementById('snapshot-count').textContent = stats.snapshot_count || 0;
-                document.getElementById('event-types').textContent = 
-                    Object.keys(summary.event_names || {}).length || 0;
+                // Events/min will be updated by SSE stream
+                document.getElementById('events-per-min').textContent = '0';
                 
                 if (stats.last_updated) {
                     const date = new Date(stats.last_updated);
@@ -1235,10 +1235,8 @@
                     
                     if (data.type === 'connected') {
                         console.log(data.message);
-                    } else if (data.type === 'update' && data.data) {
-                        handleUpdate(data.data);
-                    } else if (data.type === 'heartbeat') {
-                        updateLastUpdateTime();
+                    } else if (data.type === 'metrics' && data.data) {
+                        updateMetrics(data.data);
                     } else if (data.type === 'error') {
                         console.error('Server error:', data.message);
                     }
@@ -1248,37 +1246,22 @@
             };
         }
 
-        function handleUpdate(updateData) {
-            console.log('Received update:', updateData);
-            
-            // Update stats
-            loadStats();
-            loadEvents();
-            updateLastUpdateTime();
-
-            // Show notification for new events
-            if (updateData.new_events > 0) {
-                totalNewEvents += updateData.new_events;
-                showNewEventNotification(updateData);
-                updateEventCounter();
+        function updateMetrics(metricsData) {
+            // Update total events counter
+            if (metricsData.total_events !== undefined) {
+                document.getElementById('total-events').textContent = metricsData.total_events;
             }
-        }
-
-        function showNewEventNotification(updateData) {
-            const notification = document.createElement('div');
-            notification.className = 'new-event-notification';
-            notification.innerHTML = `
-                <h4>🔔 ${updateData.new_events} New Event${updateData.new_events > 1 ? 's' : ''}</h4>
-                <p>${updateData.latest_events.length > 0 ? updateData.latest_events[0].event_name || 'Event recorded' : 'Data updated'}</p>
-            `;
             
-            document.body.appendChild(notification);
-            
-            // Remove notification after 4 seconds
-            setTimeout(() => {
-                notification.style.animation = 'slideIn 0.3s ease-out reverse';
-                setTimeout(() => notification.remove(), 300);
-            }, 4000);
+            // Update events per minute gauge
+            if (metricsData.new_events !== undefined) {
+                const eventsPerMinElement = document.getElementById('events-per-min');
+                if (eventsPerMinElement) {
+                    // Calculate events per minute from new events in last update
+                    // SSE checks every 2 seconds, so multiply by 30 to get per minute rate
+                    const eventsPerMin = Math.round(metricsData.new_events * 30);
+                    eventsPerMinElement.textContent = eventsPerMin;
+                }
+            }
         }
 
 
