@@ -61,7 +61,10 @@ def get_table():
                 return catalog.load_table(tables[0])
         
         return None
-    except Exception:
+    except Exception as e:
+        print(f"Error loading table: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -210,13 +213,52 @@ def get_events():
         # Convert to records
         events = df.to_dict(orient="records")
         
-        # Convert any datetime objects to ISO format
+        # Process events: parse JSON and handle types
+        processed_events = []
         for event in events:
+            # Parse event_data JSON if it exists
+            if "event_data" in event and event["event_data"]:
+                try:
+                    event_data_str = event["event_data"]
+                    if isinstance(event_data_str, str):
+                        event_data = json.loads(event_data_str)
+                        
+                        # Flatten common fields for frontend
+                        # Map CloudTrail fields to what frontend expects
+                        if "eventName" in event_data:
+                            event["event_name"] = event_data["eventName"]
+                        if "userIdentity" in event_data:
+                            userIdentity = event_data["userIdentity"]
+                            if isinstance(userIdentity, dict):
+                                if "userName" in userIdentity:
+                                    event["user_identity"] = userIdentity["userName"]
+                                elif "arn" in userIdentity:
+                                    # Extract user from ARN
+                                    event["user_identity"] = userIdentity["arn"].split("/")[-1]
+                        if "sourceIPAddress" in event_data:
+                            event["source_ip_address"] = event_data["sourceIPAddress"]
+                        if "awsRegion" in event_data:
+                            event["region"] = event_data["awsRegion"]
+                        if "errorCode" in event_data:
+                            event["error_code"] = event_data["errorCode"]
+                        if "errorMessage" in event_data:
+                            event["error_message"] = event_data["errorMessage"]
+                            
+                        # Merge the rest
+                        event.update(event_data)
+                except Exception as e:
+                    print(f"Error parsing event_data: {e}")
+            
+            # Convert any datetime objects to ISO format
             for key, value in event.items():
                 if isinstance(value, pd.Timestamp):
                     event[key] = value.isoformat()
                 elif pd.isna(value):
                     event[key] = None
+            
+            processed_events.append(event)
+            
+        events = processed_events
         
         return jsonify({
             "events": events,
@@ -246,6 +288,33 @@ def get_event_detail(event_id):
             return jsonify({"error": "Event not found"}), 404
         
         event = event_df.iloc[0].to_dict()
+        
+        # Parse event_data JSON if it exists
+        if "event_data" in event and event["event_data"]:
+            try:
+                event_data_str = event["event_data"]
+                if isinstance(event_data_str, str):
+                    event_data = json.loads(event_data_str)
+                    
+                    # Flatten common fields for frontend
+                    if "eventName" in event_data:
+                        event["event_name"] = event_data["eventName"]
+                    if "userIdentity" in event_data:
+                        userIdentity = event_data["userIdentity"]
+                        if isinstance(userIdentity, dict):
+                            if "userName" in userIdentity:
+                                event["user_identity"] = userIdentity["userName"]
+                            elif "arn" in userIdentity:
+                                event["user_identity"] = userIdentity["arn"].split("/")[-1]
+                    if "sourceIPAddress" in event_data:
+                        event["source_ip_address"] = event_data["sourceIPAddress"]
+                    if "awsRegion" in event_data:
+                        event["region"] = event_data["awsRegion"]
+                        
+                    # Merge the rest
+                    event.update(event_data)
+            except Exception as e:
+                print(f"Error parsing event_data: {e}")
         
         # Convert datetime objects
         for key, value in event.items():

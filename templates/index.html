@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -30,7 +31,7 @@
             color: white;
             padding: 30px 0;
             margin-bottom: 30px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
         }
 
         header h1 {
@@ -44,7 +45,7 @@
         }
 
         .refresh-controls {
-            background: rgba(255,255,255,0.1);
+            background: rgba(255, 255, 255, 0.1);
             padding: 10px 15px;
             border-radius: 5px;
             margin-top: 15px;
@@ -72,7 +73,7 @@
             align-items: center;
             gap: 8px;
             padding: 5px 12px;
-            background: rgba(255,255,255,0.2);
+            background: rgba(255, 255, 255, 0.2);
             border-radius: 15px;
             font-size: 0.85em;
         }
@@ -98,8 +99,17 @@
         }
 
         @keyframes pulse {
-            0%, 100% { opacity: 0.5; transform: scale(1); }
-            50% { opacity: 1; transform: scale(1.2); }
+
+            0%,
+            100% {
+                opacity: 0.5;
+                transform: scale(1);
+            }
+
+            50% {
+                opacity: 1;
+                transform: scale(1.2);
+            }
         }
 
         .new-event-notification {
@@ -110,15 +120,22 @@
             color: white;
             padding: 15px 20px;
             border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
             z-index: 1000;
             animation: slideIn 0.3s ease-out;
             max-width: 350px;
         }
 
         @keyframes slideIn {
-            from { transform: translateX(400px); opacity: 0; }
-            to { transform: translateX(0); opacity: 1; }
+            from {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
         }
 
         .new-event-notification h4 {
@@ -143,13 +160,13 @@
             background: white;
             padding: 20px;
             border-radius: 10px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
             transition: transform 0.2s;
         }
 
         .stat-card:hover {
             transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         }
 
         .stat-card h3 {
@@ -169,7 +186,7 @@
             background: white;
             padding: 25px;
             border-radius: 10px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
             margin-bottom: 20px;
         }
 
@@ -244,7 +261,7 @@
         .events-table {
             background: white;
             border-radius: 10px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
             overflow: hidden;
         }
 
@@ -332,6 +349,7 @@
             gap: 10px;
             padding: 20px;
         }
+
         /* Masonry Layout Styles */
         .view-toggle {
             display: flex;
@@ -362,10 +380,13 @@
             display: flex;
             gap: 20px;
             align-items: flex-start;
+            padding: 20px;
         }
 
         .masonry-column {
             flex: 1;
+            /* Fix for flex items not shrinking below content size */
+            min-width: 0;
             display: flex;
             flex-direction: column;
             gap: 20px;
@@ -375,15 +396,18 @@
             background: white;
             border-radius: 10px;
             padding: 20px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
             transition: all 0.3s ease;
             cursor: pointer;
             break-inside: avoid;
+            /* Ensure long text doesn't break layout */
+            overflow-wrap: break-word;
+            word-break: break-word;
         }
 
         .event-card:hover {
             transform: translateY(-4px);
-            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
         }
 
         .event-card-header {
@@ -475,7 +499,7 @@
             margin-bottom: 30px;
             border-radius: 10px;
             overflow: hidden;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
         }
 
         #fsn-canvas {
@@ -491,8 +515,8 @@
             color: #00ff00;
             font-family: 'Courier New', monospace;
             font-size: 14px;
-            text-shadow: 0 0 10px rgba(0,255,0,0.5);
-            background: rgba(0,0,0,0.7);
+            text-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+            background: rgba(0, 0, 0, 0.7);
             padding: 15px;
             border: 2px solid #00ff00;
             border-radius: 5px;
@@ -503,7 +527,7 @@
             margin: 0 0 10px 0;
             font-size: 18px;
             color: #00ffff;
-            text-shadow: 0 0 10px rgba(0,255,255,0.5);
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
         }
 
         .fsn-stats {
@@ -520,7 +544,7 @@
         .fsn-value {
             color: #ffff00;
             font-weight: bold;
-            text-shadow: 0 0 5px rgba(255,255,0,0.5);
+            text-shadow: 0 0 5px rgba(255, 255, 0, 0.5);
         }
 
         .fsn-controls {
@@ -530,8 +554,8 @@
             color: #00ff00;
             font-family: 'Courier New', monospace;
             font-size: 12px;
-            text-shadow: 0 0 10px rgba(0,255,0,0.5);
-            background: rgba(0,0,0,0.7);
+            text-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+            background: rgba(0, 0, 0, 0.7);
             padding: 10px;
             border: 2px solid #00ff00;
             border-radius: 5px;
@@ -550,18 +574,25 @@
             color: #00ffff;
             font-family: 'Courier New', monospace;
             font-size: 24px;
-            text-shadow: 0 0 20px rgba(0,255,255,0.8);
+            text-shadow: 0 0 20px rgba(0, 255, 255, 0.8);
             animation: pulse 2s ease-in-out infinite;
         }
 
         @keyframes pulse {
-            0%, 100% { opacity: 0.5; }
-            50% { opacity: 1; }
+
+            0%,
+            100% {
+                opacity: 0.5;
+            }
+
+            50% {
+                opacity: 1;
+            }
         }
 
         .fsn-tooltip {
             position: absolute;
-            background: rgba(0,0,0,0.9);
+            background: rgba(0, 0, 0, 0.9);
             color: #00ff00;
             padding: 10px;
             border: 2px solid #00ff00;
@@ -571,8 +602,9 @@
             pointer-events: none;
             display: none;
             z-index: 100;
-            text-shadow: 0 0 5px rgba(0,255,0,0.5);
+            text-shadow: 0 0 5px rgba(0, 255, 0, 0.5);
         }
+
         .loading {
             text-align: center;
             padding: 40px;
@@ -594,37 +626,13 @@
             left: 0;
             width: 100%;
             height: 100%;
-            background: rgba(0,0,0,0.5);
+            background: rgba(0, 0, 0, 0.5);
             z-index: 1000;
             overflow-y: auto;
         }
 
         .modal.active {
-            d3D File System Navigator -->
-        <div class="fsn-container">
-            <canvas id="fsn-canvas"></canvas>
-            <div class="fsn-overlay" id="fsn-overlay">
-                <h3>▸ ICEBERG FSN</h3>
-                <div class="fsn-stats">
-                    <span class="fsn-label">NODES:</span>
-                    <span class="fsn-value" id="fsn-nodes">0</span>
-                    <span class="fsn-label">EVENTS:</span>
-                    <span class="fsn-value" id="fsn-events">0</span>
-                    <span class="fsn-label">SELECTED:</span>
-                    <span class="fsn-value" id="fsn-selected">None</span>
-                </div>
-            </div>
-            <div class="fsn-controls">
-                <div>🖱️ Left Click + Drag: Rotate</div>
-                <div>🖱️ Right Click + Drag: Pan</div>
-                <div>🖱️ Scroll: Zoom</div>
-                <div>🖱️ Click Block: Details</div>
-            </div>
-            <div class="fsn-loading" id="fsn-loading">INITIALIZING FSN...</div>
-            <div class="fsn-tooltip" id="fsn-tooltip"></div>
-        </div>
-
-        <!-- isplay: flex;
+            d3D File System Navigator --><div class="fsn-container"><canvas id="fsn-canvas"></canvas><div class="fsn-overlay" id="fsn-overlay"><h3>▸ ICEBERG FSN</h3><div class="fsn-stats"><span class="fsn-label">NODES: </span> <span class="fsn-value" id="fsn-nodes" >0</span> <span class="fsn-label" >EVENTS:</span> <span class="fsn-value" id="fsn-events" >0</span> <span class="fsn-label" >SELECTED:</span> <span class="fsn-value" id="fsn-selected" >None</span> </div> </div> <div class="fsn-controls" > <div>🖱️ Left Click + Drag: Rotate</div> <div>🖱️ Right Click + Drag: Pan</div> <div>🖱️ Scroll: Zoom</div> <div>🖱️ Click Block: Details</div> </div> <div class="fsn-loading" id="fsn-loading" >INITIALIZING FSN...</div> <div class="fsn-tooltip" id="fsn-tooltip" ></div> </div> < !-- isplay: flex;
             align-items: center;
             justify-content: center;
         }
@@ -636,48 +644,11 @@
             width: 90%;
             max-height: 90vh;
             overflow-y: auto;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
         }
 
-        .modal-headerstyle="display: flex; align-items: center; gap: 20px;">
-                    <div class="view-toggle">
-                        <button class="active" id="table-view-btn" onclick="switchView('table')">📊 Table</button>
-                        <button id="masonry-view-btn" onclick="switchView('masonry')">🎨 Cards</button>
-                    </div>
-                    <div class="pagination-info" id="pagination-info">Loading...</div>
-                </div>
-            </div>
-            <div id="loading" class="loading">Loading events...</div>
-            <div id="table-container" class="active" style="display: none;">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Timestamp</th>
-                            <th>Event Name</th>
-                            <th>User</th>
-                            <th>Source IP</th>
-                            <th>Region</th>
-                            <th>Error Code</th>
-                        </tr>
-                    </thead>
-                    <tbody id="events-tbody">
-                    </tbody>
-                </table>
-                <div class="pagination">
-                    <button class="btn-secondary" onclick="previousPage()" id="prev-btn">Previous</button>
-                    <span id="page-info">Page 1</span>
-                    <button class="btn-secondary" onclick="nextPage()" id="next-btn">Next</button>
-                </div>
-            </div>
-            <div id="masonry-container" class="masonry-container">
-                <div class="masonry-grid" id="masonry-grid">
-                    <!-- Columns will be dynamically created -->
-                </div>
-                <div class="pagination">
-                    <button class="btn-secondary" onclick="previousPage()" id="masonry-prev-btn">Previous</button>
-                    <span id="masonry-page-info">Page 1</span>
-                    <button class="btn-secondary" onclick="nextPage()" id="masonry-
-            height: 30px;
+        .modal-headerstyle="display: flex; align-items: center; gap: 20px;"><div class="view-toggle"><button class="active" id="table-view-btn" onclick="switchView('table')">📊 Table</button><button id="masonry-view-btn" onclick="switchView('masonry')">🎨 Cards</button></div><div class="pagination-info" id="pagination-info">Loading...</div></div></div><div id="loading" class="loading">Loading events...</div><div id="table-container" class="active" style="display: none;"><table><thead><tr><th>Timestamp</th><th>Event Name</th><th>User</th><th>Source IP</th><th>Region</th><th>Error Code</th></tr></thead><tbody id="events-tbody"></tbody></table><div class="pagination"><button class="btn-secondary" onclick="previousPage()" id="prev-btn">Previous</button><span id="page-info">Page 1</span><button class="btn-secondary" onclick="nextPage()" id="next-btn">Next</button></div></div><div id="masonry-container" class="masonry-container"><div class="masonry-grid" id="masonry-grid">< !-- Columns will be dynamically created --></div><div class="pagination"><button class="btn-secondary" onclick="previousPage()" id="masonry-prev-btn">Previous</button><span id="masonry-page-info">Page 1</span><button class="btn-secondary" onclick="nextPage()" id="masonry-
+ height: 30px;
         }
 
         .close-modal:hover {
@@ -715,6 +686,7 @@
         }
     </style>
 </head>
+
 <body>
     <header>
         <div class="container">
@@ -850,7 +822,7 @@
         let cachedEvents = [];
 
         // Initialize on page load
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', function () {
             loadStats();
             loadEvents();
             initMasonryColumns();
@@ -859,7 +831,7 @@
         function initMasonryColumns() {
             const grid = document.getElementById('masonry-grid');
             const columnCount = window.innerWidth > 1200 ? 3 : window.innerWidth > 768 ? 2 : 1;
-            
+
             grid.innerHTML = '';
             for (let i = 0; i < columnCount; i++) {
                 const column = document.createElement('div');
@@ -877,11 +849,17 @@
             const masonryBtn = document.getElementById('masonry-view-btn');
 
             if (view === 'table') {
+                tableContainer.style.display = 'block';
+                masonryContainer.style.display = 'none';
+
                 tableContainer.classList.add('active');
                 masonryContainer.classList.remove('active');
                 tableBtn.classList.add('active');
                 masonryBtn.classList.remove('active');
             } else {
+                tableContainer.style.display = 'none';
+                masonryContainer.style.display = 'block';
+
                 tableContainer.classList.remove('active');
                 masonryContainer.classList.add('active');
                 tableBtn.classList.remove('active');
@@ -893,69 +871,196 @@
         function renderMasonryView(events) {
             const grid = document.getElementById('masonry-grid');
             const columns = grid.querySelectorAll('.masonry-column');
-            
+
             // Clear columns
             columns.forEach(col => col.innerHTML = '');
 
-            // Distribute cards across columns
-            events.forEach((event, index) => {
-                const columnIndex = index % columns.length;
-                const card = createEventCard(event);
-                columns[columnIndex].appendChild(card);
+            // Group events
+            const groupedEvents = groupSimilarEvents(events);
+
+            // Sort grouped events by time (newest first)
+            groupedEvents.sort((a, b) => {
+                const timeA = a.latest_time ? new Date(a.latest_time) : new Date();
+                const timeB = b.latest_time ? new Date(b.latest_time) : new Date();
+                return timeB - timeA;
+            });
+
+            // Distribute cards to shortest column
+            groupedEvents.forEach((group, index) => {
+                // Find shortest column
+                let shortestColumn = columns[0];
+                let minHeight = shortestColumn.offsetHeight;
+
+                columns.forEach(col => {
+                    if (col.offsetHeight < minHeight) {
+                        shortestColumn = col;
+                        minHeight = col.offsetHeight;
+                    }
+                });
+
+                const card = createEventCard(group);
+                shortestColumn.appendChild(card);
             });
         }
 
-        function createEventCard(event) {
+        function groupSimilarEvents(events) {
+            if (!events || events.length === 0) return [];
+
+            // Sort by time descending first to ensure we group correctly
+            const sortedEvents = [...events].sort((a, b) => {
+                const timeA = a.event_time ? new Date(a.event_time) : new Date(0);
+                const timeB = b.event_time ? new Date(b.event_time) : new Date(0);
+                return timeB - timeA;
+            });
+
+            const groups = [];
+            const TIME_WINDOW_MS = 60 * 1000; // 1 minute grouping window
+
+            if (sortedEvents.length === 0) return [];
+
+            let currentGroup = {
+                ...sortedEvents[0],
+                count: 1,
+                events: [sortedEvents[0]],
+                latest_time: sortedEvents[0].event_time,
+                earliest_time: sortedEvents[0].event_time
+            };
+
+            for (let i = 1; i < sortedEvents.length; i++) {
+                const event = sortedEvents[i];
+                const prevEvent = sortedEvents[i - 1];
+
+                const eventName = event.event_name || event.name || 'Unknown';
+                const currentName = currentGroup.event_name || currentGroup.name || 'Unknown';
+
+                const timeDiff = new Date(currentGroup.earliest_time) - new Date(event.event_time); // Descending sort means current is newer
+
+                if (eventName === currentName && timeDiff <= TIME_WINDOW_MS) {
+                    // Add to group
+                    currentGroup.count++;
+                    currentGroup.events.push(event);
+                    currentGroup.earliest_time = event.event_time; // Update earliest time as we go back in time
+                } else {
+                    // Push current group and start new one
+                    groups.push(currentGroup);
+                    currentGroup = {
+                        ...event,
+                        count: 1,
+                        events: [event],
+                        latest_time: event.event_time,
+                        earliest_time: event.event_time
+                    };
+                }
+            }
+            groups.push(currentGroup);
+            return groups;
+        }
+
+        function createEventCard(group) {
             const card = document.createElement('div');
             card.className = 'event-card';
-            card.onclick = () => showEventDetail(event.id || event.event_id);
 
-            const timestamp = event.event_time ? 
-                new Date(event.event_time).toLocaleString('en-US', { 
-                    month: 'short', 
-                    day: 'numeric', 
-                    hour: '2-digit', 
-                    minute: '2-digit' 
-                }) : '-';
+            // If single event, use its ID. If group, use first event's ID (or handle group click)
+            const eventId = group.event_id || group.id;
+            card.onclick = () => showEventDetail(eventId);
 
-            const hasError = event.error_code;
+            // Add color border based on event type
+            const eventName = group.event_name || group.name || 'Unknown Event';
+            const color = getEventColor(eventName);
+            card.style.borderTop = `4px solid ${color}`;
+
+            let timestamp = '-';
+            if (group.latest_time) {
+                const date = new Date(group.latest_time);
+                timestamp = date.toLocaleString('en-US', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                });
+            }
+
+            const hasError = group.error_code;
             const tags = [];
-            if (event.region) tags.push(event.region);
-            if (hasError) tags.push(`Error: ${event.error_code}`);
+            if (group.region) tags.push(group.region);
+            if (hasError) tags.push(`Error: ${group.error_code}`);
+
+            // Group specific UI
+            const isGroup = group.count > 1;
+            if (isGroup) {
+                tags.unshift(`x${group.count}`);
+                // Stacked visual effect
+                card.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1), 0 8px 0 -4px rgba(255,255,255,0.8), 0 8px 2px -4px rgba(0,0,0,0.1)';
+                card.style.marginBottom = '8px';
+            }
+
+            // Format request parameters for display if available
+            let paramsHtml = '';
+            if (group.requestParameters && !isGroup) { // Hide params in group summary to save space
+                try {
+                    // It might be a string or object
+                    const params = typeof group.requestParameters === 'string' ?
+                        JSON.parse(group.requestParameters) : group.requestParameters;
+                    const jsonStr = JSON.stringify(params, null, 2);
+                    // Truncate if too long
+                    const displayStr = jsonStr.length > 200 ? jsonStr.substring(0, 200) + '...' : jsonStr;
+                    paramsHtml = `<div class="event-params" style="margin-top: 8px; font-family: monospace; font-size: 0.85em; background: #f8fafc; padding: 5px; border-radius: 4px; overflow: hidden; color: #4a5568;">${displayStr}</div>`;
+                } catch (e) {
+                    // Ignore parsing errors
+                }
+            }
 
             card.innerHTML = `
                 <div class="event-card-header">
-                    <div class="event-card-title">${event.event_name || event.name || 'Unknown Event'}</div>
-                    <div class="event-card-time">${timestamp}</div>
+                    <div class="event-card-title">
+                        ${eventName}
+                        ${isGroup ? `<span style="font-size: 0.8em; color: #718096; font-weight: normal;">(Last: ${timestamp})</span>` : ''}
+                    </div>
+                    ${!isGroup ? `<div class="event-card-time">${timestamp}</div>` : ''}
                 </div>
                 <div class="event-card-body">
-                    ${event.user_identity || event.name ? `
+                    ${group.user_identity || group.name ? `
                         <div class="event-card-detail">
-                            <span class="event-card-label">👤 Name:</span>
-                            <span class="event-card-value">${event.user_identity || event.name}</span>
+                            <span class="event-card-label">👤 User:</span>
+                            <span class="event-card-value">${group.user_identity || group.name}</span>
                         </div>
                     ` : ''}
-                    ${event.source_ip_address || event.amount !== undefined ? `
+                    ${group.source_ip_address || group.amount !== undefined ? `
                         <div class="event-card-detail">
-                            <span class="event-card-label">${event.amount !== undefined ? '💰 Amount:' : '🌐 IP:'}</span>
-                            <span class="event-card-value">${event.amount !== undefined ? event.amount : event.source_ip_address}</span>
+                            <span class="event-card-label">${group.amount !== undefined ? '💰 Amount:' : '🌐 IP:'}</span>
+                            <span class="event-card-value">${group.amount !== undefined ? group.amount : group.source_ip_address}</span>
                         </div>
                     ` : ''}
-                    ${event.region ? `
-                        <div class="event-card-detail">
-                            <span class="event-card-label">📍 Region:</span>
-                            <span class="event-card-value">${event.region}</span>
+                    ${paramsHtml}
+                    ${group.userAgent && !isGroup ? `
+                        <div class="event-card-detail" style="margin-top: 8px; font-size: 0.8em; color: #888;">
+                            <span class="event-card-label">🖥️ UA:</span>
+                            <div class="event-card-value" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;">${group.userAgent}</div>
                         </div>
                     ` : ''}
                 </div>
                 ${tags.length > 0 ? `
                     <div class="event-card-footer">
-                        ${tags.map(tag => `<span class="event-card-tag">${tag}</span>`).join('')}
+                        ${tags.map(tag => {
+                // Highlight count tag
+                if (tag.startsWith('x')) {
+                    return `<span class="event-card-tag" style="background: ${color}; color: white; font-weight: bold;">${tag}</span>`;
+                }
+                return `<span class="event-card-tag">${tag}</span>`;
+            }).join('')}
                     </div>
                 ` : ''}
             `;
 
             return card;
+        }
+
+        function getEventColor(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = str.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
+            return '#' + '00000'.substring(0, 6 - c.length) + c;
         }
 
         // Responsive masonry
@@ -968,7 +1073,7 @@
 
 
         // Initialize on page load
-        document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('DOMContentLoaded', function () {
             loadStats();
             loadEvents();
         });
@@ -987,15 +1092,15 @@
                 document.getElementById('snapshot-count').textContent = stats.snapshot_count || 0;
                 // Events/min will be updated by SSE stream
                 document.getElementById('events-per-min').textContent = '0';
-                
+
                 if (stats.last_updated) {
                     const date = new Date(stats.last_updated);
-                    document.getElementById('last-updated').textContent = 
-                        date.toLocaleString('en-US', { 
-                            month: 'short', 
-                            day: 'numeric', 
-                            hour: '2-digit', 
-                            minute: '2-digit' 
+                    document.getElementById('last-updated').textContent =
+                        date.toLocaleString('en-US', {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
                         });
                 }
             } catch (error) {
@@ -1006,10 +1111,12 @@
         async function loadEvents() {
             const loading = document.getElementById('loading');
             const tableContainer = document.getElementById('table-container');
+            const masonryContainer = document.getElementById('masonry-container');
             const errorMessage = document.getElementById('error-message');
-            
+
             loading.style.display = 'block';
             tableContainer.style.display = 'none';
+            masonryContainer.style.display = 'none';
             errorMessage.style.display = 'none';
 
             try {
@@ -1032,10 +1139,11 @@
                 updatePagination();
 
                 loading.style.display = 'none';
-                tableContainer.style.display = 'block';
 
-                // Update masonry view if active
-                if (currentView === 'masonry') {
+                if (currentView === 'table') {
+                    tableContainer.style.display = 'block';
+                } else if (currentView === 'masonry') {
+                    masonryContainer.style.display = 'block';
                     renderMasonryView(cachedEvents);
                 }
             } catch (error) {
@@ -1061,8 +1169,8 @@
                 row.onclick = () => showEventDetail(event.event_id || event.id);
 
                 const timestamp = event.event_time ? new Date(event.event_time).toLocaleString() : '-';
-                const errorBadge = event.error_code ? 
-                    `<span class="badge badge-error">${event.error_code}</span>` : 
+                const errorBadge = event.error_code ?
+                    `<span class="badge badge-error">${event.error_code}</span>` :
                     '<span class="badge badge-success">Success</span>';
 
                 // Handle both CloudTrail schema and test data schema
@@ -1092,14 +1200,14 @@
 
             const paginationText = `Showing ${start}-${end} of ${totalEvents} events`;
             const pageText = `Page ${currentPage + 1} of ${totalPages}`;
-            
+
             document.getElementById('pagination-info').textContent = paginationText;
             document.getElementById('page-info').textContent = pageText;
             document.getElementById('masonry-page-info').textContent = pageText;
-            
+
             const hasPrev = currentPage > 0;
             const hasNext = (currentPage + 1) * pageSize < totalEvents;
-            
+
             document.getElementById('prev-btn').disabled = !hasPrev;
             document.getElementById('next-btn').disabled = !hasNext;
             document.getElementById('masonry-prev-btn').disabled = !hasPrev;
@@ -1122,7 +1230,7 @@
 
         function applyFilters() {
             currentFilters = {};
-            
+
             const eventName = document.getElementById('filter-event-name').value.trim();
             const user = document.getElementById('filter-user').value.trim();
             const ip = document.getElementById('filter-ip').value.trim();
@@ -1166,11 +1274,10 @@
                     Object.entries(event).map(([key, value]) => `
                         <div class="detail-row">
                             <div class="detail-label">${key}</div>
-                            <div class="detail-value">${
-                                value !== null && value !== undefined ? 
-                                (typeof value === 'object' ? JSON.stringify(value, null, 2) : value) : 
-                                '-'
-                            }</div>
+                            <div class="detail-value">${value !== null && value !== undefined ?
+                            (typeof value === 'object' ? JSON.stringify(value, null, 2) : value) :
+                            '-'
+                        }</div>
                         </div>
                     `).join('') +
                     '</div>';
@@ -1187,7 +1294,7 @@
         }
 
         // Close modal when clicking outside
-        document.getElementById('event-modal').addEventListener('click', function(e) {
+        document.getElementById('event-modal').addEventListener('click', function (e) {
             if (e.target === this) {
                 closeModal();
             }
@@ -1207,7 +1314,7 @@
             const statusText = document.getElementById('connectionStatus');
             const liveDot = indicator.querySelector('.live-dot');
 
-            eventSource.onopen = function() {
+            eventSource.onopen = function () {
                 indicator.classList.remove('disconnected');
                 indicator.classList.add('connected');
                 statusText.textContent = 'Live';
@@ -1215,13 +1322,13 @@
                 console.log('SSE connection established');
             };
 
-            eventSource.onerror = function() {
+            eventSource.onerror = function () {
                 indicator.classList.remove('connected');
                 indicator.classList.add('disconnected');
                 statusText.textContent = 'Disconnected';
                 liveDot.classList.remove('pulse');
                 console.error('SSE connection error');
-                
+
                 // Try to reconnect after 5 seconds
                 setTimeout(() => {
                     console.log('Attempting to reconnect...');
@@ -1229,10 +1336,10 @@
                 }, 5000);
             };
 
-            eventSource.onmessage = function(event) {
+            eventSource.onmessage = function (event) {
                 try {
                     const data = JSON.parse(event.data);
-                    
+
                     if (data.type === 'connected') {
                         console.log(data.message);
                     } else if (data.type === 'metrics' && data.data) {
@@ -1251,15 +1358,12 @@
             if (metricsData.total_events !== undefined) {
                 document.getElementById('total-events').textContent = metricsData.total_events;
             }
-            
+
             // Update events per minute gauge
-            if (metricsData.new_events !== undefined) {
+            if (metricsData.events_per_minute !== undefined) {
                 const eventsPerMinElement = document.getElementById('events-per-min');
                 if (eventsPerMinElement) {
-                    // Calculate events per minute from new events in last update
-                    // SSE checks every 2 seconds, so multiply by 30 to get per minute rate
-                    const eventsPerMin = Math.round(metricsData.new_events * 30);
-                    eventsPerMinElement.textContent = eventsPerMin;
+                    eventsPerMinElement.textContent = metricsData.events_per_minute;
                 }
             }
         }
@@ -1288,10 +1392,10 @@
             camera.lookAt(0, 0, 0);
 
             // Renderer
-            renderer = new THREE.WebGLRenderer({ 
-                canvas: container, 
+            renderer = new THREE.WebGLRenderer({
+                canvas: container,
                 antialias: true,
-                alpha: true 
+                alpha: true
             });
             renderer.setSize(width, height);
             renderer.setClearColor(0x000428, 1);
@@ -1348,7 +1452,7 @@
 
         function setupControls() {
             const canvas = document.getElementById('fsn-canvas');
-            
+
             canvas.addEventListener('mousedown', (e) => {
                 isDragging = true;
                 previousMousePosition = { x: e.clientX, y: e.clientY };
@@ -1393,7 +1497,7 @@
             const x = radius * Math.sin(cameraRotation.y) * Math.cos(cameraRotation.x);
             const y = radius * Math.sin(cameraRotation.x) + 30;
             const z = radius * Math.cos(cameraRotation.y) * Math.cos(cameraRotation.x);
-            
+
             camera.position.set(x + cameraPan.x, y + cameraPan.y, z);
             camera.lookAt(cameraPan.x, 0, 0);
         }
@@ -1464,7 +1568,7 @@
 
             const eventNames = Object.entries(summary.event_names);
             const maxCount = Math.max(...eventNames.map(([_, count]) => count));
-            
+
             const gridSize = Math.ceil(Math.sqrt(eventNames.length));
             const spacing = 8;
             const startX = -(gridSize * spacing) / 2;
@@ -1476,7 +1580,7 @@
 
                 // Height based on event count
                 const height = Math.max(2, (count / maxCount) * 20);
-                
+
                 // Create block
                 const geometry = new THREE.BoxGeometry(5, height, 5);
                 const material = new THREE.MeshPhongMaterial({
@@ -1552,9 +1656,9 @@
 
         // Update FSN blocks when summary loads
         const originalLoadStats = loadStats;
-        loadStats = async function() {
+        loadStats = async function () {
             await originalLoadStats();
-            
+
             try {
                 const response = await fetch('/api/summary');
                 const summary = await response.json();
@@ -1573,7 +1677,7 @@
         }
 
         function updateLastUpdateTime() {
-            document.getElementById('lastUpdate').textContent = 
+            document.getElementById('lastUpdate').textContent =
                 `Updated: ${new Date().toLocaleTimeString()}`;
         }
 
@@ -1589,4 +1693,5 @@
         });
     </script>
 </body>
+
 </html>
