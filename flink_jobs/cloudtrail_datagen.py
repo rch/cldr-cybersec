@@ -69,7 +69,8 @@ class CloudTrailDataGen:
             "eventType": "AwsApiCall",
             "managementEvent": True,
             "recipientAccountId": str(random.randint(100000000000, 999999999999)),
-            "eventCategory": "Management"
+            "eventCategory": "Management",
+            "metric_history": [random.randint(10, 100) for _ in range(15)] if random.random() > 0.7 else None
         }
         return json.dumps(event)
 

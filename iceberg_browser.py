@@ -458,6 +458,136 @@ def stream_updates():
     )
 
 
+
+@app.route("/polaris")
+def polaris_page():
+    """Polaris Insights page"""
+    return render_template("polaris.html")
+
+
+@app.route("/api/catalog-info")
+def get_catalog_info():
+    """Get catalog configuration and status"""
+    try:
+        catalog = get_catalog()
+        
+        # Get structure
+        structure = {}
+        namespaces = catalog.list_namespaces()
+        total_tables = 0
+        
+        for namespace in namespaces:
+            namespace_str = ".".join(namespace)
+            tables = catalog.list_tables(namespace_str)
+            table_names = [t[1] if isinstance(t, tuple) else str(t) for t in tables]
+            structure[namespace_str] = table_names
+            total_tables += len(tables)
+            
+        # Check health (internal probe to localhost:8182)
+        import urllib.request
+        health_status = "DOWN"
+        try:
+            with urllib.request.urlopen("http://localhost:8182/q/health", timeout=2) as response:
+                if response.getcode() == 200:
+                    health_data = json.loads(response.read())
+                    health_status = health_data.get("status", "UNKNOWN")
+        except Exception as e:
+            print(f"Health check failed: {e}")
+            
+        return jsonify({
+            "config": {
+                "uri": CATALOG_CONFIG["uri"],
+                "warehouse": CATALOG_CONFIG["warehouse"],
+                "scope": CATALOG_CONFIG["scope"],
+                "s3_endpoint": CATALOG_CONFIG["s3.endpoint"],
+                "properties": catalog.properties
+            },
+            "status": health_status,
+            "structure": structure,
+            "total_tables": total_tables
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/catalog/namespace/<path:namespace>")
+def get_namespace_details(namespace):
+    """Get namespace properties"""
+    try:
+        catalog = get_catalog()
+        # Create namespace tuple/string
+        ns_parts = namespace.split(".")
+        if len(ns_parts) == 1:
+            ns_idf = ns_parts[0]
+        else:
+            ns_idf = tuple(ns_parts)
+            
+        props = catalog.load_namespace_properties(ns_idf)
+        return jsonify({"namespace": namespace, "properties": props})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/catalog/table/<path:table_name>")
+def get_table_details(table_name):
+    """Get detailed table information"""
+    try:
+        catalog = get_catalog()
+        table = catalog.load_table(table_name)
+        metadata = table.metadata
+        
+        # Schema
+        schema_fields = []
+        for field in table.schema().fields:
+            schema_fields.append({
+                "id": field.field_id,
+                "name": field.name,
+                "type": str(field.field_type),
+                "required": field.required,
+                "doc": field.doc
+            })
+            
+        # Partition Spec
+        partitions = []
+        for field in table.spec().fields:
+            partitions.append({
+                "field_id": field.field_id,
+                "source_id": field.source_id,
+                "name": field.name,
+                "transform": str(field.transform)
+            })
+            
+        # Snapshots (Limit to last 50 for performance)
+        snapshots = []
+        for s in metadata.snapshots[-50:]:
+            snapshots.append({
+                "snapshot_id": s.snapshot_id,
+                "timestamp_ms": s.timestamp_ms,
+                "timestamp": datetime.fromtimestamp(s.timestamp_ms / 1000).isoformat(),
+                "manifest_list": s.manifest_list,
+                "summary": dict(s.summary)
+            })
+            
+        # Reverse snapshots to show newest first
+        snapshots.reverse()
+            
+        return jsonify({
+            "identifier": str(table_name),
+            "properties": metadata.properties,
+            "schema": schema_fields,
+            "partitions": partitions,
+            "snapshots": snapshots,
+            "location": metadata.location,
+            "current_snapshot_id": metadata.current_snapshot_id,
+            "format_version": metadata.format_version
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+
 if __name__ == "__main__":
     # Create templates directory if it doesn't exist
     os.makedirs("templates", exist_ok=True)

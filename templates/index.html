@@ -6,6 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Iceberg Browser - CloudTrail Events</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -66,6 +67,31 @@
             padding: 5px 10px;
             border-radius: 3px;
             cursor: pointer;
+        }
+
+        .service-links {
+            margin-top: 15px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .service-link {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            text-decoration: none;
+            padding: 8px 15px;
+            border-radius: 5px;
+            font-size: 0.9em;
+            font-weight: 500;
+            transition: background 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .service-link:hover {
+            background: rgba(255, 255, 255, 0.3);
         }
 
         .live-indicator {
@@ -692,6 +718,12 @@
         <div class="container">
             <h1>🔍 Iceberg Browser</h1>
             <p>CloudTrail Events Explorer</p>
+            <div class="service-links">
+                <a href="http://localhost:8081" target="_blank" class="service-link" title="Flink Dashboard">🌊
+                    Flink</a>
+                <a href="http://localhost:9011" target="_blank" class="service-link" title="MinIO Console">🗄️ MinIO</a>
+                <a href="/polaris" class="service-link" title="Polaris Insights">🧭 Polaris</a>
+            </div>
             <div class="refresh-controls">
                 <div class="live-indicator" id="liveIndicator">
                     <div class="live-dot"></div>
@@ -903,6 +935,90 @@
             });
         }
 
+        // ========================================
+        // 3D Chart Visualization
+        // ========================================
+        class CardVisualizer {
+            constructor() {
+                this.renderers = [];
+            }
+
+            createMiniChart(container, data) {
+                if (!container || !data || data.length === 0) return;
+
+                const width = container.clientWidth;
+                const height = 150;
+
+                // Scene setup
+                const scene = new THREE.Scene();
+
+                const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+                camera.position.set(10, 10, 20);
+                camera.lookAt(5, 0, 5);
+
+                const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+                renderer.setSize(width, height);
+                container.appendChild(renderer.domElement);
+                this.renderers.push(renderer);
+
+                // Lighting
+                const ambientLight = new THREE.AmbientLight(0x404040);
+                scene.add(ambientLight);
+
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(5, 10, 7);
+                scene.add(directionalLight);
+
+                // Create bars using D3 scales and Three.js meshes
+                const xScale = d3.scaleBand()
+                    .domain(d3.range(data.length))
+                    .range([0, 10])
+                    .padding(0.2);
+
+                const yScale = d3.scaleLinear()
+                    .domain([0, 100]) // Assuming data is 0-100
+                    .range([0, 8]);
+
+                const geometry = new THREE.BoxGeometry(xScale.bandwidth(), 1, 1);
+
+                // Color scale
+                const colorScale = d3.scaleSequential(d3.interpolateViridis)
+                    .domain([0, 100]);
+
+                data.forEach((value, index) => {
+                    const color = new THREE.Color(colorScale(value));
+                    const material = new THREE.MeshPhongMaterial({ color: color });
+                    const bar = new THREE.Mesh(geometry, material);
+
+                    const barHeight = yScale(value);
+                    bar.scale.y = Math.max(0.1, barHeight);
+                    bar.position.x = xScale(index);
+                    bar.position.y = barHeight / 2;
+                    bar.position.z = 0;
+
+                    scene.add(bar);
+                });
+
+                // ground plane (grid)
+                const gridHelper = new THREE.GridHelper(20, 10, 0xcccccc, 0xeeeeee);
+                gridHelper.position.set(5, 0, 5);
+                scene.add(gridHelper);
+
+                // Render function
+                const animate = () => {
+                    if (container.closest('body')) { // Stop animating if removed from DOM
+                        requestAnimationFrame(animate);
+                        renderer.render(scene, camera);
+                    } else {
+                        renderer.dispose();
+                    }
+                };
+                animate();
+            }
+        }
+
+        const cardVisualizer = new CardVisualizer();
+
         function groupSimilarEvents(events) {
             if (!events || events.length === 0) return [];
 
@@ -993,9 +1109,14 @@
                 card.style.marginBottom = '8px';
             }
 
+            // Check for metrics for visualization
+            const metricData = group.metric_history || (group.events && group.events[0].metric_history);
+            const vizId = `viz-${eventId}-${Math.random().toString(36).substr(2, 9)}`;
+
             // Format request parameters for display if available
             let paramsHtml = '';
-            if (group.requestParameters && !isGroup) { // Hide params in group summary to save space
+            // Hide params if showing visualization to avoid clutter
+            if (group.requestParameters && !isGroup && !metricData) {
                 try {
                     // It might be a string or object
                     const params = typeof group.requestParameters === 'string' ?
@@ -1018,6 +1139,7 @@
                     ${!isGroup ? `<div class="event-card-time">${timestamp}</div>` : ''}
                 </div>
                 <div class="event-card-body">
+                    ${metricData ? `<div id="${vizId}" class="card-viz" style="width: 100%; height: 150px; margin-bottom: 10px;"></div>` : ''}
                     ${group.user_identity || group.name ? `
                         <div class="event-card-detail">
                             <span class="event-card-label">👤 User:</span>
@@ -1050,6 +1172,16 @@
                     </div>
                 ` : ''}
             `;
+
+            // Initialize chart after append
+            if (metricData) {
+                setTimeout(() => {
+                    const vizContainer = card.querySelector(`#${vizId}`);
+                    if (vizContainer) {
+                        cardVisualizer.createMiniChart(vizContainer, metricData);
+                    }
+                }, 0);
+            }
 
             return card;
         }
