@@ -1,8 +1,9 @@
 { pkgs, lib, config, inputs, ... }:
 
 {
-  # Override MinIO data directory to use RAID storage
-  env.MINIO_DATA_DIR = lib.mkForce "/opt/minio/cybersec";
+  # MinIO data directory - uses DEVENV_STATE by default
+  # Override in .cybersec/config.toml or set MINIO_DATA_DIR env var
+  # env.MINIO_DATA_DIR = lib.mkForce "/opt/minio/cybersec";  # Example override
 
   # MinIO/S3 credentials for Metaflow (must override ~/.aws/credentials)
   env.AWS_ACCESS_KEY_ID = "minioadmin";
@@ -36,8 +37,8 @@
   services.minio = {
     enable = true;
     buckets = ["cybersec" "cybersec-hx"];
-    listenAddress = "127.0.0.1:9010";
-    consoleAddress = "127.0.0.1:9011";
+    listenAddress = "0.0.0.0:9010";
+    consoleAddress = "0.0.0.0:9011";
   };
 
   services.postgres = {
@@ -101,6 +102,11 @@
       install.enable = true;
     };
   };
+
+  # Ensure node_modules exists before devenv's npm integration tries to write checksum
+  enterShell = ''
+    mkdir -p local-ui/node_modules
+  '';
   
   languages.typescript = {
     enable=true;
@@ -162,31 +168,48 @@
     
     "restart:clean".exec = ''
       source scripts/polaris_bootstrap_helper.sh
-      
+
       echo "🔥 Aggressively stopping all processes..."
-      
+
       # Kill process-compose and all related processes
       pkill -9 -f "process-compose" 2>/dev/null || true
       pkill -9 -f "iceberg-browser" 2>/dev/null || true
       pkill -9 -f "cloudtrail" 2>/dev/null || true
-      pkill -9 -f "devenv" 2>/dev/null || true
-      
-      # Kill by port (Polaris, PostgreSQL, MinIO, Flink, Iceberg Browser)
-      lsof -ti:8181,8182,5438,9010,9011,8081,5050 2>/dev/null | xargs kill -9 2>/dev/null || true
-      
+      pkill -9 -f "devenv-tasks" 2>/dev/null || true
+
+      # Kill OTEL collector and Prometheus explicitly
+      pkill -9 -f "otelcol" 2>/dev/null || true
+      pkill -9 -f "prometheus" 2>/dev/null || true
+
+      # Kill NiFi processes
+      pkill -9 -f "org.apache.nifi" 2>/dev/null || true
+
+      # Kill by port - ALL services:
+      # 8181/8182: Polaris REST/Admin
+      # 5438: PostgreSQL
+      # 9010/9011: MinIO API/Console
+      # 8081: Flink
+      # 5050: Iceberg Browser
+      # 8450: NiFi
+      # 4317/4318: OTEL gRPC/HTTP
+      # 8888/8889: OTEL internal/Prometheus metrics
+      # 9090: Prometheus
+      lsof -ti:8181,8182,5438,9010,9011,8081,5050,8450,4317,4318,8888,8889,9090 2>/dev/null | xargs kill -9 2>/dev/null || true
+
       # Kill remaining service processes
-      pgrep -fl "minio|postgres|flink|taskmanager|jobmanager|quarkus|polaris" | awk '{print $1}' | xargs kill -9 2>/dev/null || true
-      
+      pgrep -fl "minio|postgres|flink|taskmanager|jobmanager|quarkus|polaris|otelcol|nifi" | awk '{print $1}' | xargs kill -9 2>/dev/null || true
+
       # Verify critical ports are released
       log_info "Verifying ports are released..."
-      for port in 8181 8182 5438; do
+      for port in 8181 8182 5438 8888 8889 9090; do
         wait_for_port_release $port 5 2 || log_warn "Port $port may still be in use"
       done
-      
-      # Clean up socket and temp files
-      rm -f /var/folders/sx/g8_f354d6wncq7l6x9nqq08r0000gn/T/devenv-*/pc.sock 2>/dev/null || true
+
+      # Clean up socket and temp files (portable path using TMPDIR)
+      rm -f "$TMPDIR"/devenv-*/pc.sock 2>/dev/null || true
+      rm -f /tmp/devenv-*/pc.sock 2>/dev/null || true
       rm -f /tmp/cloudtrail.log /tmp/cloudtrail.pid /tmp/polaris-init.log /tmp/polaris-catalog-init.log 2>/dev/null || true
-      
+
       echo "✅ All processes killed and temp files cleaned"
       
       # Remove PostgreSQL data to trigger fresh initialization
@@ -202,9 +225,44 @@
       echo "ℹ️  Note: Polaris catalog will be created automatically on startup"
       sleep 2
       
+      # Check if bootstrap is needed (missing connectors, etc.)
+      echo "🔍 Checking bootstrap status..."
+      ASSESS_OUTPUT=$(uv run python -c "
+import asyncio
+from cybersec.bootstrap.service import BootstrapService
+async def check():
+    svc = BootstrapService()
+    result = await svc.assess()
+    print('NEEDS_BOOTSTRAP=' + ('1' if result['needs_bootstrap'] else '0'))
+    print('ICEBERG_CONNECTOR=' + ('1' if result.get('iceberg_connector_installed') else '0'))
+    print('FLINK_INSTALLED=' + ('1' if result['flink_installed'] else '0'))
+asyncio.run(check())
+" 2>/dev/null || echo "NEEDS_BOOTSTRAP=1")
+
+      if echo "$ASSESS_OUTPUT" | grep -q "NEEDS_BOOTSTRAP=1"; then
+        log_warn "Bootstrap required - running bootstrap..."
+        if echo "$ASSESS_OUTPUT" | grep -q "ICEBERG_CONNECTOR=0"; then
+          log_info "Missing Iceberg connector - will download"
+        fi
+        # Run bootstrap (non-interactive - will use defaults/skip prompts)
+        uv run python -c "
+import asyncio
+from cybersec.bootstrap.service import BootstrapService
+async def run():
+    svc = BootstrapService()
+    async for event in svc.run(skip_flink=False, skip_nifi=False):
+        if event.message:
+            print(f'  {event.message}')
+asyncio.run(run())
+" 2>&1 | while read line; do echo "  $line"; done
+        echo "✅ Bootstrap completed"
+      else
+        echo "✅ Bootstrap already complete"
+      fi
+
       echo "🚀 Starting fresh stack with devenv up -d..."
       devenv up -d &
-      
+
       # Wait for services and verify complete E2E pipeline
       sleep 10
       log_info "Waiting for services to start and verifying E2E pipeline..."
@@ -222,9 +280,154 @@
     '';
   };
 
+
+  # ============================================================================
+  # OpenTelemetry Collector - Receives telemetry from all Gaius components
+  # ============================================================================
+  services.opentelemetry-collector = {
+    enable = true;
+    package = pkgs.opentelemetry-collector-contrib;  # Use contrib for prometheus exporter
+    settings = {
+      receivers = {
+        otlp = {
+          protocols = {
+            grpc.endpoint = "0.0.0.0:4317";
+            http.endpoint = "0.0.0.0:4318";
+          };
+        };
+      };
+      processors = {
+        batch = {
+          timeout = "5s";
+          send_batch_size = 1000;
+        };
+      };
+      exporters = {
+        prometheus = {
+          endpoint = "0.0.0.0:8889";
+          namespace = "cybersec";
+          resource_to_telemetry_conversion.enabled = true;
+        };
+        debug.verbosity = "basic";
+        # Forward traces to NiFi ListenOTLP for flow visualization
+        # NiFi receives OTel data on port 4319 via ListenOTLP processor
+        otlphttp = {
+          endpoint = "http://localhost:4319";
+          tls.insecure = true;
+        };
+      };
+      service = {
+        pipelines = {
+          traces = {
+            receivers = ["otlp"];
+            processors = ["batch"];
+            exporters = ["debug" "otlphttp"];  # Forward to NiFi
+          };
+          metrics = {
+            receivers = ["otlp"];
+            processors = ["batch"];
+            exporters = ["prometheus"];
+          };
+        };
+      };
+    };
+  };
+
+  # ============================================================================
+  # Prometheus - Metrics storage and querying
+  # ============================================================================
+  services.prometheus = {
+    enable = true;
+    port = 9090;
+    # Note: Prometheus binds to 0.0.0.0 by default when port is specified
+    storage.retentionTime = "15d";
+    scrapeConfigs = [
+      {
+        job_name = "otel-collector";
+        scrape_interval = "1s";  # 1s scraping for real-time ObservePanel
+        static_configs = [{
+          targets = ["localhost:8889"];
+        }];
+      }
+    ];
+  };
+
+
   # Flink local cluster for development
   # Web UI: http://localhost:8081
   processes = {
+    # Bootstrap check - runs on startup to verify environment
+    bootstrap-check = {
+      exec = ''
+        echo "======================================================"
+        echo "  Cybersec Bootstrap Check"
+        echo "======================================================"
+
+        # Quick assessment using the bootstrap CLI
+        if command -v python &> /dev/null; then
+          python -c "
+import sys
+sys.path.insert(0, '.')
+try:
+    import asyncio
+    from cybersec.bootstrap import BootstrapService
+    service = BootstrapService()
+    result = asyncio.run(service.assess())
+
+    print()
+    if result.get('config_exists'):
+        print('  Config:     OK (.cybersec/config.toml exists)')
+    else:
+        print('  Config:     Missing (.cybersec/config.toml)')
+
+    flink = result.get('flink_installed', False)
+    flink_home = result.get('flink_home')
+    if flink and flink_home:
+        print(f'  Flink:      OK ({flink_home})')
+    else:
+        print('  Flink:      Not configured')
+
+    tools = result.get('tools', {})
+    missing = [t for t, found in tools.items() if not found]
+    if missing:
+        print(f'  Tools:      Missing: {missing}')
+    else:
+        print('  Tools:      OK (all required tools found)')
+
+    print()
+    if result.get('ready'):
+        print('  Status: Environment is READY')
+    elif result.get('needs_bootstrap'):
+        print('  Status: Bootstrap REQUIRED')
+        print()
+        print('  Next steps:')
+        print('    1. Open http://localhost:5050/settings in your browser')
+        print('    2. Or run: cybersec bootstrap run')
+        print('    3. Or run: python -m cybersec.cli.main bootstrap run')
+    print()
+except ImportError as e:
+    print(f'  Bootstrap module not installed: {e}')
+    print('  Run: uv pip install -e .')
+    print()
+except Exception as e:
+    print(f'  Error during assessment: {e}')
+    print()
+"
+        else
+          echo "  Python not found - skipping bootstrap check"
+        fi
+
+        echo "======================================================"
+        # One-shot process - exits after check
+        exit 0
+      '';
+      process-compose = {
+        availability = {
+          restart = "no";
+        };
+      };
+    };
+
     flink-jobmanager = {
       exec = ''
         # Use custom-built Apache Flink 1.20.1 (for Iceberg compatibility)
@@ -239,6 +442,7 @@
         # Run JobManager in foreground mode
         exec "$FLINK_HOME/bin/jobmanager.sh" start-foreground \
           -D jobmanager.rpc.address=localhost \
+          -D rest.bind-address=0.0.0.0 \
           -D rest.port=8081 \
           -D state.checkpoints.dir=file://$FLINK_STATE_DIR/checkpoints \
           -D state.savepoints.dir=file://$FLINK_STATE_DIR/savepoints
@@ -468,7 +672,8 @@
         export POLARIS_PERSISTENCE_TYPE=relational-jdbc
         
         # AWS SDK v2 properties for S3 endpoint override and Polaris configuration
-        export JAVA_TOOL_OPTIONS="-Daws.endpointUrl=http://localhost:9010 -Daws.region=us-east-1 -Dquarkus.config.locations=$PWD/conf/application.properties"
+        # Bind to 0.0.0.0 for WARP/Cloudflare tunnel access
+        export JAVA_TOOL_OPTIONS="-Daws.endpointUrl=http://localhost:9010 -Daws.region=us-east-1 -Dquarkus.http.host=0.0.0.0 -Dquarkus.config.locations=$PWD/conf/application.properties"
         
         # Run Polaris server
         exec ./bin/server
@@ -546,6 +751,159 @@
           max_restarts = 3;
           backoff_seconds = 5;
         };
+      };
+    };
+
+    # ============================================================================
+    # Apache NiFi - Data Flow Visualization
+    # ============================================================================
+    #
+    # Visualizes data pipelines and receives OTEL traces from the collector.
+    # ListenOTLP processor receives traces on port 4319.
+    #
+    # Access: http://localhost:8450/nifi
+    # Note: First startup may take 1-2 minutes to initialize.
+
+    nifi = {
+      exec = ''
+        if [ "''${DISABLE_NIFI:-false}" == "true" ]; then
+          echo "NiFi disabled (DISABLE_NIFI=true)"
+          sleep infinity
+        fi
+
+        echo "======================================================"
+        echo "  APACHE NIFI - Data Flow Visualization"
+        echo "======================================================"
+        echo ""
+
+        # Use thirdparty binary distribution (NiFi 2.0.0)
+        NIFI_PACKAGE="$PWD/thirdparty/nifi/nifi-2.0.0"
+
+        if [ ! -d "$NIFI_PACKAGE" ]; then
+          echo "ERROR: NiFi not found at $NIFI_PACKAGE"
+          echo ""
+          echo "To install NiFi, run:"
+          echo "  ./scripts/setup_nifi_bin.sh 2.0.0"
+          echo ""
+          echo "Or use bootstrap:"
+          echo "  cybersec bootstrap run"
+          echo ""
+          # Exit gracefully - NiFi is optional
+          exit 0
+        fi
+
+        # NiFi 2.0 requires running from the package directory for proper JAR loading.
+        # NiFi reads config from $NIFI_HOME/conf/nifi.properties, so we modify the
+        # package config directly for HTTP-only dev mode.
+        NIFI_STATE="$DEVENV_STATE/nifi"
+
+        # Create state directories for NiFi data
+        mkdir -p "$NIFI_STATE"/{logs,run,database_repository,flowfile_repository,content_repository,provenance_repository,state,work,extensions}
+        mkdir -p "$NIFI_STATE/work/nar"
+        mkdir -p "$NIFI_STATE/state/local"
+        mkdir -p "$NIFI_STATE/status_repository"
+        mkdir -p "$NIFI_STATE/flow_archive"
+
+        # Initialize NiFi configuration on first run
+        # We modify the package's nifi.properties directly since NiFi reads from $NIFI_HOME/conf
+        NIFI_CONFIGURED_MARKER="$NIFI_STATE/.nifi-configured"
+        PROPS="$NIFI_PACKAGE/conf/nifi.properties"
+        STATE_XML="$NIFI_PACKAGE/conf/state-management.xml"
+
+        if [ ! -f "$NIFI_CONFIGURED_MARKER" ]; then
+          echo "Configuring NiFi for HTTP-only development mode..."
+
+          # Backup original config
+          cp "$PROPS" "$PROPS.original" 2>/dev/null || true
+          cp "$STATE_XML" "$STATE_XML.original" 2>/dev/null || true
+
+          # Web server - bind to all interfaces on port 8450 (HTTP only)
+          sed -i 's|^nifi.web.http.host=.*|nifi.web.http.host=0.0.0.0|' "$PROPS"
+          sed -i 's|^nifi.web.http.port=.*|nifi.web.http.port=8450|' "$PROPS"
+          # Clear HTTPS - NiFi requires HTTP OR HTTPS, not both
+          sed -i 's|^nifi.web.https.host=.*|nifi.web.https.host=|' "$PROPS"
+          sed -i 's|^nifi.web.https.port=.*|nifi.web.https.port=|' "$PROPS"
+
+          # Clear TLS/security properties for HTTP-only mode
+          sed -i 's|^nifi.security.keystore=.*|nifi.security.keystore=|' "$PROPS"
+          sed -i 's|^nifi.security.keystoreType=.*|nifi.security.keystoreType=|' "$PROPS"
+          sed -i 's|^nifi.security.keystorePasswd=.*|nifi.security.keystorePasswd=|' "$PROPS"
+          sed -i 's|^nifi.security.keyPasswd=.*|nifi.security.keyPasswd=|' "$PROPS"
+          sed -i 's|^nifi.security.truststore=.*|nifi.security.truststore=|' "$PROPS"
+          sed -i 's|^nifi.security.truststoreType=.*|nifi.security.truststoreType=|' "$PROPS"
+          sed -i 's|^nifi.security.truststorePasswd=.*|nifi.security.truststorePasswd=|' "$PROPS"
+
+          # Disable remote input secure mode
+          sed -i 's|^nifi.remote.input.secure=.*|nifi.remote.input.secure=false|' "$PROPS"
+
+          # Set sensitive properties key (required)
+          sed -i 's|^nifi.sensitive.props.key=.*|nifi.sensitive.props.key=cybersec-dev-key-12345|' "$PROPS"
+
+          # Configure paths to use state directory for data persistence
+          sed -i "s|^\(nifi.flow.configuration.file=\).*|\1$NIFI_STATE/flow.json.gz|" "$PROPS"
+          sed -i "s|^\(nifi.flow.configuration.json.file=\).*|\1$NIFI_STATE/flow.json.gz|" "$PROPS"
+          sed -i "s|^\(nifi.flow.configuration.archive.dir=\).*|\1$NIFI_STATE/flow_archive/|" "$PROPS"
+          sed -i "s|^\(nifi.database.directory=\).*|\1$NIFI_STATE/database_repository|" "$PROPS"
+          sed -i "s|^\(nifi.flowfile.repository.directory=\).*|\1$NIFI_STATE/flowfile_repository|" "$PROPS"
+          sed -i "s|^\(nifi.content.repository.directory.default=\).*|\1$NIFI_STATE/content_repository|" "$PROPS"
+          sed -i "s|^\(nifi.provenance.repository.directory.default=\).*|\1$NIFI_STATE/provenance_repository|" "$PROPS"
+          sed -i "s|^\(nifi.state.management.configuration.file=\).*|\1$STATE_XML|" "$PROPS"
+          sed -i "s|^\(nifi.nar.library.autoload.directory=\).*|\1$NIFI_STATE/extensions|" "$PROPS"
+          sed -i "s|^\(nifi.nar.working.directory=\).*|\1$NIFI_STATE/work/nar/|" "$PROPS"
+          sed -i "s|^\(nifi.documentation.working.directory=\).*|\1$NIFI_STATE/work/docs/components|" "$PROPS"
+          sed -i "s|^\(nifi.status.repository.questdb.persist.location=\).*|\1$NIFI_STATE/status_repository|" "$PROPS"
+
+          # Update state-management.xml with absolute path for local state
+          sed -i "s|<property name=\"Directory\">./state/local</property>|<property name=\"Directory\">$NIFI_STATE/state/local</property>|g" "$STATE_XML"
+
+          touch "$NIFI_CONFIGURED_MARKER"
+          echo "NiFi configured for development mode."
+        fi
+
+        echo ""
+        echo "Starting NiFi on port 8450..."
+        echo "  Web UI:      http://localhost:8450/nifi"
+        echo "  OTLP Port:   4319 (for ListenOTLP processor)"
+        echo "  Package:     $NIFI_PACKAGE"
+        echo "  Data:        $NIFI_STATE"
+        echo ""
+        echo "Note: First startup may take 1-2 minutes to initialize."
+        echo "      Check logs/nifi-user.log for single-user credentials on first run."
+        echo ""
+
+        # Set environment - NiFi requires NIFI_OVERRIDE_NIFIENV=true to respect env vars
+        export NIFI_OVERRIDE_NIFIENV="true"
+        export NIFI_HOME="$NIFI_PACKAGE"
+        export NIFI_LOG_DIR="$NIFI_STATE/logs"
+        export NIFI_PID_DIR="$NIFI_STATE/run"
+
+        # MinIO/S3 credentials (for NiFi S3 processors)
+        export AWS_ACCESS_KEY_ID="minioadmin"
+        export AWS_SECRET_ACCESS_KEY="minioadmin"
+        export AWS_ENDPOINT_URL="http://localhost:9010"
+
+        cd "$NIFI_PACKAGE"
+
+        # Run NiFi in foreground mode
+        exec "$NIFI_PACKAGE/bin/nifi.sh" run
+      '';
+      process-compose = {
+        depends_on = {
+          postgres = {
+            condition = "process_healthy";
+          };
+        };
+        readiness_probe = {
+          http_get = {
+            host = "localhost";
+            port = 8450;
+            path = "/nifi-api/system-diagnostics";
+          };
+          initial_delay_seconds = 60;
+          period_seconds = 5;
+          failure_threshold = 24;
+        };
+        # Enabled by default - disable with DISABLE_NIFI=true
       };
     };
   };

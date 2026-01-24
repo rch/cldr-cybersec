@@ -4,3 +4,6 @@
 [submodule "thirdparty/flink"]
 	path = thirdparty/flink
 	url = https://github.com/apache/flink.git
+[submodule "thirdparty/iceberg"]
+	path = thirdparty/iceberg
+	url = https://github.com/apache/iceberg.git

@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - Cybersec Bootstrap</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f7fa;
+            color: #2c3e50;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px 0;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .service-links {
+            margin-top: 15px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .service-link {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            text-decoration: none;
+            padding: 8px 15px;
+            border-radius: 5px;
+            font-size: 0.9em;
+            font-weight: 500;
+            transition: background 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .service-link:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .card {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .card-header {
+            padding: 20px;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .card-header h2 {
+            color: #667eea;
+            margin: 0;
+        }
+
+        .card-body {
+            padding: 20px;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 15px;
+            background: #f8fafc;
+            border-radius: 8px;
+        }
+
+        .status-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2em;
+        }
+
+        .status-icon.healthy {
+            background: #c6f6d5;
+            color: #22543d;
+        }
+
+        .status-icon.unhealthy {
+            background: #fed7d7;
+            color: #742a2a;
+        }
+
+        .status-icon.pending {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .status-info h4 {
+            margin: 0 0 4px 0;
+            font-size: 0.95em;
+        }
+
+        .status-info p {
+            margin: 0;
+            font-size: 0.85em;
+            color: #718096;
+        }
+
+        .config-section {
+            margin-bottom: 25px;
+        }
+
+        .config-section h3 {
+            margin-bottom: 15px;
+            color: #4a5568;
+            font-size: 1.1em;
+            border-bottom: 2px solid #e2e8f0;
+            padding-bottom: 8px;
+        }
+
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+        }
+
+        .config-field {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .config-field label {
+            font-weight: 500;
+            margin-bottom: 5px;
+            color: #4a5568;
+            font-size: 0.9em;
+        }
+
+        .config-field input {
+            padding: 10px;
+            border: 1px solid #e2e8f0;
+            border-radius: 5px;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+
+        .config-field input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .config-field input:disabled {
+            background: #f7fafc;
+            color: #718096;
+        }
+
+        .config-field .hint {
+            font-size: 0.8em;
+            color: #a0aec0;
+            margin-top: 4px;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+        }
+
+        .btn-primary:disabled {
+            background: #a0aec0;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: #e2e8f0;
+            color: #2c3e50;
+        }
+
+        .btn-secondary:hover {
+            background: #cbd5e0;
+        }
+
+        .btn-danger {
+            background: #e53e3e;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #c53030;
+        }
+
+        .btn-success {
+            background: #38a169;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: #2f855a;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .progress-container {
+            margin-top: 20px;
+            display: none;
+        }
+
+        .progress-container.active {
+            display: block;
+        }
+
+        .progress-log {
+            background: #1a202c;
+            color: #e2e8f0;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 13px;
+            padding: 15px;
+            border-radius: 8px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .progress-log .info {
+            color: #90cdf4;
+        }
+
+        .progress-log .success {
+            color: #68d391;
+        }
+
+        .progress-log .error {
+            color: #fc8181;
+        }
+
+        .progress-log .warning {
+            color: #f6e05e;
+        }
+
+        .progress-bar {
+            height: 8px;
+            background: #e2e8f0;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            overflow: hidden;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            width: 0%;
+            transition: width 0.3s;
+        }
+
+        .alert {
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .alert-success {
+            background: #c6f6d5;
+            color: #22543d;
+            border: 1px solid #9ae6b4;
+        }
+
+        .alert-warning {
+            background: #fef3c7;
+            color: #92400e;
+            border: 1px solid #fcd34d;
+        }
+
+        .alert-error {
+            background: #fed7d7;
+            color: #742a2a;
+            border: 1px solid #feb2b2;
+        }
+
+        .checks-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .check-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            background: #f8fafc;
+            border-radius: 5px;
+        }
+
+        .check-item.pass {
+            border-left: 3px solid #38a169;
+        }
+
+        .check-item.fail {
+            border-left: 3px solid #e53e3e;
+        }
+
+        .check-icon {
+            font-size: 1.2em;
+        }
+
+        .check-name {
+            font-weight: 500;
+            flex: 1;
+        }
+
+        .check-message {
+            color: #718096;
+            font-size: 0.9em;
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            color: #718096;
+        }
+
+        .spinner {
+            width: 30px;
+            height: 30px;
+            border: 3px solid #e2e8f0;
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 15px;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .tab-bar {
+            display: flex;
+            border-bottom: 2px solid #e2e8f0;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 12px 24px;
+            cursor: pointer;
+            color: #718096;
+            font-weight: 500;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.2s;
+        }
+
+        .tab:hover {
+            color: #667eea;
+        }
+
+        .tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        @media (max-width: 768px) {
+            .config-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .status-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div class="container">
+            <h1>Settings</h1>
+            <p>Cybersec Bootstrap Configuration</p>
+            <div class="service-links" id="service-links">
+                <a href="/" class="service-link">Events</a>
+                <a href="/polaris" class="service-link">Polaris</a>
+                <a href="{{ service_urls.flink }}" target="_blank" class="service-link" data-service="flink">Flink</a>
+                <a href="{{ service_urls.minio_console }}" target="_blank" class="service-link" data-service="minio_console">MinIO</a>
+                <a href="{{ service_urls.nifi }}" target="_blank" class="service-link" data-service="nifi">NiFi</a>
+                <a href="{{ service_urls.prometheus }}" target="_blank" class="service-link" data-service="prometheus">Prometheus</a>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Status Alert -->
+        <div id="status-alert" class="alert" style="display: none;"></div>
+
+        <!-- Tab Bar -->
+        <div class="tab-bar">
+            <div class="tab active" data-tab="status" onclick="switchTab('status')">Status</div>
+            <div class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</div>
+            <div class="tab" data-tab="bootstrap" onclick="switchTab('bootstrap')">Bootstrap</div>
+        </div>
+
+        <!-- Status Tab -->
+        <div id="status-tab" class="tab-content active">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Service Status</h2>
+                    <button class="btn btn-secondary" onclick="loadStatus()">Refresh</button>
+                </div>
+                <div class="card-body">
+                    <div id="status-loading" class="loading">
+                        <div class="spinner"></div>
+                        Checking services...
+                    </div>
+                    <div id="status-grid" class="status-grid" style="display: none;"></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2>Verification Checks</h2>
+                    <button class="btn btn-secondary" onclick="loadVerify()">Run Checks</button>
+                </div>
+                <div class="card-body">
+                    <div id="verify-loading" class="loading" style="display: none;">
+                        <div class="spinner"></div>
+                        Running verification checks...
+                    </div>
+                    <div id="verify-results" class="checks-list"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Settings Tab -->
+        <div id="settings-tab" class="tab-content">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Configuration</h2>
+                </div>
+                <div class="card-body">
+                    <div id="settings-loading" class="loading">
+                        <div class="spinner"></div>
+                        Loading settings...
+                    </div>
+                    <div id="settings-form" style="display: none;">
+                        <div class="config-section">
+                            <h3>Paths</h3>
+                            <div class="config-grid">
+                                <div class="config-field">
+                                    <label for="flink_home">Flink Home</label>
+                                    <input type="text" id="flink_home" placeholder="e.g., /opt/flink">
+                                    <span class="hint">Leave empty to build from source</span>
+                                </div>
+                                <div class="config-field">
+                                    <label for="minio_data_dir">MinIO Data Directory</label>
+                                    <input type="text" id="minio_data_dir" placeholder="e.g., $DEVENV_STATE/minio">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="config-section">
+                            <h3>Service Ports</h3>
+                            <div class="config-grid">
+                                <div class="config-field">
+                                    <label for="postgres_port">PostgreSQL Port</label>
+                                    <input type="number" id="postgres_port" value="5438">
+                                </div>
+                                <div class="config-field">
+                                    <label for="iceberg_browser_port">Iceberg Browser Port</label>
+                                    <input type="number" id="iceberg_browser_port" value="5050">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="config-section">
+                            <h3>Catalog</h3>
+                            <div class="config-grid">
+                                <div class="config-field">
+                                    <label for="catalog_name">Catalog Name</label>
+                                    <input type="text" id="catalog_name" value="cybersec">
+                                </div>
+                                <div class="config-field">
+                                    <label for="catalog_warehouse">Warehouse Location</label>
+                                    <input type="text" id="catalog_warehouse" value="s3://cybersec/iceberg/warehouse">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="actions">
+                            <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+                            <button class="btn btn-danger" onclick="resetSettings()">Reset to Defaults</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bootstrap Tab -->
+        <div id="bootstrap-tab" class="tab-content">
+            <div class="card">
+                <div class="card-header">
+                    <h2>Run Bootstrap</h2>
+                </div>
+                <div class="card-body">
+                    <p style="margin-bottom: 20px; color: #4a5568;">
+                        Bootstrap sets up the development environment by checking requirements,
+                        creating directories, initializing git submodules, and configuring Flink.
+                    </p>
+
+                    <div class="config-section">
+                        <h3>Options</h3>
+                        <div class="config-grid">
+                            <div class="config-field">
+                                <label>
+                                    <input type="checkbox" id="skip_flink"> Skip Flink Setup
+                                </label>
+                                <span class="hint">Services requiring Flink will fail</span>
+                            </div>
+                            <div class="config-field">
+                                <label for="flink_path">Flink Path (optional)</label>
+                                <input type="text" id="flink_path" placeholder="e.g., ~/local/flink-1.20.1">
+                                <span class="hint">Provide path to use existing installation</span>
+                            </div>
+                            <div class="config-field">
+                                <label>
+                                    <input type="checkbox" id="dry_run"> Dry Run
+                                </label>
+                                <span class="hint">Show what would be done without making changes</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="actions">
+                        <button class="btn btn-success" id="run-bootstrap-btn" onclick="runBootstrap()">
+                            Run Bootstrap
+                        </button>
+                    </div>
+
+                    <div id="progress-container" class="progress-container">
+                        <div class="progress-bar">
+                            <div id="progress-fill" class="progress-bar-fill"></div>
+                        </div>
+                        <div id="progress-log" class="progress-log"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tab switching
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+            document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+        }
+
+        // Load status on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            loadStatus();
+            loadSettings();
+            checkBootstrapNeeded();
+        });
+
+        // Check if bootstrap is needed
+        async function checkBootstrapNeeded() {
+            try {
+                const response = await fetch('/api/bootstrap/assess');
+                const data = await response.json();
+
+                const alert = document.getElementById('status-alert');
+                if (data.needs_bootstrap) {
+                    alert.className = 'alert alert-warning';
+                    alert.innerHTML = `
+                        <span>Warning: Bootstrap has not been completed.</span>
+                        <button class="btn btn-primary" onclick="switchTab('bootstrap')">
+                            Run Bootstrap
+                        </button>
+                    `;
+                    alert.style.display = 'flex';
+                } else if (data.ready) {
+                    alert.className = 'alert alert-success';
+                    alert.innerHTML = '<span>Environment is ready!</span>';
+                    alert.style.display = 'flex';
+                    setTimeout(() => alert.style.display = 'none', 3000);
+                }
+            } catch (error) {
+                console.error('Error checking bootstrap status:', error);
+            }
+        }
+
+        // Load service status
+        async function loadStatus() {
+            const loading = document.getElementById('status-loading');
+            const grid = document.getElementById('status-grid');
+
+            loading.style.display = 'flex';
+            grid.style.display = 'none';
+
+            try {
+                const response = await fetch('/api/bootstrap/status');
+                const data = await response.json();
+
+                grid.innerHTML = '';
+                data.services.forEach(svc => {
+                    const isHealthy = svc.healthy;
+                    const statusClass = isHealthy ? 'healthy' : 'unhealthy';
+                    const icon = isHealthy ? 'OK' : 'X';
+
+                    grid.innerHTML += `
+                        <div class="status-item">
+                            <div class="status-icon ${statusClass}">${icon}</div>
+                            <div class="status-info">
+                                <h4>${svc.service}</h4>
+                                <p>${svc.message || svc.endpoint || ''}</p>
+                            </div>
+                        </div>
+                    `;
+                });
+
+                loading.style.display = 'none';
+                grid.style.display = 'grid';
+            } catch (error) {
+                loading.innerHTML = `<span style="color: #e53e3e;">Error loading status: ${error.message}</span>`;
+            }
+        }
+
+        // Load verification checks
+        async function loadVerify() {
+            const loading = document.getElementById('verify-loading');
+            const results = document.getElementById('verify-results');
+
+            loading.style.display = 'flex';
+            results.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/bootstrap/verify');
+                const data = await response.json();
+
+                results.innerHTML = '';
+                data.checks.forEach(check => {
+                    const statusClass = check.passed ? 'pass' : 'fail';
+                    const icon = check.passed ? 'OK' : 'X';
+
+                    results.innerHTML += `
+                        <div class="check-item ${statusClass}">
+                            <span class="check-icon">${icon}</span>
+                            <span class="check-name">${check.name}</span>
+                            <span class="check-message">${check.message}</span>
+                        </div>
+                    `;
+                });
+
+                loading.style.display = 'none';
+            } catch (error) {
+                loading.style.display = 'none';
+                results.innerHTML = `<div class="check-item fail">Error: ${error.message}</div>`;
+            }
+        }
+
+        // Load settings
+        async function loadSettings() {
+            const loading = document.getElementById('settings-loading');
+            const form = document.getElementById('settings-form');
+
+            try {
+                const response = await fetch('/api/bootstrap/settings');
+                const data = await response.json();
+
+                if (data.config) {
+                    document.getElementById('flink_home').value = data.config.flink_home || '';
+                    document.getElementById('minio_data_dir').value = data.config.minio_data_dir || '';
+                    document.getElementById('postgres_port').value = data.config.postgres_port || 5438;
+                    document.getElementById('iceberg_browser_port').value = data.config.iceberg_browser_port || 5050;
+                    document.getElementById('catalog_name').value = data.config.catalog_name || 'cybersec';
+                    document.getElementById('catalog_warehouse').value = data.config.catalog_warehouse || '';
+                }
+
+                loading.style.display = 'none';
+                form.style.display = 'block';
+            } catch (error) {
+                loading.innerHTML = `<span style="color: #e53e3e;">Error loading settings: ${error.message}</span>`;
+            }
+        }
+
+        // Save settings
+        async function saveSettings() {
+            const updates = {
+                flink_home: document.getElementById('flink_home').value,
+                minio_data_dir: document.getElementById('minio_data_dir').value,
+                postgres_port: parseInt(document.getElementById('postgres_port').value),
+                iceberg_browser_port: parseInt(document.getElementById('iceberg_browser_port').value),
+                catalog_name: document.getElementById('catalog_name').value,
+                catalog_warehouse: document.getElementById('catalog_warehouse').value,
+            };
+
+            try {
+                const response = await fetch('/api/bootstrap/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ updates })
+                });
+
+                const data = await response.json();
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Settings saved successfully!');
+                }
+            } catch (error) {
+                alert('Error saving settings: ' + error.message);
+            }
+        }
+
+        // Reset settings
+        async function resetSettings() {
+            if (!confirm('Reset all settings to defaults?')) return;
+
+            try {
+                const response = await fetch('/api/bootstrap/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reset: true })
+                });
+
+                const data = await response.json();
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    alert('Settings reset to defaults!');
+                    loadSettings();
+                }
+            } catch (error) {
+                alert('Error resetting settings: ' + error.message);
+            }
+        }
+
+        // Run bootstrap
+        async function runBootstrap() {
+            const btn = document.getElementById('run-bootstrap-btn');
+            const container = document.getElementById('progress-container');
+            const log = document.getElementById('progress-log');
+            const fill = document.getElementById('progress-fill');
+
+            btn.disabled = true;
+            container.classList.add('active');
+            log.innerHTML = '';
+            fill.style.width = '0%';
+
+            const options = {
+                skip_flink: document.getElementById('skip_flink').checked,
+                flink_path: document.getElementById('flink_path').value || null,
+                dry_run: document.getElementById('dry_run').checked
+            };
+
+            try {
+                const response = await fetch('/api/bootstrap/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(options)
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    const text = decoder.decode(value);
+                    const lines = text.split('\n');
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+
+                        try {
+                            const event = JSON.parse(line.slice(6));
+                            handleBootstrapEvent(event, log, fill);
+                        } catch (e) {
+                            console.error('Error parsing event:', e);
+                        }
+                    }
+                }
+            } catch (error) {
+                addLogLine(log, `Error: ${error.message}`, 'error');
+            } finally {
+                btn.disabled = false;
+                loadStatus();
+                checkBootstrapNeeded();
+            }
+        }
+
+        function handleBootstrapEvent(event, log, fill) {
+            const type = event.type;
+            const message = event.message || '';
+            const progress = event.progress || 0;
+
+            // Update progress bar
+            if (progress > 0) {
+                fill.style.width = `${progress * 100}%`;
+            }
+
+            // Add to log based on event type
+            if (type === 'task_started') {
+                addLogLine(log, `> ${message}`, 'info');
+            } else if (type === 'task_completed') {
+                addLogLine(log, `  [OK] ${message}`, 'success');
+            } else if (type === 'task_failed') {
+                addLogLine(log, `  [X] ${message}`, 'error');
+            } else if (type === 'task_skipped') {
+                addLogLine(log, `  [-] ${message}`, 'warning');
+            } else if (type === 'log_info') {
+                addLogLine(log, `  ${message}`, 'info');
+            } else if (type === 'log_warn') {
+                addLogLine(log, `  [!] ${message}`, 'warning');
+            } else if (type === 'log_error') {
+                addLogLine(log, `  [X] ${message}`, 'error');
+            } else if (type === 'bootstrap_completed') {
+                addLogLine(log, `\n${message}`, 'success');
+                fill.style.width = '100%';
+            } else if (type === 'bootstrap_failed') {
+                addLogLine(log, `\n${message}`, 'error');
+            } else if (type === 'prompt_required') {
+                addLogLine(log, `\n[?] ${message}`, 'warning');
+                event.prompt_options.forEach(opt => {
+                    addLogLine(log, `    [${opt.key}] ${opt.label}: ${opt.description || ''}`, 'info');
+                });
+            }
+        }
+
+        function addLogLine(log, text, className) {
+            const line = document.createElement('div');
+            line.className = className;
+            line.textContent = text;
+            log.appendChild(line);
+            log.scrollTop = log.scrollHeight;
+        }
+    </script>
+</body>
+
+</html>

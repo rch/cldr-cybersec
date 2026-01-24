@@ -13,6 +13,15 @@ dependencies = [
     "apache-flink>=2.2.0",
     "kafka-python>=2.0.2",
     "flask>=3.0.0",
+    # Bootstrap CLI dependencies
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+    # Bootstrap MCP server dependencies
+    "fastmcp>=0.1.0",
+    # HTTP client for health checks
+    "httpx>=0.27.0",
+    # TOML writing
+    "tomli-w>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -21,3 +30,10 @@ dev = [
     "black>=24.0.0",
     "ruff>=0.2.0",
 ]
+
+[project.scripts]
+cybersec = "cybersec.cli.main:run"
+cybersec-mcp = "cybersec.mcp.server:run_server"
+
+[tool.setuptools.packages.find]
+include = ["cybersec*"]

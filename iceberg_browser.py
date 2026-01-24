@@ -14,8 +14,108 @@ import os
 import time
 import json
 import threading
+from urllib.parse import urlparse
 
 app = Flask(__name__)
+
+
+# ============================================================================
+# Dynamic Host Detection for External Links
+# ============================================================================
+# When accessed via FQDN (e.g., Cloudflare WARP), adjust service links accordingly.
+
+# Service port mappings - maps service name to its port
+SERVICE_PORTS = {
+    "flink": 8081,
+    "minio_console": 9011,
+    "minio_api": 9010,
+    "polaris_api": 8181,
+    "polaris_admin": 8182,
+    "nifi": 8450,
+    "prometheus": 9090,
+    "iceberg_browser": 5050,
+    "otel_grpc": 4317,
+    "otel_http": 4318,
+    "otel_metrics": 8889,
+}
+
+
+def get_base_host():
+    """
+    Detect if we're being accessed via FQDN or localhost.
+    Returns the base hostname without port.
+    """
+    # Check X-Forwarded-Host first (for reverse proxies like Cloudflare)
+    forwarded_host = request.headers.get("X-Forwarded-Host")
+    if forwarded_host:
+        # Extract just the hostname (might be "host:port")
+        return forwarded_host.split(":")[0]
+
+    # Fall back to Host header
+    host = request.headers.get("Host", "localhost:5050")
+    return host.split(":")[0]
+
+
+def get_service_url(service_name: str, path: str = "") -> str:
+    """
+    Generate a URL for a service based on the current request context.
+
+    If accessed via localhost, returns localhost URLs.
+    If accessed via FQDN, returns FQDN URLs with appropriate ports.
+
+    Args:
+        service_name: Name of the service (e.g., "flink", "minio_console")
+        path: Optional path to append (e.g., "/api/health")
+
+    Returns:
+        Full URL string like "http://localhost:8081" or "http://myhost.example.com:8081"
+    """
+    base_host = get_base_host()
+    port = SERVICE_PORTS.get(service_name, 80)
+
+    # Determine protocol - assume HTTP for local dev
+    # Could be extended to check X-Forwarded-Proto for HTTPS
+    proto = request.headers.get("X-Forwarded-Proto", "http")
+
+    # Build the URL
+    if port == 80:
+        url = f"{proto}://{base_host}"
+    else:
+        url = f"{proto}://{base_host}:{port}"
+
+    if path:
+        url = f"{url}{path}"
+
+    return url
+
+
+def get_all_service_urls() -> dict:
+    """
+    Get URLs for all services, adjusted for the current request context.
+
+    Returns:
+        Dict mapping service names to their full URLs
+    """
+    return {
+        "flink": get_service_url("flink"),
+        "flink_ui": get_service_url("flink", "/#/overview"),
+        "minio_console": get_service_url("minio_console"),
+        "minio_api": get_service_url("minio_api"),
+        "polaris_api": get_service_url("polaris_api"),
+        "polaris_admin": get_service_url("polaris_admin"),
+        "nifi": get_service_url("nifi", "/nifi"),
+        "prometheus": get_service_url("prometheus"),
+        "iceberg_browser": get_service_url("iceberg_browser"),
+    }
+
+
+@app.context_processor
+def inject_service_urls():
+    """Make service URLs available to all templates."""
+    return {
+        "service_urls": get_all_service_urls(),
+        "get_service_url": get_service_url,
+    }
 
 # Iceberg catalog configuration - using REST catalog to connect to Polaris
 CATALOG_CONFIG = {
@@ -72,6 +172,24 @@ def get_table():
 def index():
     """Main page"""
     return render_template("index.html")
+
+
+@app.route("/api/service-urls")
+def api_service_urls():
+    """
+    Get service URLs adjusted for the current request context.
+
+    When accessed via localhost, returns localhost URLs.
+    When accessed via FQDN (e.g., through Cloudflare WARP), returns FQDN URLs.
+
+    Returns:
+        JSON object with service names mapped to their URLs
+    """
+    return jsonify({
+        "base_host": get_base_host(),
+        "services": get_all_service_urls(),
+        "ports": SERVICE_PORTS,
+    })
 
 
 @app.route("/api/tables")
@@ -463,6 +581,231 @@ def stream_updates():
 def polaris_page():
     """Polaris Insights page"""
     return render_template("polaris.html")
+
+
+# ============================================================================
+# Bootstrap / Settings Routes
+# ============================================================================
+
+
+@app.route("/settings")
+def settings_page():
+    """Bootstrap settings page"""
+    return render_template("settings.html")
+
+
+@app.route("/api/bootstrap/info")
+def bootstrap_info():
+    """Get bootstrap configuration and status"""
+    try:
+        from cybersec.bootstrap import BootstrapService
+        service = BootstrapService()
+        config = service.get_config()
+
+        return jsonify({
+            "config_file": str(service.settings.config_path),
+            "config_exists": service.settings.exists(),
+            "bootstrap_completed": config.completed,
+            "last_run": config.last_run,
+            "paths": {
+                "flink_home": str(config.get_flink_home()) if config.get_flink_home() else None,
+                "flink_state": str(config.get_flink_state_dir()),
+                "minio_data": str(config.get_minio_data_dir()),
+                "log_dir": str(config.get_log_dir()),
+            },
+            "services": {
+                "postgres": {"host": config.postgres_host, "port": config.postgres_port},
+                "polaris": {"api_url": config.polaris_api_url, "admin_url": config.polaris_admin_url},
+                "flink": {"url": config.flink_url},
+                "minio": {"endpoint": config.minio_endpoint, "console": config.minio_console},
+                "iceberg_browser": {"port": config.iceberg_browser_port},
+            },
+            "catalog": {
+                "name": config.catalog_name,
+                "warehouse": config.catalog_warehouse,
+            },
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/bootstrap/status")
+def bootstrap_status():
+    """Get service health status"""
+    import asyncio
+    try:
+        from cybersec.bootstrap import BootstrapService
+        service = BootstrapService()
+
+        # Run async health checks
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            results = loop.run_until_complete(service.check_all_services())
+        finally:
+            loop.close()
+
+        all_healthy = all(r.get("healthy", False) for r in results)
+
+        return jsonify({
+            "all_healthy": all_healthy,
+            "services": results,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/bootstrap/settings", methods=["GET", "POST"])
+def bootstrap_settings():
+    """Get or update bootstrap settings"""
+    try:
+        from cybersec.bootstrap import BootstrapService, BootstrapConfig
+        service = BootstrapService()
+
+        if request.method == "POST":
+            data = request.get_json() or {}
+
+            if data.get("reset"):
+                config = BootstrapConfig()
+                service.settings.save(config)
+                return jsonify({"action": "reset", "message": "Settings reset to defaults"})
+
+            if data.get("updates"):
+                service.update_config(**data["updates"])
+                return jsonify({
+                    "action": "updated",
+                    "message": f"Updated {len(data['updates'])} setting(s)",
+                })
+
+        return jsonify({"config": service.get_config_dict()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/bootstrap/verify")
+def bootstrap_verify():
+    """Verify bootstrap configuration"""
+    import asyncio
+    try:
+        from cybersec.bootstrap import BootstrapService
+        service = BootstrapService()
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(service.verify())
+        finally:
+            loop.close()
+
+        return jsonify({
+            "all_passed": result.get("all_passed", False),
+            "checks": result.get("checks", []),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/bootstrap/assess")
+def bootstrap_assess():
+    """Quick assessment for startup check"""
+    import asyncio
+    try:
+        from cybersec.bootstrap import BootstrapService
+        service = BootstrapService()
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(service.assess())
+        finally:
+            loop.close()
+
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/bootstrap/run", methods=["POST"])
+def bootstrap_run():
+    """Execute bootstrap (returns SSE stream)"""
+    import asyncio
+    from cybersec.bootstrap import BootstrapService, EventType
+
+    data = request.get_json() or {}
+    skip_flink = data.get("skip_flink", False)
+    flink_path = data.get("flink_path")
+    dry_run = data.get("dry_run", False)
+
+    def generate():
+        service = BootstrapService()
+
+        async def run_bootstrap():
+            async for event in service.run(
+                skip_flink=skip_flink,
+                flink_path=flink_path,
+                dry_run=dry_run,
+            ):
+                event_data = {
+                    "type": event.event_type.value,
+                    "task_id": event.task_id,
+                    "message": event.message,
+                    "progress": event.progress,
+                }
+
+                # Include prompt options if present
+                if event.prompt_options:
+                    event_data["prompt_options"] = [
+                        {"key": o.key, "label": o.label, "description": o.description, "default": o.default}
+                        for o in event.prompt_options
+                    ]
+                    event_data["prompt_allow_custom"] = event.prompt_allow_custom
+
+                yield f"data: {json.dumps(event_data)}\n\n"
+
+        # Run the async generator
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            # Convert async generator to sync
+            async def collect_events():
+                events = []
+                async for event in service.run(
+                    skip_flink=skip_flink,
+                    flink_path=flink_path,
+                    dry_run=dry_run,
+                ):
+                    events.append(event)
+                return events
+
+            events = loop.run_until_complete(collect_events())
+            for event in events:
+                event_data = {
+                    "type": event.event_type.value,
+                    "task_id": event.task_id,
+                    "message": event.message,
+                    "progress": event.progress,
+                }
+                if event.prompt_options:
+                    event_data["prompt_options"] = [
+                        {"key": o.key, "label": o.label, "description": o.description, "default": o.default}
+                        for o in event.prompt_options
+                    ]
+                    event_data["prompt_allow_custom"] = event.prompt_allow_custom
+                yield f"data: {json.dumps(event_data)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        finally:
+            loop.close()
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive'
+        }
+    )
 
 
 @app.route("/api/catalog-info")

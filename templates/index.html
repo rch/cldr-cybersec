@@ -719,10 +719,12 @@
             <h1>🔍 Iceberg Browser</h1>
             <p>CloudTrail Events Explorer</p>
             <div class="service-links">
-                <a href="http://localhost:8081" target="_blank" class="service-link" title="Flink Dashboard">🌊
+                <a href="{{ service_urls.flink }}" target="_blank" class="service-link" title="Flink Dashboard" data-service="flink">🌊
                     Flink</a>
-                <a href="http://localhost:9011" target="_blank" class="service-link" title="MinIO Console">🗄️ MinIO</a>
+                <a href="{{ service_urls.minio_console }}" target="_blank" class="service-link" title="MinIO Console" data-service="minio_console">🗄️ MinIO</a>
+                <a href="{{ service_urls.nifi }}" target="_blank" class="service-link" title="Apache NiFi" data-service="nifi">📊 NiFi</a>
                 <a href="/polaris" class="service-link" title="Polaris Insights">🧭 Polaris</a>
+                <a href="/settings" class="service-link" title="Settings">⚙️ Settings</a>
             </div>
             <div class="refresh-controls">
                 <div class="live-indicator" id="liveIndicator">
