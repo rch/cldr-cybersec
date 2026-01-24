@@ -32,20 +32,28 @@ class BootstrapService:
         self,
         config: Optional[BootstrapConfig] = None,
         settings_manager: Optional[SettingsManager] = None,
+        project_root: Optional[Path] = None,
     ):
         """Initialize bootstrap service.
 
         Args:
             config: Bootstrap configuration. If None, loads from settings.
             settings_manager: Settings manager for persistence.
+            project_root: Project root directory. Defaults to cwd.
         """
         self.settings_manager = settings_manager or SettingsManager()
         self._config = config
         self.emitter = EventEmitter()
         self.state = BootstrapState()
+        self._project_root = project_root or Path.cwd()
 
         # Callback for handling user prompts (set by interface)
         self._prompt_handler: Optional[Callable[[str, list[PromptOption], bool], str]] = None
+
+    @property
+    def project_root(self) -> Path:
+        """Get project root directory."""
+        return self._project_root
 
     @property
     def config(self) -> BootstrapConfig:

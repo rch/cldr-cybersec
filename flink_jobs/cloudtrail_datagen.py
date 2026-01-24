@@ -86,30 +86,22 @@ def create_cloudtrail_datagen_job():
     # Create streaming environment
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
-
+    
     # Enable checkpointing for data commits
     # Checkpoints trigger Iceberg commits - without this, data stays buffered!
     env.enable_checkpointing(10000)  # Checkpoint every 10 seconds
-
-    # Use filesystem checkpoint storage to handle larger state
-    # Default memory-backed storage is limited to 5MB
-    from pyflink.datastream.checkpoint_storage import FileSystemCheckpointStorage
-    checkpoint_dir = os.path.join(flink_home, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    checkpoint_config = env.get_checkpoint_config()
-    checkpoint_config.set_checkpoint_storage(FileSystemCheckpointStorage(f"file://{checkpoint_dir}"))
-
+    
     # Create table environment with streaming settings
     settings = EnvironmentSettings.in_streaming_mode()
     t_env = StreamTableEnvironment.create(env, settings)
-
+    
     # Set table configuration for faster commits
     t_env.get_config().set("table.exec.sink.not-null-enforcer", "drop")
     t_env.get_config().set("execution.checkpointing.interval", "10s")
     
     # Set pipeline JAR configuration - find Iceberg runtime JAR (version may vary)
-    lib_dir = os.path.join(flink_home, "lib")
     import glob
+    lib_dir = os.path.join(flink_home, "lib")
     iceberg_jars = glob.glob(os.path.join(lib_dir, "iceberg-flink-runtime-1.20-*.jar"))
     if iceberg_jars:
         t_env.get_config().set("pipeline.jars", f"file://{iceberg_jars[0]}")
@@ -123,7 +115,7 @@ def create_cloudtrail_datagen_job():
     # Create Iceberg catalog for Polaris REST
     # In Polaris REST API, the catalog is accessed at /api/catalog/warehouse_name
     # The catalog name in Flink must match the warehouse name in Polaris
-    # Uses S3FileIO with locally-built iceberg-aws-bundle for S3 support
+    # Uses S3FileIO (via iceberg-aws-bundle) to avoid Hadoop dependencies
     t_env.execute_sql("""
         CREATE CATALOG cybersec WITH (
             'type' = 'iceberg',
@@ -135,7 +127,6 @@ def create_cloudtrail_datagen_job():
             'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO',
             's3.endpoint' = 'http://localhost:9010',
             's3.region' = 'us-east-1',
-            'client.region' = 'us-east-1',
             's3.path-style-access' = 'true',
             's3.access-key-id' = 'minioadmin',
             's3.secret-access-key' = 'minioadmin'
@@ -176,13 +167,16 @@ def create_cloudtrail_datagen_job():
     """)
     
     # Generate and insert CloudTrail events
-    t_env.execute_sql("""
+    # .wait() blocks until the job completes (for bounded) or is cancelled (for streaming)
+    result = t_env.execute_sql("""
         INSERT INTO cloudtrail_events
-        SELECT 
+        SELECT
             generate_cloudtrail() as event_data,
             CURRENT_TIMESTAMP as event_time
         FROM datagen_source
     """)
+    print("Job submitted, waiting for completion...")
+    result.wait()
 
 
 if __name__ == "__main__":
