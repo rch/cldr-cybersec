@@ -9,6 +9,7 @@ from flask import Flask, render_template, jsonify, request, Response, stream_wit
 from pyiceberg.catalog import load_catalog
 from pyiceberg.exceptions import NoSuchTableError
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 import os
 import time
@@ -368,13 +369,30 @@ def get_events():
                 except Exception as e:
                     print(f"Error parsing event_data: {e}")
             
-            # Convert any datetime objects to ISO format
-            for key, value in event.items():
+            # Convert any datetime objects to ISO format and handle numpy types
+            for key, value in list(event.items()):
                 if isinstance(value, pd.Timestamp):
                     event[key] = value.isoformat()
-                elif pd.isna(value):
-                    event[key] = None
-            
+                elif isinstance(value, np.ndarray):
+                    # Convert numpy arrays to Python lists
+                    event[key] = value.tolist() if value.size > 0 else None
+                elif isinstance(value, dict):
+                    # Keep dicts as-is (they're JSON serializable)
+                    pass
+                elif isinstance(value, (list, tuple)):
+                    # Keep lists/tuples as-is
+                    pass
+                elif value is None:
+                    pass
+                elif not isinstance(value, (str, int, float, bool)):
+                    # For other non-standard types, check if scalar NA
+                    try:
+                        if pd.isna(value):
+                            event[key] = None
+                    except (TypeError, ValueError):
+                        # pd.isna fails on arrays - leave value as-is
+                        pass
+
             processed_events.append(event)
             
         events = processed_events
@@ -435,13 +453,30 @@ def get_event_detail(event_id):
             except Exception as e:
                 print(f"Error parsing event_data: {e}")
         
-        # Convert datetime objects
-        for key, value in event.items():
+        # Convert datetime objects and handle numpy types
+        for key, value in list(event.items()):
             if isinstance(value, pd.Timestamp):
                 event[key] = value.isoformat()
-            elif pd.isna(value):
-                event[key] = None
-        
+            elif isinstance(value, np.ndarray):
+                # Convert numpy arrays to Python lists
+                event[key] = value.tolist() if value.size > 0 else None
+            elif isinstance(value, dict):
+                # Keep dicts as-is (they're JSON serializable)
+                pass
+            elif isinstance(value, (list, tuple)):
+                # Keep lists/tuples as-is
+                pass
+            elif value is None:
+                pass
+            elif not isinstance(value, (str, int, float, bool)):
+                # For other non-standard types, check if scalar NA
+                try:
+                    if pd.isna(value):
+                        event[key] = None
+                except (TypeError, ValueError):
+                    # pd.isna fails on arrays - leave value as-is
+                    pass
+
         return jsonify(event)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

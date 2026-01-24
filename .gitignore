@@ -160,3 +160,20 @@ devenv.local.yaml
 
 # pre-commit
 .pre-commit-config.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Local dev state
+.cybersec/
+.mcp.json
+node_modules/
+
+# Runtime artifacts
+org.apache.nifi.bootstrap.config.log.dir_IS_UNDEFINED/
