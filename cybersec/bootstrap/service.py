@@ -977,7 +977,9 @@ class BootstrapService:
         # We look for any iceberg-flink-runtime JAR (version may vary based on git tag)
         existing_jars = list(lib_dir.glob("iceberg-flink-runtime-1.20-*.jar"))
         aws_bundle_jars = list(lib_dir.glob("iceberg-aws-bundle-*.jar"))
-        if existing_jars and aws_bundle_jars:
+        s3_hadoop_jars = list(lib_dir.glob("flink-s3-fs-hadoop-*.jar"))
+        hdfs_client_jars = list(lib_dir.glob("hadoop-hdfs-client-*.jar"))
+        if existing_jars and aws_bundle_jars and s3_hadoop_jars and hdfs_client_jars:
             yield BootstrapEvent(
                 event_type=EventType.LOG_INFO,
                 task_id=task_id,
@@ -1065,7 +1067,6 @@ class BootstrapService:
             # Copy Flink runtime JAR
             for jar in flink_runtime_jar.glob("iceberg-flink-runtime-1.20-*.jar"):
                 if not jar.name.endswith("-sources.jar") and not jar.name.endswith("-javadoc.jar"):
-                    import shutil
                     dest = lib_dir / jar.name
                     shutil.copy(jar, dest)
                     yield BootstrapEvent(
@@ -1078,7 +1079,6 @@ class BootstrapService:
             # Copy AWS bundle JAR (provides S3FileIO and AWS SDK)
             for jar in aws_bundle_jar.glob("iceberg-aws-bundle-*.jar"):
                 if not jar.name.endswith("-sources.jar") and not jar.name.endswith("-javadoc.jar"):
-                    import shutil
                     dest = lib_dir / jar.name
                     shutil.copy(jar, dest)
                     yield BootstrapEvent(
@@ -1089,10 +1089,10 @@ class BootstrapService:
                     break
 
             # Copy Hadoop JARs from Gradle cache (populated by Iceberg build)
-            # These are needed for HadoopFileIO which Iceberg uses by default
+            # NOTE: flink-s3-fs-hadoop (copied from opt/) provides hadoop-common classes
+            # We only need hadoop-hdfs-client for HdfsConfiguration class
             gradle_cache = Path.home() / ".gradle" / "caches" / "modules-2" / "files-2.1"
             hadoop_jars = [
-                ("hadoop-common", "3.4.1"),
                 ("hadoop-hdfs-client", "3.4.1"),
             ]
 
@@ -1107,7 +1107,6 @@ class BootstrapService:
                 if artifact_dir.exists():
                     for jar in artifact_dir.glob("*/*.jar"):
                         if jar.name == jar_name:
-                            import shutil
                             shutil.copy(jar, dest)
                             yield BootstrapEvent(
                                 event_type=EventType.LOG_INFO,
@@ -1121,12 +1120,23 @@ class BootstrapService:
             python_jar_src = opt_dir / "flink-python-1.20.1.jar"
             python_jar_dst = lib_dir / "flink-python-1.20.1.jar"
             if python_jar_src.exists() and not python_jar_dst.exists():
-                import shutil
                 shutil.copy(python_jar_src, python_jar_dst)
                 yield BootstrapEvent(
                     event_type=EventType.LOG_INFO,
                     task_id=task_id,
                     message="Copied flink-python to lib (required for PyFlink)",
+                )
+
+            # Copy flink-s3-fs-hadoop from opt to lib (provides Hadoop classes for S3)
+            # This JAR contains Hadoop common, S3A filesystem, and AWS SDK
+            s3_jar_src = opt_dir / "flink-s3-fs-hadoop-1.20.1.jar"
+            s3_jar_dst = lib_dir / "flink-s3-fs-hadoop-1.20.1.jar"
+            if s3_jar_src.exists() and not s3_jar_dst.exists():
+                shutil.copy(s3_jar_src, s3_jar_dst)
+                yield BootstrapEvent(
+                    event_type=EventType.LOG_INFO,
+                    task_id=task_id,
+                    message="Copied flink-s3-fs-hadoop to lib (provides Hadoop + S3A)",
                 )
 
             self.state.complete_task(task_id, success=True, message="Flink connectors built and installed")
