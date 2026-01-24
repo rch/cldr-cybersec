@@ -125,6 +125,7 @@ CATALOG_CONFIG = {
     "scope": "PRINCIPAL_ROLE:ALL",
     "warehouse": "cybersec",
     "s3.endpoint": "http://localhost:9010",
+    "s3.region": "us-east-1",
     "s3.path-style-access": "true",
     "s3.access-key-id": "minioadmin",
     "s3.secret-access-key": "minioadmin",

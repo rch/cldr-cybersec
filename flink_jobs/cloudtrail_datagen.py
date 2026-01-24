@@ -90,14 +90,17 @@ def create_cloudtrail_datagen_job():
     # Enable checkpointing for data commits
     # Checkpoints trigger Iceberg commits - without this, data stays buffered!
     env.enable_checkpointing(10000)  # Checkpoint every 10 seconds
-    
+
     # Create table environment with streaming settings
     settings = EnvironmentSettings.in_streaming_mode()
     t_env = StreamTableEnvironment.create(env, settings)
-    
+
     # Set table configuration for faster commits
     t_env.get_config().set("table.exec.sink.not-null-enforcer", "drop")
     t_env.get_config().set("execution.checkpointing.interval", "10s")
+    # Use filesystem checkpoint storage to handle larger state (Iceberg buffers data files)
+    t_env.get_config().set("state.checkpoint-storage", "filesystem")
+    t_env.get_config().set("state.checkpoints.dir", f"file://{flink_home}/checkpoints")
     
     # Set pipeline JAR configuration - find Iceberg runtime JAR (version may vary)
     import glob
@@ -129,7 +132,8 @@ def create_cloudtrail_datagen_job():
             's3.region' = 'us-east-1',
             's3.path-style-access' = 'true',
             's3.access-key-id' = 'minioadmin',
-            's3.secret-access-key' = 'minioadmin'
+            's3.secret-access-key' = 'minioadmin',
+            'client.region' = 'us-east-1'
         )
     """)
     

@@ -303,23 +303,27 @@ start_datagen() {
     "$FLINK_HOME/bin/flink" run -pyclientexec python -py flink_jobs/cloudtrail_datagen.py > /tmp/cloudtrail.log 2>&1 &
     local submit_pid=$!
     echo $submit_pid > /tmp/cloudtrail.pid
-    
-    # Wait for submission to complete
-    sleep 5
-    
-    # Verify job is running
-    running_jobs=$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | grep -c '"state":"RUNNING"' || echo "0")
-    if [ "$running_jobs" -gt "0" ]; then
-        log_success "CloudTrail DataGen job started successfully"
-        return 0
-    else
-        log_error "Failed to start CloudTrail DataGen job"
-        if [ -f /tmp/cloudtrail.log ]; then
-            log_info "Last 10 lines of job log:"
-            tail -10 /tmp/cloudtrail.log | sed 's/^/  /'
+
+    # Wait for job to be submitted and start running (PyFlink takes ~10-15 seconds to initialize)
+    local max_attempts=12
+    local attempt=1
+    while [ $attempt -le $max_attempts ]; do
+        sleep 5
+        running_jobs=$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | jq '[.jobs[] | select(.state == "RUNNING")] | length' 2>/dev/null || echo "0")
+        if [ "$running_jobs" -gt "0" ]; then
+            log_success "CloudTrail DataGen job started successfully"
+            return 0
         fi
-        return 1
+        log_info "Attempt $attempt/$max_attempts - Waiting for job to start..."
+        attempt=$((attempt + 1))
+    done
+
+    log_error "Failed to start CloudTrail DataGen job after $max_attempts attempts"
+    if [ -f /tmp/cloudtrail.log ]; then
+        log_info "Last 10 lines of job log:"
+        tail -10 /tmp/cloudtrail.log | sed 's/^/  /'
     fi
+    return 1
 }
 
 # Verify events are being written to Iceberg Browser
