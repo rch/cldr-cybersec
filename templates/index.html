@@ -13,32 +13,33 @@
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
         /* ============================================
-           Tyrell Keiretsu Design System
-           Blade Runner + Event Horizon Aesthetic
+           Solarized Dark Design System
+           Reduced cognitive load for operator environments
+           https://ethanschoonover.com/solarized/
            ============================================ */
         :root {
-            /* Primary - Tyrell Amber */
-            --color-amber: #D4A84B;
-            --color-gold: #FFD700;
-            --color-bronze: #CD853F;
+            /* Primary - Solarized Yellow */
+            --color-amber: #b58900;
+            --color-gold: #b58900;
+            --color-bronze: #cb4b16;
 
-            /* Backgrounds - Event Horizon Void */
-            --color-void: #0A0A0F;
-            --color-charcoal: #12121A;
-            --color-containment: #1A1A24;
-            --color-grid: #252532;
+            /* Backgrounds - Solarized Base */
+            --color-void: #002b36;
+            --color-charcoal: #073642;
+            --color-containment: #073642;
+            --color-grid: #586e75;
 
-            /* Status - Gravity Drive Spectrum */
-            --color-success: #00FF88;
-            --color-info: #00FFFF;
-            --color-warning: #FFB347;
-            --color-error: #FF4444;
+            /* Status - Solarized Accents */
+            --color-success: #859900;
+            --color-info: #2aa198;
+            --color-warning: #cb4b16;
+            --color-error: #dc322f;
 
-            /* Text */
-            --text-primary: #E8E8F0;
-            --text-secondary: #A0A0B0;
-            --text-muted: #606070;
-            --text-terminal: #00FF88;
+            /* Text - Solarized Content */
+            --text-primary: #839496;
+            --text-secondary: #657b83;
+            --text-muted: #586e75;
+            --text-terminal: #859900;
 
             /* Typography */
             --font-display: 'Orbitron', system-ui, sans-serif;
@@ -52,10 +53,10 @@
             --space-lg: 24px;
             --space-xl: 32px;
 
-            /* Effects */
-            --glow-amber: 0 0 20px rgba(212, 168, 75, 0.3);
-            --glow-success: 0 0 10px rgba(0, 255, 136, 0.4);
-            --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.4);
+            /* Effects - Minimal for reduced cognitive load */
+            --glow-amber: none;
+            --glow-success: none;
+            --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.3);
         }
 
         * {
@@ -704,15 +705,58 @@
         }
 
         /* 3D File System Navigator Styles */
+        .fsn-row {
+            margin-bottom: 20px;
+        }
+
+        .fsn-row-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            background: var(--color-charcoal);
+            border: 1px solid var(--color-grid);
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: var(--font-display);
+            color: var(--color-amber);
+            transition: background 0.2s;
+        }
+
+        .fsn-row-header:hover {
+            background: var(--color-containment);
+        }
+
+        .fsn-arrow {
+            transition: transform 0.2s;
+            font-size: 0.8em;
+        }
+
+        .fsn-arrow.expanded {
+            transform: rotate(90deg);
+        }
+
+        .fsn-row-title {
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+
+        .fsn-row-summary {
+            margin-left: auto;
+            color: var(--text-secondary);
+            font-size: 0.85em;
+            font-family: var(--font-mono);
+        }
+
         .fsn-container {
             width: 100%;
             height: 600px;
             background: var(--color-void);
             position: relative;
-            margin-bottom: 30px;
-            border-radius: 4px;
+            border-radius: 0 0 4px 4px;
             overflow: hidden;
             border: 1px solid var(--color-grid);
+            border-top: none;
             box-shadow: var(--shadow-card);
         }
 
@@ -969,11 +1013,17 @@
         <!-- Error Display -->
         <div id="error-message" class="error" style="display: none;"></div>
 
-        <!-- 3D File System Navigator - Above the fold for natural drill-down -->
-        <div class="fsn-container">
-            <canvas id="fsn-canvas"></canvas>
-            <div class="fsn-overlay" id="fsn-overlay">
-                <h3>ICEBERG FSN</h3>
+        <!-- 3D File System Navigator - Collapsible for reduced cognitive load -->
+        <div class="fsn-row">
+            <div class="fsn-row-header" onclick="toggleFSN()">
+                <span class="fsn-arrow" id="fsn-arrow">&#9654;</span>
+                <span class="fsn-row-title">FSN NAVIGATOR</span>
+                <span class="fsn-row-summary" id="fsn-row-summary">0 regions &middot; 0 services</span>
+            </div>
+            <div class="fsn-container" id="fsn-container" style="display: none;">
+                <canvas id="fsn-canvas"></canvas>
+                <div class="fsn-overlay" id="fsn-overlay">
+                    <h3>ICEBERG FSN</h3>
                 <div class="fsn-stats">
                     <span class="fsn-label">REGIONS:</span>
                     <span class="fsn-value" id="fsn-regions">0</span>
@@ -1004,12 +1054,13 @@
                     <span style="cursor: pointer; color: var(--color-amber);" onclick="fsnNavigateToRoot()">Root</span>
                     <span id="fsn-breadcrumb-path"></span>
                 </div>
+                </div>
+                <div class="fsn-controls" id="fsn-controls">
+                    <!-- Controls will be populated dynamically based on device -->
+                </div>
+                <div class="fsn-loading" id="fsn-loading">INITIALIZING FSN...</div>
+                <div class="fsn-tooltip" id="fsn-tooltip"></div>
             </div>
-            <div class="fsn-controls" id="fsn-controls">
-                <!-- Controls will be populated dynamically based on device -->
-            </div>
-            <div class="fsn-loading" id="fsn-loading">INITIALIZING FSN...</div>
-            <div class="fsn-tooltip" id="fsn-tooltip"></div>
         </div>
 
         <!-- Events Table -->
@@ -2030,14 +2081,42 @@
         const CLICK_THRESHOLD_PX = 10;
         const DOUBLE_TAP_MS = 300;
 
+        // FSN collapse/expand toggle
+        function toggleFSN() {
+            const container = document.getElementById('fsn-container');
+            const arrow = document.getElementById('fsn-arrow');
+            const isHidden = container.style.display === 'none';
+
+            container.style.display = isHidden ? 'block' : 'none';
+            arrow.classList.toggle('expanded', isHidden);
+
+            // Lazy init on first expand
+            if (isHidden && !scene) {
+                initFSN();
+                // Load pending data if available
+                if (window.pendingFSNData) {
+                    createFSNBlocks(window.pendingFSNData);
+                    window.pendingFSNData = null;
+                }
+            }
+        }
+
+        // Update FSN row summary
+        function updateFSNSummary(regions, services) {
+            const el = document.getElementById('fsn-row-summary');
+            if (el) {
+                el.textContent = `${regions} regions \u00b7 ${services} services`;
+            }
+        }
+
         function initFSN() {
             const container = document.getElementById('fsn-canvas');
             const width = container.clientWidth;
             const height = container.clientHeight;
 
-            // Scene - Event Horizon Void aesthetic
+            // Scene - Solarized Dark aesthetic
             scene = new THREE.Scene();
-            scene.fog = new THREE.Fog(0x0A0A0F, 50, 200);
+            scene.fog = new THREE.Fog(0x002b36, 50, 200);
 
             // Camera
             camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
@@ -2050,31 +2129,31 @@
                 alpha: true
             });
             renderer.setSize(width, height);
-            renderer.setClearColor(0x0A0A0F, 1);
+            renderer.setClearColor(0x002b36, 1);
 
             // Raycaster for interaction
             raycaster = new THREE.Raycaster();
             mouse = new THREE.Vector2();
 
-            // Grid - Tyrell Amber aesthetic
-            const gridHelper = new THREE.GridHelper(100, 20, 0xD4A84B, 0x252532);
+            // Grid - Solarized Yellow/base01
+            const gridHelper = new THREE.GridHelper(100, 20, 0xb58900, 0x586e75);
             gridHelper.material.opacity = 0.4;
             gridHelper.material.transparent = true;
             scene.add(gridHelper);
 
-            // Lighting
-            const ambientLight = new THREE.AmbientLight(0x202030, 0.6);
+            // Lighting - Solarized palette
+            const ambientLight = new THREE.AmbientLight(0x073642, 0.6);
             scene.add(ambientLight);
 
-            const directionalLight = new THREE.DirectionalLight(0xD4A84B, 0.8);
+            const directionalLight = new THREE.DirectionalLight(0xb58900, 0.8);
             directionalLight.position.set(10, 20, 10);
             scene.add(directionalLight);
 
-            const pointLight1 = new THREE.PointLight(0x00FF88, 0.8, 60);
+            const pointLight1 = new THREE.PointLight(0x859900, 0.8, 60);
             pointLight1.position.set(-20, 10, -20);
             scene.add(pointLight1);
 
-            const pointLight2 = new THREE.PointLight(0x00FFFF, 0.6, 50);
+            const pointLight2 = new THREE.PointLight(0x2aa198, 0.6, 50);
             pointLight2.position.set(20, 10, 20);
             scene.add(pointLight2);
 
@@ -2432,11 +2511,11 @@
 
                         const geometry = new THREE.BoxGeometry(6, height, 6);
                         const material = new THREE.MeshPhongMaterial({
-                            color: 0x12121A,
+                            color: 0x073642,
                             emissive: blockColor,
                             emissiveIntensity: 0.2,
                             shininess: 80,
-                            specular: 0xD4A84B
+                            specular: 0xb58900
                         });
 
                         const block = new THREE.Mesh(geometry, material);
@@ -2458,7 +2537,7 @@
                         const edges = new THREE.EdgesGeometry(geometry);
                         const line = new THREE.LineSegments(
                             edges,
-                            new THREE.LineBasicMaterial({ color: 0xD4A84B, opacity: 0.6, transparent: true })
+                            new THREE.LineBasicMaterial({ color: 0xb58900, opacity: 0.6, transparent: true })
                         );
                         block.add(line);
 
@@ -2472,6 +2551,7 @@
             document.getElementById('fsn-regions').textContent = regions.length;
             document.getElementById('fsn-services').textContent = services.length;
             document.getElementById('fsn-events').textContent = totalEvents;
+            updateFSNSummary(regions.length, services.length);
 
             fsnState.currentLevel = 'root';
         }
@@ -2495,11 +2575,11 @@
                 const geometry = new THREE.BoxGeometry(5, height, 5);
                 const blockColor = getColorForIndex(index);
                 const material = new THREE.MeshPhongMaterial({
-                    color: 0x12121A,
+                    color: 0x073642,
                     emissive: blockColor,
                     emissiveIntensity: 0.15,
                     shininess: 80,
-                    specular: 0xD4A84B
+                    specular: 0xb58900
                 });
 
                 const block = new THREE.Mesh(geometry, material);
@@ -2514,7 +2594,7 @@
                 const edges = new THREE.EdgesGeometry(geometry);
                 const line = new THREE.LineSegments(
                     edges,
-                    new THREE.LineBasicMaterial({ color: 0xD4A84B, opacity: 0.6, transparent: true })
+                    new THREE.LineBasicMaterial({ color: 0xb58900, opacity: 0.6, transparent: true })
                 );
                 block.add(line);
 
@@ -2528,15 +2608,15 @@
         }
 
         function getColorForErrorRate(rate) {
-            // Green → Amber → Red based on error rate
-            if (rate < 0.05) return 0x00FF88;  // Core green
-            if (rate < 0.15) return 0x00FFFF;  // Cyan
-            if (rate < 0.30) return 0xFFB347;  // Warning amber
-            return 0xFF4444;  // Breach red
+            // Green → Amber → Red based on error rate (Solarized)
+            if (rate < 0.05) return 0x859900;  // Solarized green
+            if (rate < 0.15) return 0x2aa198;  // Solarized cyan
+            if (rate < 0.30) return 0xcb4b16;  // Solarized orange
+            return 0xdc322f;  // Solarized red
         }
 
         function getColorForIndex(index) {
-            const colors = [0x00FF88, 0x00FFFF, 0xD4A84B, 0xFFB347, 0xFF4444, 0x00CCCC, 0xCD853F];
+            const colors = [0x859900, 0x2aa198, 0xb58900, 0xcb4b16, 0xdc322f, 0x268bd2, 0x6c71c4];
             return colors[index % colors.length];
         }
 
@@ -2548,7 +2628,7 @@
 
             // Select new
             selectedObject = obj;
-            obj.material.emissive.setHex(0xD4A84B);
+            obj.material.emissive.setHex(0xb58900);
 
             const data = obj.userData;
 
@@ -2608,7 +2688,7 @@
                             selectedObject.material.emissive.setHex(selectedObject.userData.originalEmissive);
                         }
                         selectedObject = block;
-                        block.material.emissive.setHex(0xD4A84B);
+                        block.material.emissive.setHex(0xb58900);
                         document.getElementById('fsn-selection').style.display = 'block';
                         document.getElementById('fsn-selected-region').textContent = region;
                         document.getElementById('fsn-selected-service').textContent = service;
@@ -2678,11 +2758,11 @@
                 const geometry = new THREE.BoxGeometry(5, height, 5);
                 const blockColor = getColorForIndex(index);
                 const material = new THREE.MeshPhongMaterial({
-                    color: 0x12121A,
+                    color: 0x073642,
                     emissive: blockColor,
                     emissiveIntensity: 0.2,
                     shininess: 80,
-                    specular: 0xD4A84B
+                    specular: 0xb58900
                 });
 
                 const block = new THREE.Mesh(geometry, material);
@@ -2697,7 +2777,7 @@
                 const edges = new THREE.EdgesGeometry(geometry);
                 const line = new THREE.LineSegments(
                     edges,
-                    new THREE.LineBasicMaterial({ color: 0xD4A84B, opacity: 0.6, transparent: true })
+                    new THREE.LineBasicMaterial({ color: 0xb58900, opacity: 0.6, transparent: true })
                 );
                 block.add(line);
 
@@ -2749,10 +2829,8 @@
         function animate() {
             requestAnimationFrame(animate);
 
-            // Gentle rotation of blocks
-            fsnObjects.forEach((obj, index) => {
-                obj.rotation.y += 0.001 + (index * 0.0001);
-            });
+            // Static blocks - no rotation for reduced cognitive load
+            // Motion should indicate state change, not be ambient
 
             renderer.render(scene, camera);
         }
@@ -2767,12 +2845,10 @@
             renderer.setSize(width, height);
         }
 
-        // Initialize FSN on page load
-        window.addEventListener('DOMContentLoaded', () => {
-            initFSN();
-        });
+        // FSN is lazy-initialized on first expand (not on page load)
+        // This reduces initial page load time and cognitive load
 
-        // Update FSN blocks when summary loads
+        // Update FSN row summary when data loads (even if collapsed)
         const originalLoadStats = loadStats;
         loadStats = async function () {
             await originalLoadStats();
@@ -2780,7 +2856,19 @@
             try {
                 const response = await fetch('/api/summary');
                 const summary = await response.json();
-                createFSNBlocks(summary);
+
+                // Update row summary even when collapsed
+                if (summary.regions && summary.services) {
+                    updateFSNSummary(summary.regions.length, summary.services.length);
+                }
+
+                // Only create blocks if FSN is expanded
+                if (scene) {
+                    createFSNBlocks(summary);
+                } else {
+                    // Store for when FSN expands
+                    window.pendingFSNData = summary;
+                }
             } catch (error) {
                 console.error('Error loading FSN data:', error);
             }
