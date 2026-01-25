@@ -315,6 +315,26 @@ PYFLINK_009 = FailureMode(
     solution_level=AutomationLevel.A,
 )
 
+PYFLINK_010 = FailureMode(
+    failure_mode_id="PYFLINK_010",
+    category="pyflink",
+    name="FLINK_HOME Not Exported",
+    description="FLINK_HOME env var not set in current shell (devenv sets it internally)",
+    base_severity=5,   # Moderate - inconvenience, not blocking
+    base_occurrence=6,  # High - common outside devenv shell
+    base_detection=1,   # Very easy to detect
+    symptom="$FLINK_HOME not available in shell, manual flink commands fail",
+    cause="Running outside devenv shell or FLINK_HOME not exported",
+    detection_method="Check if FLINK_HOME environment variable is set",
+    remediation_steps=[
+        "Enter devenv shell: devenv shell",
+        "Or export manually: export FLINK_HOME=$(cybersec --cmd '/bootstrap info --json' | jq -r '.data.flink_home')",
+        "Or use full path from bootstrap config",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
 # Infrastructure failure modes
 INFRA_001 = FailureMode(
     failure_mode_id="INFRA_001",
@@ -415,6 +435,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "PYFLINK_007": PYFLINK_007,
     "PYFLINK_008": PYFLINK_008,
     "PYFLINK_009": PYFLINK_009,
+    "PYFLINK_010": PYFLINK_010,
     "INFRA_001": INFRA_001,
     "INFRA_002": INFRA_002,
     "INFRA_003": INFRA_003,
@@ -425,7 +446,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
 CATEGORIES: dict[str, list[str]] = {
     "iceberg": ["ICE_001", "ICE_002", "ICE_003"],
     "flink": ["FLINK_001", "FLINK_002", "FLINK_003"],
-    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009"],
+    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_010"],
     "infra": ["INFRA_001", "INFRA_002", "INFRA_003"],
     "data": ["DATA_001"],
 }

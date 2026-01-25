@@ -116,6 +116,10 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
     config = service.get_config()
     flink_home = config.get_flink_home()
 
+    # Check if FLINK_HOME env var is set (separate from bootstrap config)
+    flink_home_env = os.environ.get("FLINK_HOME")
+    flink_home_env_set = flink_home_env is not None and flink_home_env != ""
+
     flink_home_exists = flink_home.exists() if flink_home else False
     flink_binary_exists = False
     python_settings_configured = False
@@ -123,6 +127,8 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
     diagnostics["flink_config"] = {
         "flink_home": str(flink_home) if flink_home else "not set",
         "flink_home_exists": flink_home_exists,
+        "flink_home_env": flink_home_env or "not set",
+        "flink_home_env_set": flink_home_env_set,
     }
 
     configured_python_path = None
@@ -433,6 +439,22 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
                 "details": [f"Configured path does not exist: {configured_python_path}"],
             })
             recommendations.insert(0, f"Fix Python path in flink-conf.yaml: {configured_python_path} not found")
+
+    # PYFLINK_010: FLINK_HOME Not Exported
+    if flink_home_exists and not flink_home_env_set:
+        fm = get_failure_mode("PYFLINK_010")
+        if fm:
+            rpn = fm.calculate_rpn()
+            detected_issues.append({
+                "failure_mode_id": "PYFLINK_010",
+                "name": fm.name,
+                "severity": "info",
+                "symptom": fm.symptom,
+                "rpn": rpn.rpn,
+                "remediation": fm.remediation_steps,
+                "details": [f"Bootstrap config has flink_home={flink_home}, but $FLINK_HOME not set in shell"],
+            })
+            recommendations.append(f"Export FLINK_HOME: export FLINK_HOME={flink_home}")
 
     # === Summary ===
 
