@@ -63,11 +63,7 @@ warn contains msg if {
     msg := "FLINK_HOME not exported in shell. Re-enter devenv shell or run: direnv reload"
 }
 
-# Warn if kafka-python not installed
-warn contains msg if {
-    not eff.python.kafka_installed
-    msg := "kafka-python not installed. Kafka connectors may fail. Run: uv pip install kafka-python"
-}
+# Note: kafka-python check removed - current architecture uses DataGen -> Iceberg directly
 
 # Info: Show configured Python path
 info contains msg if {

@@ -73,13 +73,6 @@ async def gather_runtime_config() -> dict[str, Any]:
     except ImportError:
         pass
 
-    kafka_installed = False
-    try:
-        import kafka
-        kafka_installed = True
-    except ImportError:
-        pass
-
     devenv_python = f"{devenv_root}/.devenv/profile/bin/python3"
 
     runtime["python"] = {
@@ -87,7 +80,6 @@ async def gather_runtime_config() -> dict[str, Any]:
         "executable": sys.executable,
         "pyflink_installed": pyflink_installed,
         "pyflink_version": pyflink_version,
-        "kafka_installed": kafka_installed,
         "devenv_python": devenv_python,
         "devenv_python_exists": Path(devenv_python).exists(),
     }
@@ -173,7 +165,6 @@ async def gather_runtime_config() -> dict[str, Any]:
         "polaris": await _check_http("http://localhost:8182/q/health/ready"),
         "flink": await _check_flink("http://localhost:8081"),
         "iceberg_browser": await _check_http("http://localhost:5050/health"),
-        "kafka": await _check_tcp("localhost", 9092),
         "prometheus": await _check_http("http://localhost:9090/-/ready"),
         "otel_collector": await _check_tcp("localhost", 4317),
     }
@@ -301,10 +292,6 @@ def merge_runtime_config(
             "iceberg_browser": {
                 **services_config.get("iceberg_browser", {}),
                 **runtime_config.get("services", {}).get("iceberg_browser", {}),
-            },
-            "kafka": {
-                **services_config.get("kafka", {}),
-                **runtime_config.get("services", {}).get("kafka", {}),
             },
         },
     }

@@ -55,11 +55,12 @@ warn contains msg if {
     msg := "Iceberg Browser not running on port 5050"
 }
 
-# Warn if Kafka is not reachable
-warn contains msg if {
-    not svc.kafka.healthy
-    msg := "Kafka not reachable on port 9092"
-}
+# Note: Kafka check removed - current architecture uses DataGen -> Iceberg directly
+# If Kafka is re-introduced, uncomment:
+# warn contains msg if {
+#     not svc.kafka.healthy
+#     msg := "Kafka not reachable on port 9092"
+# }
 
 # Info: Show service slot availability
 info contains msg if {
