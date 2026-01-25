@@ -9,6 +9,9 @@ Tools:
 - bootstrap_verify: Verify environment is correctly configured
 - bootstrap_run: Execute bootstrap process
 - bootstrap_assess: Quick assessment for devenv startup
+- bootstrap_health: FMEA-based deep health diagnostics
+- bootstrap_diagnose: Detailed diagnosis for a failure mode
+- bootstrap_fix: Attempt remediation based on FMEA tier
 
 Resources:
 - bootstrap://config: Current configuration
@@ -354,6 +357,139 @@ async def bootstrap_assess() -> dict:
             "Environment is ready" if result.get("ready")
             else "Run bootstrap_run to set up the environment"
         ),
+    }
+
+
+# ============================================================================
+# Health Check Tools
+# ============================================================================
+
+
+@mcp.tool()
+async def bootstrap_health(
+    category: Optional[str] = None,
+    quick: bool = False,
+) -> dict:
+    """Run FMEA-based health diagnostics on the cybersec environment.
+
+    Goes beyond basic connectivity to check:
+    - iceberg: PyIceberg memory usage, catalog connectivity, data freshness
+    - flink: Job status, TaskManager availability, checkpoint health
+    - infra: PostgreSQL, MinIO, Polaris connectivity
+    - data: Snapshot accumulation, data quality
+
+    Args:
+        category: Specific category to check (iceberg, flink, infra, data)
+                  or None for all checks
+        quick: If True, run only critical infrastructure checks (fast)
+
+    Returns:
+        Health report with:
+        - status: "healthy", "degraded", or "critical"
+        - checks: Results grouped by category
+        - issues: Detected issues with RPN scores
+        - recommendations: Prioritized remediation steps
+    """
+    from ..health.models import HealthContext
+    from ..health.runner import run_health_check
+
+    service = _get_service()
+    config = service.get_config()
+
+    # Create health context
+    ctx = HealthContext(
+        config=config,
+        flink_url=config.flink_url or "http://localhost:8081",
+        minio_endpoint=config.minio_endpoint or "http://localhost:9010",
+        polaris_url=config.polaris_api_url or "http://localhost:8181",
+        postgres_port=config.postgres_port or 5438,
+        browser_port=config.iceberg_browser_port or 5050,
+    )
+
+    # Run health checks
+    report = await run_health_check(ctx, category=category, quick=quick)
+
+    return report.to_dict()
+
+
+@mcp.tool()
+async def bootstrap_diagnose(failure_mode_id: str) -> dict:
+    """Get detailed diagnosis for a specific failure mode.
+
+    Returns the heuristic definition, current check status,
+    RPN calculation, and remediation steps.
+
+    Args:
+        failure_mode_id: The failure mode to diagnose (e.g., "ICE_001", "FLINK_002")
+
+    Returns:
+        Detailed diagnosis including:
+        - failure_mode: Definition from catalog
+        - check_result: Current status from running the check
+        - rpn: Risk Priority Number calculation
+        - remediation_steps: How to fix the issue
+    """
+    from ..health.models import HealthContext
+    from ..health.runner import get_runner
+
+    service = _get_service()
+    config = service.get_config()
+
+    ctx = HealthContext(
+        config=config,
+        flink_url=config.flink_url or "http://localhost:8081",
+        minio_endpoint=config.minio_endpoint or "http://localhost:9010",
+        polaris_url=config.polaris_api_url or "http://localhost:8181",
+        postgres_port=config.postgres_port or 5438,
+        browser_port=config.iceberg_browser_port or 5050,
+    )
+
+    runner = get_runner()
+    return await runner.diagnose(failure_mode_id, ctx)
+
+
+@mcp.tool()
+async def bootstrap_fix(
+    failure_mode_id: str,
+    dry_run: bool = True,
+) -> dict:
+    """Attempt remediation for a failure mode based on escalation tier.
+
+    For TIER_0/TIER_1 issues (RPN <= 200), can auto-remediate.
+    For TIER_2/MANUAL issues (RPN > 200), returns instructions only.
+
+    Args:
+        failure_mode_id: The failure mode to fix (e.g., "ICE_001")
+        dry_run: If True, show what would be done without making changes
+
+    Returns:
+        Fix result including:
+        - action: "executed", "dry_run", or "manual_required"
+        - tier: Escalation tier from FMEA
+        - instructions: Remediation steps (if manual)
+        - result: Execution result (if not dry_run)
+    """
+    from ..health.catalog import get_failure_mode
+
+    failure_mode = get_failure_mode(failure_mode_id)
+    if not failure_mode:
+        return {"error": f"Unknown failure mode: {failure_mode_id}"}
+
+    rpn = failure_mode.calculate_rpn()
+    tier = rpn.tier
+
+    # For now, return instructions for all tiers
+    # In the future, TIER_0/TIER_1 could auto-execute remediation
+    return {
+        "failure_mode_id": failure_mode_id,
+        "tier": tier.name,
+        "tier_value": int(tier),
+        "requires_approval": rpn.requires_approval,
+        "dry_run": dry_run,
+        "action": "manual_required" if rpn.requires_approval else "dry_run" if dry_run else "would_execute",
+        "instructions": failure_mode.remediation_steps,
+        "symptom": failure_mode.symptom,
+        "target_state": f"Resolve {failure_mode.name}",
     }
 
 

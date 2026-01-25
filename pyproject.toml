@@ -20,6 +20,8 @@ dependencies = [
     "fastmcp>=0.1.0",
     # HTTP client for health checks
     "httpx>=0.27.0",
+    # Process monitoring for health checks
+    "psutil>=5.9.0",
     # TOML writing
     "tomli-w>=1.0.0",
 ]
