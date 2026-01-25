@@ -1,0 +1,312 @@
+"""Runtime configuration gathering.
+
+Collects actual runtime state (service health, paths existence, etc.)
+and merges with static HOCON config for complete validation.
+"""
+
+import os
+import platform
+import socket
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+
+async def gather_runtime_config() -> dict[str, Any]:
+    """Gather runtime configuration and system state.
+
+    This collects actual values from the running system:
+    - Platform detection
+    - Path existence checks
+    - Service health probes
+    - Process state (Flink TaskManager, etc.)
+
+    Returns:
+        Runtime configuration dict
+    """
+    runtime: dict[str, Any] = {
+        "platform": {},
+        "paths": {},
+        "python": {},
+        "services": {},
+        "flink": {},
+    }
+
+    # Platform detection
+    is_macos = platform.system() == "Darwin"
+    is_linux = platform.system() == "Linux"
+    runtime["platform"] = {
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "is_macos": is_macos,
+        "is_linux": is_linux,
+    }
+
+    # Path checks
+    devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
+    flink_home = os.environ.get(
+        "FLINK_HOME",
+        f"{devenv_root}/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1"
+    )
+
+    runtime["paths"] = {
+        "root": devenv_root,
+        "root_exists": Path(devenv_root).exists(),
+        "flink_home": flink_home,
+        "flink_home_exists": Path(flink_home).exists(),
+        "flink_home_env_set": bool(os.environ.get("FLINK_HOME")),
+        "flink_binary_exists": Path(flink_home, "bin", "flink").exists(),
+        "flink_conf_exists": Path(flink_home, "conf", "flink-conf.yaml").exists(),
+    }
+
+    # Python environment
+    pyflink_installed = False
+    pyflink_version = None
+    try:
+        import pyflink
+        pyflink_installed = True
+        pyflink_version = getattr(pyflink, "__version__", "unknown")
+    except ImportError:
+        pass
+
+    kafka_installed = False
+    try:
+        import kafka
+        kafka_installed = True
+    except ImportError:
+        pass
+
+    devenv_python = f"{devenv_root}/.devenv/profile/bin/python3"
+
+    runtime["python"] = {
+        "version": sys.version.split()[0],
+        "executable": sys.executable,
+        "pyflink_installed": pyflink_installed,
+        "pyflink_version": pyflink_version,
+        "kafka_installed": kafka_installed,
+        "devenv_python": devenv_python,
+        "devenv_python_exists": Path(devenv_python).exists(),
+    }
+
+    # Flink configuration state
+    flink_conf_path = Path(flink_home, "conf", "flink-conf.yaml")
+    python_configured = False
+    configured_python_path = ""
+    configured_python_exists = False
+    config_mtime = None
+
+    if flink_conf_path.exists():
+        try:
+            config_mtime = os.path.getmtime(flink_conf_path)
+            content = flink_conf_path.read_text()
+
+            for line in content.split("\n"):
+                line = line.strip()
+                if line.startswith("#"):
+                    continue
+                if "python.executable:" in line and "client" not in line:
+                    python_configured = True
+                    configured_python_path = line.split(":", 1)[1].strip()
+                    configured_python_exists = Path(configured_python_path).exists()
+                    break
+                elif "python.client.executable:" in line and not configured_python_path:
+                    python_configured = True
+                    configured_python_path = line.split(":", 1)[1].strip()
+                    configured_python_exists = Path(configured_python_path).exists()
+        except Exception:
+            pass
+
+    # Check for stale Flink process
+    process_stale = False
+    taskmanager_running = False
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "TaskManager"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            taskmanager_running = True
+            tm_pid = result.stdout.strip().split()[0]
+
+            # On Linux, check process start time vs config mtime
+            proc_stat = Path(f"/proc/{tm_pid}/stat")
+            if proc_stat.exists() and config_mtime:
+                try:
+                    boot_time = None
+                    with open("/proc/stat") as f:
+                        for line in f:
+                            if line.startswith("btime"):
+                                boot_time = int(line.split()[1])
+                                break
+                    if boot_time:
+                        with open(proc_stat) as f:
+                            stat_fields = f.read().split()
+                            starttime_ticks = int(stat_fields[21])
+                            clk_tck = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
+                            tm_start = boot_time + (starttime_ticks / clk_tck)
+                            if config_mtime > tm_start:
+                                process_stale = True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    runtime["flink"] = {
+        "python_configured": python_configured,
+        "configured_python_path": configured_python_path,
+        "configured_python_exists": configured_python_exists,
+        "config_mtime": config_mtime,
+        "taskmanager_running": taskmanager_running,
+        "process_stale": process_stale,
+    }
+
+    # Service health checks
+    runtime["services"] = {
+        "postgres": await _check_tcp("localhost", 5438),
+        "minio": await _check_http("http://localhost:9010/minio/health/live"),
+        "polaris": await _check_http("http://localhost:8182/q/health/ready"),
+        "flink": await _check_flink("http://localhost:8081"),
+        "iceberg_browser": await _check_http("http://localhost:5050/health"),
+        "kafka": await _check_tcp("localhost", 9092),
+        "prometheus": await _check_http("http://localhost:9090/-/ready"),
+        "otel_collector": await _check_tcp("localhost", 4317),
+    }
+
+    return runtime
+
+
+async def _check_tcp(host: str, port: int) -> dict[str, Any]:
+    """Check TCP connectivity."""
+    result = {"host": host, "port": port, "healthy": False}
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        sock.connect((host, port))
+        sock.close()
+        result["healthy"] = True
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+async def _check_http(url: str) -> dict[str, Any]:
+    """Check HTTP endpoint health."""
+    result = {"url": url, "healthy": False}
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(url)
+            result["healthy"] = resp.status_code == 200
+            result["status_code"] = resp.status_code
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+async def _check_flink(url: str) -> dict[str, Any]:
+    """Check Flink cluster health."""
+    result = {
+        "url": url,
+        "jobmanager_healthy": False,
+        "taskmanager_count": 0,
+        "slots_total": 0,
+        "slots_available": 0,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{url}/overview")
+            if resp.status_code == 200:
+                result["jobmanager_healthy"] = True
+                data = resp.json()
+                result["taskmanager_count"] = data.get("taskmanagers", 0)
+                result["slots_total"] = data.get("slots-total", 0)
+                result["slots_available"] = data.get("slots-available", 0)
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def merge_runtime_config(
+    static_config: dict[str, Any],
+    runtime_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge static HOCON config with runtime state.
+
+    Creates a unified config suitable for policy validation that includes:
+    - Static configuration values (from HOCON)
+    - Runtime state (service health, path existence, etc.)
+
+    Args:
+        static_config: Hydrated HOCON configuration
+        runtime_config: Runtime state from gather_runtime_config()
+
+    Returns:
+        Merged configuration dict
+    """
+    merged = {
+        "static": static_config,
+        "runtime": runtime_config,
+    }
+
+    # Create a flat "effective" view for policy validation
+    # This combines static config with runtime checks
+    cybersec = static_config.get("cybersec", {})
+    services_config = cybersec.get("services", {})
+    paths_config = cybersec.get("paths", {})
+
+    merged["effective"] = {
+        "platform": runtime_config.get("platform", {}),
+
+        "paths": {
+            **paths_config,
+            **runtime_config.get("paths", {}),
+        },
+
+        "python": {
+            **cybersec.get("python", {}),
+            **runtime_config.get("python", {}),
+        },
+
+        "flink": {
+            **services_config.get("flink", {}),
+            **runtime_config.get("flink", {}),
+            "home": runtime_config.get("paths", {}).get("flink_home", ""),
+            "home_exists": runtime_config.get("paths", {}).get("flink_home_exists", False),
+            "home_env_set": runtime_config.get("paths", {}).get("flink_home_env_set", False),
+            "binary_exists": runtime_config.get("paths", {}).get("flink_binary_exists", False),
+        },
+
+        "services": {
+            "postgres": {
+                **services_config.get("postgres", {}),
+                **runtime_config.get("services", {}).get("postgres", {}),
+            },
+            "minio": {
+                **services_config.get("minio", {}),
+                **runtime_config.get("services", {}).get("minio", {}),
+            },
+            "polaris": {
+                **services_config.get("polaris", {}),
+                **runtime_config.get("services", {}).get("polaris", {}),
+            },
+            "flink": {
+                **services_config.get("flink", {}),
+                **runtime_config.get("services", {}).get("flink", {}),
+            },
+            "iceberg_browser": {
+                **services_config.get("iceberg_browser", {}),
+                **runtime_config.get("services", {}).get("iceberg_browser", {}),
+            },
+            "kafka": {
+                **services_config.get("kafka", {}),
+                **runtime_config.get("services", {}).get("kafka", {}),
+            },
+        },
+    }
+
+    return merged

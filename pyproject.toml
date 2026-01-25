@@ -26,6 +26,7 @@ dependencies = [
     "tomli-w>=1.0.0",
     "ty>=0.0.13",
     "ortools>=9.12.4544",
+    "pyhocon>=0.3.61",
 ]
 
 [project.optional-dependencies]
