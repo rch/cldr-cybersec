@@ -1068,6 +1068,49 @@
         <!-- Error Display -->
         <div id="error-message" class="error" style="display: none;"></div>
 
+        <!-- 3D File System Navigator - Above the fold for natural drill-down -->
+        <div class="fsn-container">
+            <canvas id="fsn-canvas"></canvas>
+            <div class="fsn-overlay" id="fsn-overlay">
+                <h3>ICEBERG FSN</h3>
+                <div class="fsn-stats">
+                    <span class="fsn-label">REGIONS:</span>
+                    <span class="fsn-value" id="fsn-regions">0</span>
+                    <span class="fsn-label">SERVICES:</span>
+                    <span class="fsn-value" id="fsn-services">0</span>
+                    <span class="fsn-label">EVENTS:</span>
+                    <span class="fsn-value" id="fsn-events">0</span>
+                </div>
+                <!-- Selection panel - shown when a block is selected -->
+                <div class="fsn-selection" id="fsn-selection" style="display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--color-amber);">
+                    <div style="margin-bottom: 8px;">
+                        <span class="fsn-label">SELECTED:</span>
+                        <span class="fsn-value" id="fsn-selected-region" style="color: var(--color-info);">-</span>
+                        <span style="color: var(--text-muted);">/</span>
+                        <span class="fsn-value" id="fsn-selected-service" style="color: var(--color-info);">-</span>
+                    </div>
+                    <div style="margin-bottom: 8px;">
+                        <span class="fsn-label">COUNT:</span>
+                        <span class="fsn-value" id="fsn-selected-count">-</span>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 11px;" onclick="fsnScrollToEvents()">View Events ↓</button>
+                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 11px;" onclick="fsnClearSelection()">Clear</button>
+                    </div>
+                </div>
+                <!-- Breadcrumb for drill-down navigation -->
+                <div class="fsn-breadcrumb" id="fsn-breadcrumb" style="display: none; margin-top: 8px; font-size: 11px;">
+                    <span style="cursor: pointer; color: var(--color-amber);" onclick="fsnNavigateToRoot()">Root</span>
+                    <span id="fsn-breadcrumb-path"></span>
+                </div>
+            </div>
+            <div class="fsn-controls" id="fsn-controls">
+                <!-- Controls will be populated dynamically based on device -->
+            </div>
+            <div class="fsn-loading" id="fsn-loading">INITIALIZING FSN...</div>
+            <div class="fsn-tooltip" id="fsn-tooltip"></div>
+        </div>
+
         <!-- Events Table -->
         <div class="events-table">
             <div class="table-header">
@@ -1118,49 +1161,6 @@
                     <button class="btn-secondary" onclick="nextPage()" id="masonry-next-btn">Next</button>
                 </div>
             </div>
-        </div>
-
-        <!-- 3D File System Navigator -->
-        <div class="fsn-container">
-            <canvas id="fsn-canvas"></canvas>
-            <div class="fsn-overlay" id="fsn-overlay">
-                <h3>ICEBERG FSN</h3>
-                <div class="fsn-stats">
-                    <span class="fsn-label">REGIONS:</span>
-                    <span class="fsn-value" id="fsn-regions">0</span>
-                    <span class="fsn-label">SERVICES:</span>
-                    <span class="fsn-value" id="fsn-services">0</span>
-                    <span class="fsn-label">EVENTS:</span>
-                    <span class="fsn-value" id="fsn-events">0</span>
-                </div>
-                <!-- Selection panel - shown when a block is selected -->
-                <div class="fsn-selection" id="fsn-selection" style="display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--color-amber);">
-                    <div style="margin-bottom: 8px;">
-                        <span class="fsn-label">SELECTED:</span>
-                        <span class="fsn-value" id="fsn-selected-region" style="color: var(--color-info);">-</span>
-                        <span style="color: var(--text-muted);">/</span>
-                        <span class="fsn-value" id="fsn-selected-service" style="color: var(--color-info);">-</span>
-                    </div>
-                    <div style="margin-bottom: 8px;">
-                        <span class="fsn-label">COUNT:</span>
-                        <span class="fsn-value" id="fsn-selected-count">-</span>
-                    </div>
-                    <div style="display: flex; gap: 8px;">
-                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 11px;" onclick="fsnScrollToEvents()">View Events</button>
-                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 11px;" onclick="fsnClearSelection()">Clear</button>
-                    </div>
-                </div>
-                <!-- Breadcrumb for drill-down navigation -->
-                <div class="fsn-breadcrumb" id="fsn-breadcrumb" style="display: none; margin-top: 8px; font-size: 11px;">
-                    <span style="cursor: pointer; color: var(--color-amber);" onclick="fsnNavigateToRoot()">Root</span>
-                    <span id="fsn-breadcrumb-path"></span>
-                </div>
-            </div>
-            <div class="fsn-controls" id="fsn-controls">
-                <!-- Controls will be populated dynamically based on device -->
-            </div>
-            <div class="fsn-loading" id="fsn-loading">INITIALIZING FSN...</div>
-            <div class="fsn-tooltip" id="fsn-tooltip"></div>
         </div>
     </div>
 
@@ -2556,7 +2556,7 @@
         }
 
         function fsnScrollToEvents() {
-            document.getElementById('table-container').scrollIntoView({ behavior: 'smooth' });
+            document.querySelector('.events-table').scrollIntoView({ behavior: 'smooth' });
         }
 
         function animate() {
