@@ -253,7 +253,7 @@ async def _fix_python_path_mismatch(
         result["success"] = True
         result["message"] = f"Updated {flink_conf_path} with Python configuration"
         result["restart_required"] = True
-        result["restart_command"] = f"$FLINK_HOME/bin/stop-cluster.sh && $FLINK_HOME/bin/start-cluster.sh"
+        result["restart_command"] = "devenv tasks run restart:clean"
 
     except Exception as e:
         result["success"] = False

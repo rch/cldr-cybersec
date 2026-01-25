@@ -581,7 +581,7 @@ def _format_pyflink_fixes(fix_results: list, dry_run: bool) -> str:
         if any(f.get("restart_required") for f in fix_results):
             lines.append("")
             lines.append("⚠ Flink cluster restart required to apply changes:")
-            lines.append("  $FLINK_HOME/bin/stop-cluster.sh && $FLINK_HOME/bin/start-cluster.sh")
+            lines.append("  devenv tasks run restart:clean")
 
     return "\n".join(lines)
 
