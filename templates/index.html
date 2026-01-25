@@ -870,105 +870,6 @@
             font-family: var(--font-mono);
         }
 
-        .modal {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.5);
-            z-index: 1000;
-            overflow-y: auto;
-        }
-
-        .modal.active {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .modal-content {
-            background: var(--color-charcoal);
-            border-radius: 4px;
-            border: 1px solid var(--color-amber);
-            max-width: 900px;
-            width: 90%;
-            max-height: 90vh;
-            overflow-y: auto;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5), var(--glow-amber);
-        }
-
-        .modal-header {
-            padding: 20px;
-            border-bottom: 1px solid var(--color-grid);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .modal-header h3 {
-            color: var(--color-amber);
-            font-size: 1.2em;
-            font-weight: 600;
-        }
-
-        .close-modal {
-            background: none;
-            border: none;
-            color: var(--text-secondary);
-            font-size: 24px;
-            cursor: pointer;
-            padding: 0;
-            width: 30px;
-            height: 30px;
-        }
-
-        .close-modal:hover {
-            color: var(--color-amber);
-        }
-
-        .modal-body {
-            padding: 20px;
-        }
-
-        .event-detail {
-            display: grid;
-            gap: 15px;
-        }
-
-        .detail-row {
-            display: grid;
-            grid-template-columns: 180px 1fr;
-            gap: 10px;
-            padding: 8px 0;
-            border-bottom: 1px solid var(--color-grid);
-        }
-
-        .detail-label {
-            font-weight: 600;
-            color: var(--color-amber);
-            font-size: 0.85em;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
-        .detail-value {
-            color: var(--text-primary);
-            font-family: var(--font-mono);
-            word-break: break-all;
-        }
-
-        .json-view {
-            background: var(--color-void);
-            padding: 15px;
-            border-radius: 2px;
-            border: 1px solid var(--color-grid);
-            font-family: var(--font-mono);
-            font-size: 0.85em;
-            color: var(--color-success);
-            overflow-x: auto;
-        }
     </style>
 </head>
 
@@ -1160,17 +1061,6 @@
                     <span id="masonry-page-info">Page 1</span>
                     <button class="btn-secondary" onclick="nextPage()" id="masonry-next-btn">Next</button>
                 </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Event Detail Modal -->
-    <div id="event-modal" class="modal">
-        <div class="modal-content">
-            <span class="close-modal" onclick="closeModal()">&times;</span>
-            <h2>Event Details</h2>
-            <div class="modal-body" id="modal-body">
-                <!-- Event details will be inserted here -->
             </div>
         </div>
     </div>
@@ -1724,11 +1614,11 @@
             const card = document.createElement('div');
             card.className = 'event-card';
 
-            // If single event, use its ID. If group, use first event's ID (or handle group click)
-            // Handle both snake_case (from Iceberg schema) and camelCase (from CloudTrail JSON)
-            const eventId = group.event_id || group.eventID || group.id;
-            if (eventId) {
-                card.onclick = () => showEventDetail(eventId);
+            // Card click: highlight corresponding FSN block (if visible)
+            const eventSource = group.event_source || group.eventSource;
+            const region = group.region || group.awsRegion;
+            if (eventSource && typeof fsnHighlightBlock === 'function') {
+                card.onclick = () => fsnHighlightBlock(region, eventSource);
                 card.style.cursor = 'pointer';
             }
 
@@ -1762,7 +1652,8 @@
             }
 
             // Viz container ID - inference API will populate appropriate visualization
-            const vizId = `viz-${eventId}`;
+            const cardId = group.event_id || group.eventID || group.id || Math.random().toString(36).substr(2, 9);
+            const vizId = `viz-${cardId}`;
 
             // Format request parameters for display if available
             let paramsHtml = '';
@@ -1939,9 +1830,11 @@
             events.forEach(event => {
                 const row = document.createElement('tr');
                 row.className = 'event-row';
-                const eventId = event.event_id || event.eventID || event.id;
-                if (eventId) {
-                    row.onclick = () => showEventDetail(eventId);
+                // Row click: highlight corresponding FSN block
+                const eventSource = event.event_source || event.eventSource;
+                const region = event.region || event.awsRegion;
+                if (eventSource && typeof fsnHighlightBlock === 'function') {
+                    row.onclick = () => fsnHighlightBlock(region, eventSource);
                     row.style.cursor = 'pointer';
                 }
 
@@ -2036,46 +1929,6 @@
             loadStats();
             loadEvents();
         }
-
-        async function showEventDetail(eventId) {
-            try {
-                const response = await fetch(`/api/event/${eventId}`);
-                const event = await response.json();
-
-                if (event.error) {
-                    throw new Error(event.error);
-                }
-
-                const modalBody = document.getElementById('modal-body');
-                modalBody.innerHTML = '<div class="event-detail">' +
-                    Object.entries(event).map(([key, value]) => `
-                        <div class="detail-row">
-                            <div class="detail-label">${key}</div>
-                            <div class="detail-value">${value !== null && value !== undefined ?
-                            (typeof value === 'object' ? JSON.stringify(value, null, 2) : value) :
-                            '-'
-                        }</div>
-                        </div>
-                    `).join('') +
-                    '</div>';
-
-                document.getElementById('event-modal').classList.add('active');
-            } catch (error) {
-                console.error('Error loading event detail:', error);
-                alert(`Error: ${error.message}`);
-            }
-        }
-
-        function closeModal() {
-            document.getElementById('event-modal').classList.remove('active');
-        }
-
-        // Close modal when clicking outside
-        document.getElementById('event-modal').addEventListener('click', function (e) {
-            if (e.target === this) {
-                closeModal();
-            }
-        });
 
         // Server-Sent Events for live updates
         let eventSource = null;
@@ -2732,6 +2585,40 @@
 
             document.getElementById('fsn-selection').style.display = 'none';
             currentFilters = {};
+            currentPage = 0;
+            loadEvents();
+        }
+
+        // Highlight FSN block from card/row click - select block and filter events (no scroll)
+        function fsnHighlightBlock(region, service) {
+            // Find matching FSN block if FSN is loaded
+            if (fsnObjects && fsnObjects.length > 0) {
+                const block = fsnObjects.find(obj =>
+                    obj.userData.region === region && obj.userData.service === service
+                );
+
+                if (block) {
+                    // Brief pulse effect then select
+                    const origColor = block.material.emissive.getHex();
+                    block.material.emissive.setHex(0xffffff);
+                    setTimeout(() => {
+                        block.material.emissive.setHex(origColor);
+                        // Select without triggering loadEvents (we'll do it ourselves)
+                        if (selectedObject && selectedObject !== block) {
+                            selectedObject.material.emissive.setHex(selectedObject.userData.originalEmissive);
+                        }
+                        selectedObject = block;
+                        block.material.emissive.setHex(0xD4A84B);
+                        document.getElementById('fsn-selection').style.display = 'block';
+                        document.getElementById('fsn-selected-region').textContent = region;
+                        document.getElementById('fsn-selected-service').textContent = service;
+                        document.getElementById('fsn-selected-count').textContent = block.userData.count || '-';
+                    }, 150);
+                }
+            }
+
+            // Always filter events by region+service (even if no FSN block found)
+            currentFilters = { region: region, event_source: service };
             currentPage = 0;
             loadEvents();
         }
