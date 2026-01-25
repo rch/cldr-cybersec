@@ -295,6 +295,8 @@ def _format_health_report(data: dict) -> str:
     lines.append("")
 
     checks = data.get("checks", {})
+    next_steps = []  # Collect hints for next steps
+
     for cat_name, cat_checks in checks.items():
         lines.append(f"{cat_name.upper()}:")
         for check in cat_checks:
@@ -303,6 +305,18 @@ def _format_health_report(data: dict) -> str:
             lines.append(f"  {icon} {check.get('message', check.get('name', 'unknown'))}")
             if check.get("remediation"):
                 lines.append(f"      → {check['remediation']}")
+
+            # Collect next steps based on issues
+            msg = check.get("message", "")
+            if "Table does not exist" in msg or "Table not found" in msg:
+                next_steps.append(("pyflink", "No Iceberg table - DataGen job may not have run"))
+            elif "No running jobs" in msg:
+                next_steps.append(("pyflink", "No Flink jobs running - check PyFlink configuration"))
+            elif check_status in ("critical", "error"):
+                if cat_name.lower() == "pyflink":
+                    next_steps.append(("pyflink", check.get("message", "")))
+                elif cat_name.lower() == "flink":
+                    next_steps.append(("pyflink", check.get("message", "")))
         lines.append("")
 
     issues = data.get("issues", [])
@@ -318,6 +332,16 @@ def _format_health_report(data: dict) -> str:
         lines.append("Recommendations:")
         for rec in recommendations:
             lines.append(f"  • {rec}")
+        lines.append("")
+
+    # Add next steps guidance based on detected issues
+    if next_steps:
+        lines.append("Next Steps:")
+        lines.append("  Run deeper diagnostics:")
+        lines.append("    cybersec --cmd '/health pyflink'")
+        lines.append("")
+        lines.append("  Or fix issues directly:")
+        lines.append("    cybersec --cmd '/health fix pyflink'")
 
     return "\n".join(lines)
 
