@@ -1473,13 +1473,6 @@
             }
         });
 
-
-        // Initialize on page load
-        document.addEventListener('DOMContentLoaded', function () {
-            loadStats();
-            loadEvents();
-        });
-
         async function loadStats() {
             try {
                 const [statsResponse, summaryResponse] = await Promise.all([
