@@ -297,8 +297,10 @@ start_datagen() {
     fi
     
     # Check if job is already running
-    local running_jobs=$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | grep -c '"state":"RUNNING"' || echo "0")
-    if [ "$running_jobs" -gt "0" ]; then
+    # Note: tr -d removes any whitespace/newlines for portable integer comparison
+    local running_jobs=$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | grep -c '"state":"RUNNING"' 2>/dev/null | tr -d '[:space:]' || echo "0")
+    if [ -z "$running_jobs" ]; then running_jobs=0; fi
+    if [ "$running_jobs" -gt 0 ]; then
         log_success "CloudTrail DataGen job already running"
         return 0
     fi
@@ -327,8 +329,9 @@ start_datagen() {
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
         sleep 5
-        running_jobs=$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | jq '[.jobs[] | select(.state == "RUNNING")] | length' 2>/dev/null || echo "0")
-        if [ "$running_jobs" -gt "0" ]; then
+        running_jobs=$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | jq '[.jobs[] | select(.state == "RUNNING")] | length' 2>/dev/null | tr -d '[:space:]' || echo "0")
+        if [ -z "$running_jobs" ]; then running_jobs=0; fi
+        if [ "$running_jobs" -gt 0 ]; then
             log_success "CloudTrail DataGen job started successfully"
             return 0
         fi
