@@ -5,9 +5,59 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Iceberg Browser - CloudTrail Events</title>
+    <!-- Google Fonts: Orbitron for titles, Inter for UI, JetBrains Mono for data -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Orbitron:wght@600;700&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
+        /* ============================================
+           Tyrell Keiretsu Design System
+           Blade Runner + Event Horizon Aesthetic
+           ============================================ */
+        :root {
+            /* Primary - Tyrell Amber */
+            --color-amber: #D4A84B;
+            --color-gold: #FFD700;
+            --color-bronze: #CD853F;
+
+            /* Backgrounds - Event Horizon Void */
+            --color-void: #0A0A0F;
+            --color-charcoal: #12121A;
+            --color-containment: #1A1A24;
+            --color-grid: #252532;
+
+            /* Status - Gravity Drive Spectrum */
+            --color-success: #00FF88;
+            --color-info: #00FFFF;
+            --color-warning: #FFB347;
+            --color-error: #FF4444;
+
+            /* Text */
+            --text-primary: #E8E8F0;
+            --text-secondary: #A0A0B0;
+            --text-muted: #606070;
+            --text-terminal: #00FF88;
+
+            /* Typography */
+            --font-display: 'Orbitron', system-ui, sans-serif;
+            --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            --font-mono: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+
+            /* Spacing */
+            --space-xs: 4px;
+            --space-sm: 8px;
+            --space-md: 16px;
+            --space-lg: 24px;
+            --space-xl: 32px;
+
+            /* Effects */
+            --glow-amber: 0 0 20px rgba(212, 168, 75, 0.3);
+            --glow-success: 0 0 10px rgba(0, 255, 136, 0.4);
+            --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.4);
+        }
+
         * {
             margin: 0;
             padding: 0;
@@ -15,40 +65,50 @@
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: #f5f7fa;
-            color: #2c3e50;
+            font-family: var(--font-body);
+            background: var(--color-void);
+            color: var(--text-primary);
             line-height: 1.6;
         }
 
         .container {
             max-width: 1400px;
             margin: 0 auto;
-            padding: 20px;
+            padding: var(--space-lg);
         }
 
         header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+            background: linear-gradient(180deg, var(--color-void) 0%, var(--color-charcoal) 100%);
+            color: var(--text-primary);
             padding: 30px 0;
             margin-bottom: 30px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            border-bottom: 1px solid var(--color-amber);
+            box-shadow: 0 1px 0 rgba(212, 168, 75, 0.3), 0 4px 20px rgba(0, 0, 0, 0.5);
         }
 
         header h1 {
-            font-size: 2.5em;
+            font-family: var(--font-display);
+            font-size: 2.2em;
+            font-weight: 700;
+            color: var(--color-amber);
+            text-shadow: 0 0 30px rgba(212, 168, 75, 0.4);
+            letter-spacing: 0.05em;
             margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
         }
 
         header p {
-            font-size: 1.1em;
-            opacity: 0.9;
+            font-size: 1em;
+            color: var(--text-secondary);
         }
 
         .refresh-controls {
-            background: rgba(255, 255, 255, 0.1);
+            background: rgba(212, 168, 75, 0.1);
+            border: 1px solid var(--color-grid);
             padding: 10px 15px;
-            border-radius: 5px;
+            border-radius: 4px;
             margin-top: 15px;
             font-size: 0.9em;
             display: flex;
@@ -58,40 +118,57 @@
 
         .refresh-controls label {
             margin: 0;
+            color: var(--text-secondary);
         }
 
         .refresh-controls select {
-            background: white;
-            color: #2c3e50;
-            border: none;
+            background: var(--color-void);
+            color: var(--text-primary);
+            border: 1px solid var(--color-grid);
             padding: 5px 10px;
-            border-radius: 3px;
+            border-radius: 2px;
             cursor: pointer;
+            font-family: var(--font-mono);
+            font-size: 0.9em;
+        }
+
+        .refresh-controls select:focus {
+            outline: none;
+            border-color: var(--color-amber);
         }
 
         .service-links {
             margin-top: 15px;
             display: flex;
-            gap: 15px;
+            gap: 12px;
             flex-wrap: wrap;
         }
 
         .service-link {
-            background: rgba(255, 255, 255, 0.2);
-            color: white;
+            background: transparent;
+            color: var(--text-secondary);
             text-decoration: none;
-            padding: 8px 15px;
-            border-radius: 5px;
-            font-size: 0.9em;
+            padding: 8px 14px;
+            border: 1px solid var(--color-grid);
+            border-radius: 2px;
+            font-size: 0.85em;
             font-weight: 500;
-            transition: background 0.2s;
+            transition: all 0.2s;
             display: flex;
             align-items: center;
             gap: 8px;
         }
 
         .service-link:hover {
-            background: rgba(255, 255, 255, 0.3);
+            color: var(--color-amber);
+            border-color: var(--color-amber);
+            background: rgba(212, 168, 75, 0.1);
+        }
+
+        .service-link svg {
+            width: 16px;
+            height: 16px;
+            fill: currentColor;
         }
 
         .live-indicator {
@@ -99,42 +176,45 @@
             align-items: center;
             gap: 8px;
             padding: 5px 12px;
-            background: rgba(255, 255, 255, 0.2);
-            border-radius: 15px;
+            background: rgba(37, 37, 50, 0.8);
+            border: 1px solid var(--color-grid);
+            border-radius: 2px;
             font-size: 0.85em;
+            font-family: var(--font-mono);
         }
 
         .live-indicator.connected {
-            background: rgba(46, 204, 113, 0.3);
+            border-color: var(--color-success);
+            background: rgba(0, 255, 136, 0.1);
         }
 
         .live-indicator.disconnected {
-            background: rgba(231, 76, 60, 0.3);
+            border-color: var(--color-error);
+            background: rgba(255, 68, 68, 0.1);
         }
 
         .live-dot {
             width: 8px;
             height: 8px;
             border-radius: 50%;
-            background: #fff;
-            opacity: 0.5;
+            background: var(--color-success);
         }
 
         .live-dot.pulse {
             animation: pulse 2s ease-in-out infinite;
+            box-shadow: 0 0 8px var(--color-success);
         }
 
         @keyframes pulse {
-
-            0%,
-            100% {
-                opacity: 0.5;
+            0%, 100% {
+                opacity: 0.6;
                 transform: scale(1);
+                box-shadow: 0 0 4px var(--color-success);
             }
-
             50% {
                 opacity: 1;
                 transform: scale(1.2);
+                box-shadow: 0 0 12px var(--color-success);
             }
         }
 
@@ -142,11 +222,12 @@
             position: fixed;
             top: 20px;
             right: 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+            background: var(--color-charcoal);
+            color: var(--text-primary);
             padding: 15px 20px;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            border-radius: 4px;
+            border: 1px solid var(--color-amber);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), var(--glow-amber);
             z-index: 1000;
             animation: slideIn 0.3s ease-out;
             max-width: 350px;
@@ -183,42 +264,65 @@
         }
 
         .stat-card {
-            background: white;
+            background: var(--color-charcoal);
             padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-            transition: transform 0.2s;
+            border-radius: 4px;
+            border: 1px solid var(--color-grid);
+            box-shadow: var(--shadow-card);
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        /* Containment bracket - left accent */
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 15%;
+            bottom: 15%;
+            width: 3px;
+            background: linear-gradient(180deg, transparent 0%, var(--color-amber) 20%, var(--color-amber) 80%, transparent 100%);
         }
 
         .stat-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            border-color: var(--color-amber);
+            box-shadow: var(--shadow-card), 0 0 20px rgba(212, 168, 75, 0.15);
         }
 
         .stat-card h3 {
-            color: #667eea;
-            font-size: 0.9em;
+            color: var(--color-amber);
+            font-family: var(--font-body);
+            font-size: 0.75em;
+            font-weight: 600;
             text-transform: uppercase;
+            letter-spacing: 0.1em;
             margin-bottom: 10px;
         }
 
         .stat-card .value {
+            font-family: var(--font-display);
             font-size: 2em;
-            font-weight: bold;
-            color: #2c3e50;
+            font-weight: 700;
+            color: var(--text-primary);
+            text-shadow: 0 0 20px rgba(232, 232, 240, 0.2);
         }
 
         .filters {
-            background: white;
+            background: var(--color-charcoal);
             padding: 25px;
-            border-radius: 10px;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            border-radius: 4px;
+            border: 1px solid var(--color-grid);
+            box-shadow: var(--shadow-card);
             margin-bottom: 20px;
         }
 
         .filters h2 {
             margin-bottom: 20px;
-            color: #667eea;
+            color: var(--color-amber);
+            font-size: 1.1em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
 
         .filter-grid {
@@ -236,19 +340,30 @@
         .filter-field label {
             margin-bottom: 5px;
             font-weight: 500;
-            color: #555;
+            font-size: 0.75em;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-secondary);
         }
 
         .filter-field input {
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
+            padding: 10px 12px;
+            background: var(--color-void);
+            border: 1px solid var(--color-grid);
+            border-radius: 2px;
+            font-family: var(--font-mono);
             font-size: 14px;
+            color: var(--text-primary);
         }
 
         .filter-field input:focus {
             outline: none;
-            border-color: #667eea;
+            border-color: var(--color-amber);
+            box-shadow: 0 0 0 1px rgba(212, 168, 75, 0.2);
+        }
+
+        .filter-field input::placeholder {
+            color: var(--text-muted);
         }
 
         .filter-actions {
@@ -259,35 +374,41 @@
         button {
             padding: 10px 20px;
             border: none;
-            border-radius: 5px;
+            border-radius: 2px;
+            font-family: var(--font-body);
             font-size: 14px;
-            font-weight: 500;
+            font-weight: 600;
+            letter-spacing: 0.03em;
             cursor: pointer;
             transition: all 0.2s;
         }
 
         .btn-primary {
-            background: #667eea;
-            color: white;
+            background: linear-gradient(135deg, var(--color-amber) 0%, var(--color-bronze) 100%);
+            color: var(--color-void);
+            border: 1px solid var(--color-amber);
         }
 
         .btn-primary:hover {
-            background: #5568d3;
+            background: linear-gradient(135deg, var(--color-gold) 0%, var(--color-amber) 100%);
+            box-shadow: var(--glow-amber);
         }
 
         .btn-secondary {
-            background: #e2e8f0;
-            color: #2c3e50;
+            background: transparent;
+            color: var(--color-amber);
+            border: 1px solid var(--color-amber);
         }
 
         .btn-secondary:hover {
-            background: #cbd5e0;
+            background: rgba(212, 168, 75, 0.1);
         }
 
         .events-table {
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            background: var(--color-charcoal);
+            border-radius: 4px;
+            border: 1px solid var(--color-grid);
+            box-shadow: var(--shadow-card);
             overflow: hidden;
         }
 
@@ -296,39 +417,51 @@
             justify-content: space-between;
             align-items: center;
             padding: 20px;
-            border-bottom: 1px solid #e2e8f0;
+            border-bottom: 1px solid var(--color-grid);
         }
 
         .table-header h2 {
-            color: #667eea;
+            color: var(--color-amber);
+            font-size: 1.1em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
 
         .pagination-info {
-            color: #718096;
-            font-size: 14px;
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
+            font-size: 13px;
         }
 
         table {
             width: 100%;
             border-collapse: collapse;
+            font-family: var(--font-mono);
+            font-size: 0.9em;
         }
 
         th {
-            background: #f7fafc;
-            padding: 15px;
+            background: var(--color-containment);
+            padding: 12px 15px;
             text-align: left;
+            font-family: var(--font-body);
+            font-size: 0.75em;
             font-weight: 600;
-            color: #4a5568;
-            border-bottom: 2px solid #e2e8f0;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--color-amber);
+            border-bottom: 1px solid var(--color-amber);
         }
 
         td {
-            padding: 15px;
-            border-bottom: 1px solid #e2e8f0;
+            padding: 12px 15px;
+            border-bottom: 1px solid var(--color-grid);
+            color: var(--text-secondary);
         }
 
         tr:hover {
-            background: #f7fafc;
+            background: rgba(212, 168, 75, 0.05);
         }
 
         .event-row {
@@ -337,35 +470,41 @@
 
         .event-name {
             font-weight: 500;
-            color: #667eea;
+            color: var(--color-info);
         }
 
         .timestamp {
-            color: #718096;
-            font-size: 0.9em;
+            color: var(--text-muted);
+            font-size: 0.85em;
         }
 
         .badge {
             display: inline-block;
             padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 0.85em;
+            border-radius: 2px;
+            font-family: var(--font-mono);
+            font-size: 0.75em;
             font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
 
         .badge-success {
-            background: #c6f6d5;
-            color: #22543d;
+            background: rgba(0, 255, 136, 0.15);
+            color: var(--color-success);
+            border: 1px solid rgba(0, 255, 136, 0.3);
         }
 
         .badge-error {
-            background: #fed7d7;
-            color: #742a2a;
+            background: rgba(255, 68, 68, 0.15);
+            color: var(--color-error);
+            border: 1px solid rgba(255, 68, 68, 0.3);
         }
 
         .badge-info {
-            background: #bee3f8;
-            color: #2c5282;
+            background: rgba(0, 255, 255, 0.15);
+            color: var(--color-info);
+            border: 1px solid rgba(0, 255, 255, 0.3);
         }
 
         .pagination {
@@ -374,23 +513,33 @@
             align-items: center;
             gap: 10px;
             padding: 20px;
+            border-top: 1px solid var(--color-grid);
         }
 
         /* Masonry Layout Styles */
         .view-toggle {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             align-items: center;
         }
 
         .view-toggle button {
             padding: 8px 16px;
             font-size: 13px;
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--color-grid);
+        }
+
+        .view-toggle button:hover {
+            color: var(--color-amber);
+            border-color: var(--color-amber);
         }
 
         .view-toggle button.active {
-            background: #667eea;
-            color: white;
+            background: var(--color-amber);
+            color: var(--color-void);
+            border-color: var(--color-amber);
         }
 
         .masonry-container {
@@ -419,21 +568,45 @@
         }
 
         .event-card {
-            background: white;
-            border-radius: 10px;
+            background: var(--color-charcoal);
+            border-radius: 4px;
             padding: 20px;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            border: 1px solid var(--color-grid);
+            box-shadow: var(--shadow-card);
             transition: all 0.3s ease;
             cursor: pointer;
             break-inside: avoid;
-            /* Ensure long text doesn't break layout */
             overflow-wrap: break-word;
             word-break: break-word;
+            position: relative;
+        }
+
+        /* Containment brackets */
+        .event-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 16px;
+            height: 16px;
+            border-top: 2px solid var(--color-amber);
+            border-left: 2px solid var(--color-amber);
+        }
+
+        .event-card::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 16px;
+            height: 16px;
+            border-bottom: 2px solid var(--color-amber);
+            border-right: 2px solid var(--color-amber);
         }
 
         .event-card:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+            border-color: var(--color-amber);
+            box-shadow: var(--shadow-card), 0 0 25px rgba(212, 168, 75, 0.15);
         }
 
         .event-card-header {
@@ -446,15 +619,16 @@
 
         .event-card-title {
             font-weight: 600;
-            font-size: 1.1em;
-            color: #667eea;
+            font-size: 1em;
+            color: var(--color-info);
             line-height: 1.3;
             flex: 1;
         }
 
         .event-card-time {
-            font-size: 0.85em;
-            color: #718096;
+            font-family: var(--font-mono);
+            font-size: 0.75em;
+            color: var(--text-muted);
             white-space: nowrap;
         }
 
@@ -467,41 +641,54 @@
             align-items: center;
             gap: 8px;
             margin: 8px 0;
-            font-size: 0.9em;
+            font-size: 0.85em;
         }
 
         .event-card-icon {
             width: 16px;
             height: 16px;
-            display: inline-block;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .event-card-icon svg {
+            width: 14px;
+            height: 14px;
+            fill: var(--color-amber);
         }
 
         .event-card-label {
-            color: #718096;
+            color: var(--text-secondary);
             font-weight: 500;
-            min-width: 80px;
+            min-width: 70px;
+            font-size: 0.9em;
         }
 
         .event-card-value {
-            color: #2c3e50;
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+            font-size: 0.95em;
         }
 
         .event-card-footer {
             margin-top: 12px;
             padding-top: 12px;
-            border-top: 1px solid #e2e8f0;
+            border-top: 1px solid var(--color-grid);
             display: flex;
             gap: 8px;
             flex-wrap: wrap;
         }
 
         .event-card-tag {
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 0.8em;
+            padding: 3px 8px;
+            border-radius: 2px;
+            font-family: var(--font-mono);
+            font-size: 0.7em;
             font-weight: 500;
-            background: #edf2f7;
-            color: #4a5568;
+            background: rgba(212, 168, 75, 0.1);
+            color: var(--color-amber);
+            border: 1px solid rgba(212, 168, 75, 0.3);
         }
 
         @media (max-width: 1200px) {
@@ -520,12 +707,13 @@
         .fsn-container {
             width: 100%;
             height: 600px;
-            background: linear-gradient(180deg, #000428 0%, #004e92 100%);
+            background: var(--color-void);
             position: relative;
             margin-bottom: 30px;
-            border-radius: 10px;
+            border-radius: 4px;
             overflow: hidden;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--color-grid);
+            box-shadow: var(--shadow-card);
         }
 
         #fsn-canvas {
@@ -538,53 +726,78 @@
             position: absolute;
             top: 20px;
             left: 20px;
-            color: #00ff00;
-            font-family: 'Courier New', monospace;
-            font-size: 14px;
-            text-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
-            background: rgba(0, 0, 0, 0.7);
+            color: var(--color-success);
+            font-family: var(--font-mono);
+            font-size: 13px;
+            text-shadow: var(--glow-success);
+            background: rgba(10, 10, 15, 0.9);
             padding: 15px;
-            border: 2px solid #00ff00;
-            border-radius: 5px;
+            border: 1px solid var(--color-amber);
+            border-radius: 2px;
             z-index: 10;
+        }
+
+        /* Containment brackets for overlay */
+        .fsn-overlay::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 12px;
+            height: 12px;
+            border-top: 2px solid var(--color-amber);
+            border-left: 2px solid var(--color-amber);
+        }
+
+        .fsn-overlay::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 12px;
+            height: 12px;
+            border-bottom: 2px solid var(--color-amber);
+            border-right: 2px solid var(--color-amber);
         }
 
         .fsn-overlay h3 {
             margin: 0 0 10px 0;
-            font-size: 18px;
-            color: #00ffff;
-            text-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+            font-family: var(--font-display);
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--color-amber);
+            text-shadow: 0 0 15px rgba(212, 168, 75, 0.5);
+            letter-spacing: 0.1em;
         }
 
         .fsn-stats {
             display: grid;
             grid-template-columns: auto 1fr;
-            gap: 5px 15px;
-            font-size: 13px;
+            gap: 4px 12px;
+            font-size: 12px;
         }
 
         .fsn-label {
-            color: #00ff00;
+            color: var(--text-secondary);
         }
 
         .fsn-value {
-            color: #ffff00;
-            font-weight: bold;
-            text-shadow: 0 0 5px rgba(255, 255, 0, 0.5);
+            color: var(--color-success);
+            font-weight: 500;
+            text-shadow: var(--glow-success);
         }
 
         .fsn-controls {
             position: absolute;
             bottom: 20px;
             right: 20px;
-            color: #00ff00;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-            text-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
-            background: rgba(0, 0, 0, 0.7);
-            padding: 10px;
-            border: 2px solid #00ff00;
-            border-radius: 5px;
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
+            font-size: 11px;
+            background: rgba(10, 10, 15, 0.9);
+            padding: 10px 12px;
+            border: 1px solid var(--color-grid);
+            border-radius: 2px;
             z-index: 10;
         }
 
@@ -634,15 +847,18 @@
         .loading {
             text-align: center;
             padding: 40px;
-            color: #718096;
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
         }
 
         .error {
-            background: #fed7d7;
-            color: #742a2a;
+            background: rgba(255, 68, 68, 0.1);
+            color: var(--color-error);
+            border: 1px solid rgba(255, 68, 68, 0.3);
             padding: 15px;
-            border-radius: 5px;
+            border-radius: 2px;
             margin-bottom: 20px;
+            font-family: var(--font-mono);
         }
 
         .modal {
@@ -658,27 +874,53 @@
         }
 
         .modal.active {
-            d3D File System Navigator --><div class="fsn-container"><canvas id="fsn-canvas"></canvas><div class="fsn-overlay" id="fsn-overlay"><h3>▸ ICEBERG FSN</h3><div class="fsn-stats"><span class="fsn-label">NODES: </span> <span class="fsn-value" id="fsn-nodes" >0</span> <span class="fsn-label" >EVENTS:</span> <span class="fsn-value" id="fsn-events" >0</span> <span class="fsn-label" >SELECTED:</span> <span class="fsn-value" id="fsn-selected" >None</span> </div> </div> <div class="fsn-controls" > <div>🖱️ Left Click + Drag: Rotate</div> <div>🖱️ Right Click + Drag: Pan</div> <div>🖱️ Scroll: Zoom</div> <div>🖱️ Click Block: Details</div> </div> <div class="fsn-loading" id="fsn-loading" >INITIALIZING FSN...</div> <div class="fsn-tooltip" id="fsn-tooltip" ></div> </div> < !-- isplay: flex;
+            display: flex;
             align-items: center;
             justify-content: center;
         }
 
         .modal-content {
-            background: white;
-            border-radius: 10px;
+            background: var(--color-charcoal);
+            border-radius: 4px;
+            border: 1px solid var(--color-amber);
             max-width: 900px;
             width: 90%;
             max-height: 90vh;
             overflow-y: auto;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5), var(--glow-amber);
         }
 
-        .modal-headerstyle="display: flex; align-items: center; gap: 20px;"><div class="view-toggle"><button class="active" id="table-view-btn" onclick="switchView('table')">📊 Table</button><button id="masonry-view-btn" onclick="switchView('masonry')">🎨 Cards</button></div><div class="pagination-info" id="pagination-info">Loading...</div></div></div><div id="loading" class="loading">Loading events...</div><div id="table-container" class="active" style="display: none;"><table><thead><tr><th>Timestamp</th><th>Event Name</th><th>User</th><th>Source IP</th><th>Region</th><th>Error Code</th></tr></thead><tbody id="events-tbody"></tbody></table><div class="pagination"><button class="btn-secondary" onclick="previousPage()" id="prev-btn">Previous</button><span id="page-info">Page 1</span><button class="btn-secondary" onclick="nextPage()" id="next-btn">Next</button></div></div><div id="masonry-container" class="masonry-container"><div class="masonry-grid" id="masonry-grid">< !-- Columns will be dynamically created --></div><div class="pagination"><button class="btn-secondary" onclick="previousPage()" id="masonry-prev-btn">Previous</button><span id="masonry-page-info">Page 1</span><button class="btn-secondary" onclick="nextPage()" id="masonry-
- height: 30px;
+        .modal-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--color-grid);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h3 {
+            color: var(--color-amber);
+            font-size: 1.2em;
+            font-weight: 600;
+        }
+
+        .close-modal {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0;
+            width: 30px;
+            height: 30px;
         }
 
         .close-modal:hover {
-            color: #2c3e50;
+            color: var(--color-amber);
+        }
+
+        .modal-body {
+            padding: 20px;
         }
 
         .event-detail {
@@ -688,26 +930,34 @@
 
         .detail-row {
             display: grid;
-            grid-template-columns: 200px 1fr;
+            grid-template-columns: 180px 1fr;
             gap: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--color-grid);
         }
 
         .detail-label {
             font-weight: 600;
-            color: #4a5568;
+            color: var(--color-amber);
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
 
         .detail-value {
-            color: #2c3e50;
+            color: var(--text-primary);
+            font-family: var(--font-mono);
             word-break: break-all;
         }
 
         .json-view {
-            background: #f7fafc;
+            background: var(--color-void);
             padding: 15px;
-            border-radius: 5px;
-            font-family: 'Courier New', monospace;
-            font-size: 0.9em;
+            border-radius: 2px;
+            border: 1px solid var(--color-grid);
+            font-family: var(--font-mono);
+            font-size: 0.85em;
+            color: var(--color-success);
             overflow-x: auto;
         }
     </style>
@@ -716,15 +966,35 @@
 <body>
     <header>
         <div class="container">
-            <h1>🔍 Iceberg Browser</h1>
+            <h1>
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                Iceberg Browser
+            </h1>
             <p>CloudTrail Events Explorer</p>
             <div class="service-links">
-                <a href="{{ service_urls.flink }}" target="_blank" class="service-link" title="Flink Dashboard" data-service="flink">🌊
-                    Flink</a>
-                <a href="{{ service_urls.minio_console }}" target="_blank" class="service-link" title="MinIO Console" data-service="minio_console">🗄️ MinIO</a>
-                <a href="{{ service_urls.nifi }}" target="_blank" class="service-link" title="Apache NiFi" data-service="nifi">📊 NiFi</a>
-                <a href="/polaris" class="service-link" title="Polaris Insights">🧭 Polaris</a>
-                <a href="/settings" class="service-link" title="Settings">⚙️ Settings</a>
+                <a href="{{ service_urls.flink }}" target="_blank" class="service-link" title="Flink Dashboard" data-service="flink">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M4 6h2v12H4V6zm14 0h2v12h-2V6zM8 4h8v2H8V4zm0 14h8v2H8v-2zm-1-9h10v6H7V9z"/></svg>
+                    Flink
+                </a>
+                <a href="{{ service_urls.minio_console }}" target="_blank" class="service-link" title="MinIO Console" data-service="minio_console">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h16v4H4V4zm0 6h16v4H4v-4zm0 6h16v4H4v-4z"/></svg>
+                    MinIO
+                </a>
+                <a href="{{ service_urls.nifi }}" target="_blank" class="service-link" title="Apache NiFi" data-service="nifi">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 3h18v18H3V3zm2 2v14h14V5H5zm2 2h4v4H7V7zm6 0h4v4h-4V7zm-6 6h4v4H7v-4zm6 0h4v4h-4v-4z"/></svg>
+                    NiFi
+                </a>
+                <a href="/polaris" class="service-link" title="Polaris Insights">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71L12 2z"/></svg>
+                    Polaris
+                </a>
+                <a href="/settings" class="service-link" title="Settings">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+                    Settings
+                </a>
             </div>
             <div class="refresh-controls">
                 <div class="live-indicator" id="liveIndicator">
@@ -795,8 +1065,14 @@
                 <h2>Events</h2>
                 <div style="display: flex; align-items: center; gap: 20px;">
                     <div class="view-toggle">
-                        <button class="active" id="table-view-btn" onclick="switchView('table')">📊 Table</button>
-                        <button id="masonry-view-btn" onclick="switchView('masonry')">🎨 Cards</button>
+                        <button class="active" id="table-view-btn" onclick="switchView('table')">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="vertical-align: middle; margin-right: 4px;"><path d="M3 3h18v18H3V3zm2 2v4h6V5H5zm8 0v4h6V5h-6zm-8 6v4h6v-4H5zm8 0v4h6v-4h-6zm-8 6v4h6v-4H5zm8 0v4h6v-4h-6z"/></svg>
+                            Table
+                        </button>
+                        <button id="masonry-view-btn" onclick="switchView('masonry')">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="vertical-align: middle; margin-right: 4px;"><path d="M4 4h4v6H4V4zm6 0h4v4h-4V4zm6 0h4v8h-4V4zM4 12h4v8H4v-8zm6 6h4v4h-4v-4zm6 2h4v2h-4v-2zM10 10h4v4h-4v-4zm6 8h4v4h-4v-4z"/></svg>
+                            Cards
+                        </button>
                     </div>
                     <div class="pagination-info" id="pagination-info">Loading...</div>
                 </div>
@@ -833,6 +1109,30 @@
                     <button class="btn-secondary" onclick="nextPage()" id="masonry-next-btn">Next</button>
                 </div>
             </div>
+        </div>
+
+        <!-- 3D File System Navigator -->
+        <div class="fsn-container">
+            <canvas id="fsn-canvas"></canvas>
+            <div class="fsn-overlay" id="fsn-overlay">
+                <h3>ICEBERG FSN</h3>
+                <div class="fsn-stats">
+                    <span class="fsn-label">NODES:</span>
+                    <span class="fsn-value" id="fsn-nodes">0</span>
+                    <span class="fsn-label">EVENTS:</span>
+                    <span class="fsn-value" id="fsn-events">0</span>
+                    <span class="fsn-label">SELECTED:</span>
+                    <span class="fsn-value" id="fsn-selected">None</span>
+                </div>
+            </div>
+            <div class="fsn-controls">
+                <div>Left Click + Drag: Rotate</div>
+                <div>Right Click + Drag: Pan</div>
+                <div>Scroll: Zoom</div>
+                <div>Click Block: Details</div>
+            </div>
+            <div class="fsn-loading" id="fsn-loading">INITIALIZING FSN...</div>
+            <div class="fsn-tooltip" id="fsn-tooltip"></div>
         </div>
     </div>
 
@@ -1144,20 +1444,23 @@
                     ${metricData ? `<div id="${vizId}" class="card-viz" style="width: 100%; height: 150px; margin-bottom: 10px;"></div>` : ''}
                     ${group.user_identity || group.name ? `
                         <div class="event-card-detail">
-                            <span class="event-card-label">👤 User:</span>
+                            <span class="event-card-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg></span>
+                            <span class="event-card-label">User:</span>
                             <span class="event-card-value">${group.user_identity || group.name}</span>
                         </div>
                     ` : ''}
                     ${group.source_ip_address || group.amount !== undefined ? `
                         <div class="event-card-detail">
-                            <span class="event-card-label">${group.amount !== undefined ? '💰 Amount:' : '🌐 IP:'}</span>
+                            <span class="event-card-icon"><svg viewBox="0 0 24 24" fill="currentColor">${group.amount !== undefined ? '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1.41 16.09V20h-2.67v-1.93c-1.71-.36-3.16-1.46-3.27-3.4h1.96c.1 1.05.82 1.87 2.65 1.87 1.96 0 2.4-.98 2.4-1.59 0-.83-.44-1.61-2.67-2.14-2.48-.6-4.18-1.62-4.18-3.67 0-1.72 1.39-2.84 3.11-3.21V4h2.67v1.95c1.86.45 2.79 1.86 2.85 3.39H14.3c-.05-1.11-.64-1.87-2.22-1.87-1.5 0-2.4.68-2.4 1.64 0 .84.65 1.39 2.67 1.91s4.18 1.39 4.18 3.91c-.01 1.83-1.38 2.83-3.12 3.16z"/>' : '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>'}</svg></span>
+                            <span class="event-card-label">${group.amount !== undefined ? 'Amount:' : 'IP:'}</span>
                             <span class="event-card-value">${group.amount !== undefined ? group.amount : group.source_ip_address}</span>
                         </div>
                     ` : ''}
                     ${paramsHtml}
                     ${group.userAgent && !isGroup ? `
-                        <div class="event-card-detail" style="margin-top: 8px; font-size: 0.8em; color: #888;">
-                            <span class="event-card-label">🖥️ UA:</span>
+                        <div class="event-card-detail" style="margin-top: 8px; font-size: 0.8em;">
+                            <span class="event-card-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7v2H8v2h8v-2h-2v-2h7c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H3V4h18v12z"/></svg></span>
+                            <span class="event-card-label">UA:</span>
                             <div class="event-card-value" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;">${group.userAgent}</div>
                         </div>
                     ` : ''}
@@ -1516,9 +1819,9 @@
             const width = container.clientWidth;
             const height = container.clientHeight;
 
-            // Scene
+            // Scene - Event Horizon Void aesthetic
             scene = new THREE.Scene();
-            scene.fog = new THREE.Fog(0x000428, 50, 200);
+            scene.fog = new THREE.Fog(0x0A0A0F, 50, 200);
 
             // Camera
             camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
@@ -1532,33 +1835,34 @@
                 alpha: true
             });
             renderer.setSize(width, height);
-            renderer.setClearColor(0x000428, 1);
+            renderer.setClearColor(0x0A0A0F, 1);
 
             // Raycaster for mouse interaction
             raycaster = new THREE.Raycaster();
             mouse = new THREE.Vector2();
 
-            // Grid
-            const gridHelper = new THREE.GridHelper(100, 20, 0x00ff00, 0x004400);
-            gridHelper.material.opacity = 0.3;
+            // Grid - Tyrell Amber aesthetic
+            const gridHelper = new THREE.GridHelper(100, 20, 0xD4A84B, 0x252532);
+            gridHelper.material.opacity = 0.4;
             gridHelper.material.transparent = true;
             scene.add(gridHelper);
 
-            // Ambient light
-            const ambientLight = new THREE.AmbientLight(0x404040, 1);
+            // Ambient light - subtle warmth
+            const ambientLight = new THREE.AmbientLight(0x202030, 0.6);
             scene.add(ambientLight);
 
-            // Directional light
-            const directionalLight = new THREE.DirectionalLight(0x00ffff, 0.8);
+            // Key light - Tyrell amber
+            const directionalLight = new THREE.DirectionalLight(0xD4A84B, 0.8);
             directionalLight.position.set(10, 20, 10);
             scene.add(directionalLight);
 
-            // Point lights for retro effect
-            const pointLight1 = new THREE.PointLight(0x00ff00, 1, 50);
+            // Rim light - core green for data glow
+            const pointLight1 = new THREE.PointLight(0x00FF88, 0.8, 60);
             pointLight1.position.set(-20, 10, -20);
             scene.add(pointLight1);
 
-            const pointLight2 = new THREE.PointLight(0xff00ff, 1, 50);
+            // Accent light - cyan for information
+            const pointLight2 = new THREE.PointLight(0x00FFFF, 0.6, 50);
             pointLight2.position.set(20, 10, 20);
             scene.add(pointLight2);
 
@@ -1683,7 +1987,7 @@
             // Select new
             selectedObject = obj;
             selectedObject.userData.originalEmissive = selectedObject.material.emissive.getHex();
-            selectedObject.material.emissive.setHex(0x00ff00);
+            selectedObject.material.emissive.setHex(0xD4A84B);  // Tyrell amber highlight
 
             // Update overlay
             document.getElementById('fsn-selected').textContent = obj.userData.name;
@@ -1715,13 +2019,15 @@
                 // Height based on event count
                 const height = Math.max(2, (count / maxCount) * 20);
 
-                // Create block
+                // Create block - Event Horizon containment module aesthetic
                 const geometry = new THREE.BoxGeometry(5, height, 5);
+                const blockColor = getColorForIndex(index);
                 const material = new THREE.MeshPhongMaterial({
-                    color: getColorForIndex(index),
-                    emissive: 0x000000,
-                    shininess: 100,
-                    specular: 0x00ffff
+                    color: 0x12121A,  // Dark charcoal base
+                    emissive: blockColor,
+                    emissiveIntensity: 0.15,
+                    shininess: 80,
+                    specular: 0xD4A84B  // Amber specular highlights
                 });
 
                 const block = new THREE.Mesh(geometry, material);
@@ -1737,11 +2043,11 @@
                     index: index
                 };
 
-                // Add wireframe
+                // Add wireframe - Tyrell amber containment lines
                 const edges = new THREE.EdgesGeometry(geometry);
                 const line = new THREE.LineSegments(
                     edges,
-                    new THREE.LineBasicMaterial({ color: 0x00ff00 })
+                    new THREE.LineBasicMaterial({ color: 0xD4A84B, opacity: 0.6, transparent: true })
                 );
                 block.add(line);
 
@@ -1755,9 +2061,16 @@
         }
 
         function getColorForIndex(index) {
+            // Tyrell Keiretsu color palette - status-inspired
             const colors = [
-                0x00ff00, 0x00ffff, 0xff00ff, 0xffff00,
-                0xff0000, 0x00ff88, 0x8800ff, 0xff8800
+                0x00FF88,  // Core green - success
+                0x00FFFF,  // Horizon cyan - info
+                0xD4A84B,  // Tyrell amber - primary
+                0xFFB347,  // Warning amber
+                0xFF4444,  // Breach red - error
+                0x00FF88,  // Core green variant
+                0x00CCCC,  // Muted cyan
+                0xCD853F   // Bronze
             ];
             return colors[index % colors.length];
         }
