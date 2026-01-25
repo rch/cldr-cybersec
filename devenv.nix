@@ -837,10 +837,10 @@ except Exception as e:
           # Web server - bind to all interfaces on port 8450 (HTTP only)
           # Portable sed in-place: use temp file approach (works on both macOS and Linux)
           sed_inplace() {
-            local file="$1"
-            local expr="$2"
-            local tmp="${file}.tmp.$$"
-            sed "$expr" "$file" > "$tmp" && mv "$tmp" "$file"
+            local file="''$1"
+            local expr="''$2"
+            local tmp="''${file}.tmp.''$$"
+            sed "''$expr" "''$file" > "''$tmp" && mv "''$tmp" "''$file"
           }
 
           sed_inplace "$PROPS" 's|^nifi.web.http.host=.*|nifi.web.http.host=0.0.0.0|'
