@@ -1307,54 +1307,88 @@
         }
 
         // ========================================
-        // Card Visualization System
-        // Uses mock inference service for viz recommendations
-        // Future: Swap mock for real ML/LLM inference
+        // Card Visualization Widget System
+        // Best practices: sparklines, bullet charts, rings, heatmaps
+        // Avoid: pie charts, 3D, dual Y-axis
+        // Future: ML/LLM selects optimal widget per data context
         // ========================================
         const cardVisualizer = {
             // Render visualization based on inference recommendation
             render: function(container, vizRec, group) {
                 if (!container || !vizRec) return;
 
-                switch (vizRec.viz_type) {
+                const type = vizRec.viz_type;
+                const params = vizRec.params || {};
+
+                switch (type) {
+                    // === Time Series Widgets ===
                     case 'sparkline':
                         this.renderSparkline(container, group.events || []);
                         break;
+                    case 'horizon':
+                        this.renderHorizon(container, group.events || [], params);
+                        break;
+
+                    // === Proportion Widgets ===
+                    case 'ring':
+                        this.renderRing(container, params.value || 0, params.max || 100, params.label);
+                        break;
+                    case 'bullet':
+                        this.renderBullet(container, params.value, params.target, params.ranges);
+                        break;
+
+                    // === Status Widgets ===
                     case 'threat_score':
                         this.renderThreatScore(container, vizRec.score || 0);
                         break;
+                    case 'deviation':
+                        this.renderDeviation(container, params.value, params.baseline);
+                        break;
+
+                    // === Categorical Widgets ===
+                    case 'mini_bar':
+                        this.renderMiniBar(container, params.data || []);
+                        break;
+                    case 'heatrow':
+                        this.renderHeatRow(container, params.values || []);
+                        break;
+
+                    // === Metadata Widgets ===
                     case 'geo_badge':
-                        this.renderGeoBadge(container, vizRec.region || '');
+                        this.renderGeoBadge(container, vizRec.region || params.region || '');
                         break;
                     case 'error_pulse':
                         this.renderErrorPulse(container);
                         break;
+                    case 'trend_arrow':
+                        this.renderTrendArrow(container, params.direction, params.magnitude);
+                        break;
+
                     default:
-                        // No visualization
                         break;
                 }
             },
 
-            // Sparkline: Time distribution histogram for grouped events
+            // === TIME SERIES ===
+
+            // Sparkline: Compact time distribution (best for: event frequency over time)
             renderSparkline: function(container, events) {
                 if (!events || events.length < 2) return;
 
                 const canvas = document.createElement('canvas');
                 canvas.width = container.clientWidth || 200;
-                canvas.height = 32;
-                canvas.style.width = '100%';
-                canvas.style.height = '32px';
+                canvas.height = 28;
+                canvas.style.cssText = 'width: 100%; height: 28px;';
                 container.appendChild(canvas);
 
                 const ctx = canvas.getContext('2d');
                 if (!ctx) return;
 
                 const times = events.map(e => new Date(e.event_time || e.eventTime).getTime()).sort();
-                const minTime = times[0];
-                const maxTime = times[times.length - 1];
+                const minTime = times[0], maxTime = times[times.length - 1];
                 const range = maxTime - minTime || 1;
 
-                const bucketCount = Math.min(16, events.length);
+                const bucketCount = Math.min(20, Math.max(8, events.length));
                 const buckets = new Array(bucketCount).fill(0);
                 times.forEach(t => {
                     const bucket = Math.min(bucketCount - 1, Math.floor((t - minTime) / range * bucketCount));
@@ -1364,22 +1398,142 @@
                 const maxBucket = Math.max(...buckets);
                 const barWidth = canvas.width / bucketCount;
 
+                // Area fill
+                ctx.beginPath();
+                ctx.moveTo(0, canvas.height);
                 buckets.forEach((count, i) => {
-                    const barHeight = (count / maxBucket) * (canvas.height - 2);
-                    const x = i * barWidth;
-                    const y = canvas.height - barHeight;
-                    const intensity = 0.4 + (count / maxBucket) * 0.6;
-                    ctx.fillStyle = `rgba(212, 168, 75, ${intensity})`;
-                    ctx.fillRect(x + 0.5, y, barWidth - 1, barHeight);
+                    const x = i * barWidth + barWidth / 2;
+                    const y = canvas.height - (count / maxBucket) * (canvas.height - 4);
+                    ctx.lineTo(x, y);
                 });
+                ctx.lineTo(canvas.width, canvas.height);
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(212, 168, 75, 0.3)';
+                ctx.fill();
+
+                // Line on top
+                ctx.beginPath();
+                buckets.forEach((count, i) => {
+                    const x = i * barWidth + barWidth / 2;
+                    const y = canvas.height - (count / maxBucket) * (canvas.height - 4);
+                    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+                });
+                ctx.strokeStyle = 'rgba(212, 168, 75, 0.9)';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
             },
 
-            // Threat Score: Security risk indicator
+            // Horizon chart: Layered bands for dense time series (best for: anomaly detection)
+            renderHorizon: function(container, events, params) {
+                if (!events || events.length < 3) return;
+                const bands = params.bands || 3;
+
+                const canvas = document.createElement('canvas');
+                canvas.width = container.clientWidth || 200;
+                canvas.height = 24;
+                canvas.style.cssText = 'width: 100%; height: 24px;';
+                container.appendChild(canvas);
+
+                const ctx = canvas.getContext('2d');
+                if (!ctx) return;
+
+                // Bucket events by time
+                const times = events.map(e => new Date(e.event_time || e.eventTime).getTime()).sort();
+                const minTime = times[0], maxTime = times[times.length - 1];
+                const range = maxTime - minTime || 1;
+                const bucketCount = Math.min(30, events.length);
+                const buckets = new Array(bucketCount).fill(0);
+                times.forEach(t => {
+                    const bucket = Math.min(bucketCount - 1, Math.floor((t - minTime) / range * bucketCount));
+                    buckets[bucket]++;
+                });
+
+                const maxVal = Math.max(...buckets);
+                const bandHeight = canvas.height / bands;
+                const barWidth = canvas.width / bucketCount;
+
+                // Draw layered bands
+                for (let b = 0; b < bands; b++) {
+                    const alpha = 0.3 + (b * 0.25);
+                    ctx.fillStyle = `rgba(212, 168, 75, ${alpha})`;
+
+                    buckets.forEach((val, i) => {
+                        const normalized = val / maxVal;
+                        const bandVal = Math.max(0, Math.min(1, normalized * bands - b));
+                        const h = bandVal * bandHeight;
+                        ctx.fillRect(i * barWidth, canvas.height - (b + 1) * bandHeight + (bandHeight - h), barWidth - 0.5, h);
+                    });
+                }
+            },
+
+            // === PROPORTION ===
+
+            // Ring/Donut: Part of whole with center KPI (best for: single metric with context)
+            renderRing: function(container, value, max, label) {
+                const pct = Math.min(100, (value / max) * 100);
+                const size = 36;
+                const stroke = 4;
+                const radius = (size - stroke) / 2;
+                const circumference = 2 * Math.PI * radius;
+                const offset = circumference - (pct / 100) * circumference;
+
+                const wrapper = document.createElement('div');
+                wrapper.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+
+                wrapper.innerHTML = `
+                    <svg width="${size}" height="${size}" style="transform: rotate(-90deg);">
+                        <circle cx="${size/2}" cy="${size/2}" r="${radius}" fill="none"
+                            stroke="rgba(255,255,255,0.1)" stroke-width="${stroke}"/>
+                        <circle cx="${size/2}" cy="${size/2}" r="${radius}" fill="none"
+                            stroke="var(--color-amber)" stroke-width="${stroke}"
+                            stroke-dasharray="${circumference}" stroke-dashoffset="${offset}"
+                            stroke-linecap="round"/>
+                    </svg>
+                    <div style="font-family: var(--font-mono); font-size: 11px;">
+                        <div style="color: var(--color-amber); font-weight: 600;">${Math.round(pct)}%</div>
+                        ${label ? `<div style="color: var(--text-muted); font-size: 9px;">${label}</div>` : ''}
+                    </div>
+                `;
+                container.appendChild(wrapper);
+            },
+
+            // Bullet chart: Actual vs target with qualitative ranges (best for: KPI with goals)
+            renderBullet: function(container, value, target, ranges) {
+                const max = Math.max(value, target, ...(ranges || [100]));
+                const pct = (v) => (v / max) * 100;
+                ranges = ranges || [30, 70, 100];
+
+                const wrapper = document.createElement('div');
+                wrapper.style.cssText = 'position: relative; height: 16px; background: rgba(255,255,255,0.05); border-radius: 2px; overflow: hidden;';
+
+                // Qualitative ranges (poor → good)
+                const colors = ['rgba(239,68,68,0.3)', 'rgba(245,158,11,0.3)', 'rgba(34,197,94,0.2)'];
+                ranges.forEach((r, i) => {
+                    const bar = document.createElement('div');
+                    bar.style.cssText = `position: absolute; left: ${i > 0 ? pct(ranges[i-1]) : 0}%; width: ${pct(r) - (i > 0 ? pct(ranges[i-1]) : 0)}%; height: 100%; background: ${colors[i]};`;
+                    wrapper.appendChild(bar);
+                });
+
+                // Actual value bar
+                const actual = document.createElement('div');
+                actual.style.cssText = `position: absolute; left: 0; width: ${pct(value)}%; height: 8px; top: 4px; background: var(--color-amber); border-radius: 1px;`;
+                wrapper.appendChild(actual);
+
+                // Target marker
+                const targetMark = document.createElement('div');
+                targetMark.style.cssText = `position: absolute; left: ${pct(target)}%; width: 2px; height: 100%; background: var(--text-primary);`;
+                wrapper.appendChild(targetMark);
+
+                container.appendChild(wrapper);
+            },
+
+            // === STATUS ===
+
+            // Threat Score: Security risk indicator (best for: risk assessment)
             renderThreatScore: function(container, score) {
                 const wrapper = document.createElement('div');
                 wrapper.style.cssText = 'display: flex; align-items: center; gap: 8px;';
 
-                // Score bar
                 const barBg = document.createElement('div');
                 barBg.style.cssText = 'flex: 1; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;';
 
@@ -1412,13 +1566,101 @@
                 pulse.style.cssText = 'width: 8px; height: 8px; background: #ef4444; border-radius: 50%; animation: pulse 1.5s infinite;';
                 container.appendChild(pulse);
 
-                // Add animation keyframes if not exists
                 if (!document.getElementById('pulse-keyframes')) {
                     const style = document.createElement('style');
                     style.id = 'pulse-keyframes';
                     style.textContent = '@keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.2); } }';
                     document.head.appendChild(style);
                 }
+            },
+
+            // Deviation: Diverging bar from baseline (best for: anomaly highlighting)
+            renderDeviation: function(container, value, baseline) {
+                baseline = baseline || 0;
+                const deviation = value - baseline;
+                const maxDev = Math.max(Math.abs(deviation), 50);
+                const pct = (Math.abs(deviation) / maxDev) * 50;
+                const isPositive = deviation >= 0;
+
+                const wrapper = document.createElement('div');
+                wrapper.style.cssText = 'display: flex; align-items: center; height: 12px;';
+
+                wrapper.innerHTML = `
+                    <div style="flex: 1; display: flex; align-items: center; height: 100%;">
+                        <div style="flex: 1; height: 4px; background: rgba(255,255,255,0.1); position: relative;">
+                            <div style="position: absolute; ${isPositive ? 'left: 50%' : 'right: 50%'}; width: ${pct}%; height: 100%; background: ${isPositive ? '#22c55e' : '#ef4444'};"></div>
+                            <div style="position: absolute; left: 50%; width: 1px; height: 8px; top: -2px; background: var(--text-muted);"></div>
+                        </div>
+                    </div>
+                    <span style="font-family: var(--font-mono); font-size: 10px; margin-left: 6px; color: ${isPositive ? '#22c55e' : '#ef4444'};">
+                        ${isPositive ? '+' : ''}${deviation.toFixed(0)}
+                    </span>
+                `;
+                container.appendChild(wrapper);
+            },
+
+            // === CATEGORICAL ===
+
+            // Mini Bar: Horizontal bars for category comparison (best for: top-N lists)
+            renderMiniBar: function(container, data) {
+                if (!data || data.length === 0) return;
+                const maxVal = Math.max(...data.map(d => d.value));
+
+                const wrapper = document.createElement('div');
+                wrapper.style.cssText = 'display: flex; flex-direction: column; gap: 2px;';
+
+                data.slice(0, 4).forEach(item => {
+                    const pct = (item.value / maxVal) * 100;
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display: flex; align-items: center; gap: 4px; font-size: 9px;';
+                    row.innerHTML = `
+                        <span style="width: 40px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted);">${item.label}</span>
+                        <div style="flex: 1; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px;">
+                            <div style="width: ${pct}%; height: 100%; background: var(--color-amber); border-radius: 2px;"></div>
+                        </div>
+                        <span style="font-family: var(--font-mono); color: var(--color-amber);">${item.value}</span>
+                    `;
+                    wrapper.appendChild(row);
+                });
+
+                container.appendChild(wrapper);
+            },
+
+            // Heat Row: Sequential color intensity (best for: time-of-day patterns, density)
+            renderHeatRow: function(container, values) {
+                if (!values || values.length === 0) return;
+                const maxVal = Math.max(...values);
+
+                const wrapper = document.createElement('div');
+                wrapper.style.cssText = 'display: flex; gap: 1px; height: 16px;';
+
+                values.forEach(v => {
+                    const intensity = v / maxVal;
+                    const cell = document.createElement('div');
+                    cell.style.cssText = `flex: 1; background: rgba(212, 168, 75, ${0.1 + intensity * 0.8}); border-radius: 1px;`;
+                    cell.title = v.toString();
+                    wrapper.appendChild(cell);
+                });
+
+                container.appendChild(wrapper);
+            },
+
+            // Trend Arrow: Direction indicator (best for: quick trend status)
+            renderTrendArrow: function(container, direction, magnitude) {
+                direction = direction || 'flat';
+                magnitude = magnitude || 'normal';
+
+                const arrows = { up: '↑', down: '↓', flat: '→' };
+                const colors = {
+                    up: magnitude === 'strong' ? '#22c55e' : '#86efac',
+                    down: magnitude === 'strong' ? '#ef4444' : '#fca5a5',
+                    flat: '#9ca3af'
+                };
+
+                const arrow = document.createElement('span');
+                arrow.style.cssText = `font-size: 14px; font-weight: bold; color: ${colors[direction]};`;
+                arrow.textContent = arrows[direction];
+                container.appendChild(arrow);
             }
         };
 

@@ -544,13 +544,33 @@ def get_summary():
 # ============================================================================
 # Simulates an ML/LLM agent that recommends visualizations for event cards.
 # Future: Replace with real inference service (local LLM, API call, etc.)
+#
+# Widget Taxonomy (best practices):
+# - TIME SERIES: sparkline, horizon (layered bands)
+# - PROPORTION: ring (donut), bullet (vs target)
+# - STATUS: threat_score, deviation (from baseline)
+# - CATEGORICAL: mini_bar, heatrow
+# - METADATA: geo_badge, error_pulse, trend_arrow
+#
+# Anti-patterns we avoid: pie charts, 3D, dual Y-axis
 
 VIZ_TYPES = {
-    "sparkline": "Time distribution histogram for grouped events",
-    "threat_score": "Security risk indicator (0-100)",
+    # Time series
+    "sparkline": "Area chart for event timing distribution",
+    "horizon": "Layered bands for dense time series, anomaly detection",
+    # Proportion
+    "ring": "Part-of-whole with center KPI (max 5-6 segments)",
+    "bullet": "Actual vs target with qualitative ranges",
+    # Status
+    "threat_score": "Security risk indicator (0-100 scale)",
+    "deviation": "Diverging bar from baseline for anomalies",
+    # Categorical
+    "mini_bar": "Horizontal bars for top-N comparison",
+    "heatrow": "Sequential intensity for patterns",
+    # Metadata
     "geo_badge": "Geographic region indicator",
-    "error_pulse": "Error rate animation",
-    "user_glyph": "User identity icon based on access pattern",
+    "error_pulse": "Animated error status",
+    "trend_arrow": "Direction indicator (up/down/flat)",
     "none": "No visualization needed",
 }
 
@@ -560,61 +580,111 @@ def mock_viz_inference(event_group: dict) -> dict:
     Mock inference function that returns visualization recommendations.
 
     In production, this would call an ML model or LLM to analyze the event
-    and recommend appropriate visualizations.
+    and recommend appropriate visualizations. The model would consider:
+    - Data shape (time series, categorical, proportional)
+    - Context (security event, metric, status)
+    - User intent (monitoring, investigation, reporting)
+    - Visual salience (what needs attention)
 
     Args:
         event_group: A grouped event dict with count, events list, etc.
 
     Returns:
-        Dict with viz_type, confidence, and optional parameters
+        Dict with viz_type, confidence, params, and reason
     """
+    import random
+
     count = event_group.get("count", 1)
     event_name = event_group.get("event_name", "")
     has_error = bool(event_group.get("error_code"))
     region = event_group.get("region", "")
+    events = event_group.get("events", [])
 
-    # Simple rule-based mock (simulating what an ML model might decide)
-
-    # High-volume grouped events get sparklines
-    if count >= 3:
+    # === PATTERN: High volume grouped events ===
+    # Best viz: sparkline (shows timing distribution) or horizon (shows intensity)
+    if count >= 5:
+        # Use horizon for very high volume (shows layered intensity)
+        if count >= 10:
+            return {
+                "viz_type": "horizon",
+                "confidence": 0.92,
+                "params": {"bands": 3},
+                "reason": f"High density pattern ({count} events)",
+            }
         return {
             "viz_type": "sparkline",
             "confidence": 0.9,
-            "reason": f"High event volume ({count} events)",
+            "reason": f"Event timing distribution ({count} events)",
         }
 
-    # Error events get threat scoring
+    # === PATTERN: Error events ===
+    # Best viz: threat_score with severity, or deviation from normal
     if has_error:
-        # Mock threat score based on event type
-        threat_keywords = ["Delete", "Terminate", "Remove", "Revoke"]
-        score = 60 if any(k in event_name for k in threat_keywords) else 30
+        threat_keywords = ["Delete", "Terminate", "Remove", "Revoke", "Detach"]
+        base_score = 55 if any(k in event_name for k in threat_keywords) else 25
+        score = min(95, base_score + (count * 8))
         return {
             "viz_type": "threat_score",
-            "confidence": 0.85,
+            "confidence": 0.88,
             "score": score,
-            "reason": f"Error event: {event_group.get('error_code')}",
+            "reason": f"Error: {event_group.get('error_code')}",
         }
 
-    # Sensitive operations get elevated threat scores
-    sensitive_ops = ["CreateAccessKey", "AttachUserPolicy", "ConsoleLogin", "AssumeRole"]
+    # === PATTERN: Sensitive/privileged operations ===
+    # Best viz: threat_score (risk awareness) or ring (% of sensitive ops)
+    sensitive_ops = {
+        "CreateAccessKey": 50, "DeleteAccessKey": 45,
+        "AttachUserPolicy": 55, "DetachUserPolicy": 40,
+        "ConsoleLogin": 35, "AssumeRole": 30,
+        "PutBucketPolicy": 50, "DeleteBucket": 60,
+        "CreateUser": 40, "DeleteUser": 55,
+        "TerminateInstances": 65, "RunInstances": 25,
+    }
     if event_name in sensitive_ops:
+        base_score = sensitive_ops[event_name]
+        score = min(90, base_score + (count * 5))
         return {
             "viz_type": "threat_score",
-            "confidence": 0.75,
-            "score": 40 + (count * 5),  # Higher if repeated
-            "reason": f"Sensitive operation: {event_name}",
+            "confidence": 0.82,
+            "score": score,
+            "reason": f"Sensitive: {event_name}",
         }
 
-    # Cross-region activity gets geo badge
+    # === PATTERN: Read-only operations with volume ===
+    # Best viz: ring showing proportion of total, or trend arrow
+    read_ops = ["GetObject", "DescribeInstances", "ListBuckets", "GetUser"]
+    if event_name in read_ops and count >= 2:
+        # Show as proportion of activity
+        return {
+            "viz_type": "ring",
+            "confidence": 0.7,
+            "params": {"value": count, "max": max(10, count * 2), "label": "reads"},
+            "reason": f"Read pattern: {event_name}",
+        }
+
+    # === PATTERN: Regional activity ===
+    # Best viz: geo_badge for single region, heatrow for multi-region
     if region and count >= 2:
         return {
             "viz_type": "geo_badge",
-            "confidence": 0.7,
+            "confidence": 0.65,
             "region": region,
-            "reason": "Regional activity pattern",
+            "reason": "Regional pattern",
         }
 
-    # Default: no special visualization
+    # === PATTERN: Standard single event ===
+    # Usually no viz needed, but occasionally show trend
+    if count == 1 and random.random() < 0.15:
+        # Occasionally show a trend arrow for variety
+        directions = ["up", "flat", "down"]
+        return {
+            "viz_type": "trend_arrow",
+            "confidence": 0.5,
+            "params": {"direction": random.choice(directions), "magnitude": "normal"},
+            "reason": "Activity trend",
+        }
+
+    # Default: no visualization
     return {
         "viz_type": "none",
         "confidence": 0.5,
