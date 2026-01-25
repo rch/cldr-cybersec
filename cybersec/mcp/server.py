@@ -23,11 +23,16 @@ mcp = FastMCP(
 Execute commands using the `cmd` tool with slash-prefixed commands:
 
     cmd("/health")                  - Run FMEA health diagnostics
-    cmd("/health pyflink")          - PyFlink diagnostics
+    cmd("/health pyflink")          - PyFlink diagnostics + planned fixes
+    cmd("/health fix pyflink")      - Apply PyFlink fixes
     cmd("/health diagnose FLINK_001") - Diagnose specific failure
+    cmd("/health fix <id>")         - Remediation steps
     cmd("/bootstrap status")        - Check service health
     cmd("/bootstrap info")          - Show configuration
+    cmd("/bootstrap verify")        - Verify environment
+    cmd("/bootstrap assess")        - Quick assessment
     cmd("/bootstrap run")           - Run bootstrap process
+    cmd("/bootstrap settings")      - View/modify settings
 
 Add --json to any command for structured output:
     cmd("/health pyflink --json")
@@ -45,7 +50,8 @@ async def cmd(command: str) -> dict:
 
     Commands use slash-prefix syntax identical to CLI and TUI:
         /health                     - FMEA health diagnostics
-        /health pyflink             - PyFlink diagnostics
+        /health pyflink             - PyFlink diagnostics + planned fixes
+        /health fix pyflink         - Apply PyFlink fixes
         /health diagnose <id>       - Diagnose failure mode
         /health fix <id>            - Remediation steps
         /bootstrap status           - Service health
@@ -68,6 +74,7 @@ async def cmd(command: str) -> dict:
     Examples:
         cmd("/health")
         cmd("/health pyflink")
+        cmd("/health fix pyflink")
         cmd("/bootstrap status --json")
         cmd("/health diagnose FLINK_001")
     """
