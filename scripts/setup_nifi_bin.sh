@@ -82,7 +82,8 @@ if [ ! -f "nifi-${NIFI_VERSION}-bin.zip" ]; then
     exit 1
 fi
 
-FILE_SIZE=$(stat -f%z "nifi-${NIFI_VERSION}-bin.zip" 2>/dev/null || stat -c%s "nifi-${NIFI_VERSION}-bin.zip" 2>/dev/null)
+# Get file size portably (wc -c works on both macOS and Linux)
+FILE_SIZE=$(wc -c < "nifi-${NIFI_VERSION}-bin.zip" 2>/dev/null | tr -d ' ')
 if [ "$FILE_SIZE" -lt 1000000 ]; then
     echo "ERROR: Downloaded file is too small (${FILE_SIZE} bytes)"
     echo "       The download may have failed or the version may not exist"

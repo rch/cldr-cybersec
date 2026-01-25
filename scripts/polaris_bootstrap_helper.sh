@@ -222,24 +222,42 @@ verify_all() {
     fi
 }
 
+# Check if port is in use (portable - works on Linux and macOS)
+is_port_in_use() {
+    local port="$1"
+    # Try lsof first (available on most systems including macOS)
+    if command -v lsof &> /dev/null; then
+        lsof -ti:"$port" >/dev/null 2>&1 && return 0
+    fi
+    # Fallback: try /dev/tcp (bash built-in, works on Linux)
+    if (echo >/dev/tcp/localhost/"$port") 2>/dev/null; then
+        return 0
+    fi
+    # Fallback: try nc/netcat
+    if command -v nc &> /dev/null; then
+        nc -z localhost "$port" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
 # Wait for port to be released
 wait_for_port_release() {
     local port="$1"
     local max_attempts="${2:-5}"
     local sleep_seconds="${3:-2}"
     local attempt=0
-    
+
     while [ $attempt -lt $max_attempts ]; do
-        if ! lsof -ti:$port >/dev/null 2>&1; then
+        if ! is_port_in_use "$port"; then
             return 0
         fi
-        
+
         attempt=$((attempt + 1))
         if [ $attempt -lt $max_attempts ]; then
             sleep "$sleep_seconds"
         fi
     done
-    
+
     log_warn "Port $port still in use after $((max_attempts * sleep_seconds)) seconds"
     return 1
 }
