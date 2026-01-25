@@ -115,7 +115,7 @@
   tasks = {
     "docs:build".exec = "mdbook build docs";
     "docs:open".exec = "mdbook build docs --open";
-    
+
     # Manual Polaris catalog initialization (normally runs automatically via polaris-init process)
     # Use this if automatic initialization failed or you need to re-initialize
     "polaris:init".exec = ''
@@ -169,20 +169,45 @@
     "restart:clean".exec = ''
       source scripts/polaris_bootstrap_helper.sh
 
+      # === Auto-bootstrap if needed ===
+      FLINK_DIST="thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1"
+
+      # Check if git submodules need initialization
+      if [ ! -d "thirdparty/flink/.git" ] && [ ! -f "thirdparty/flink/pom.xml" ]; then
+        log_info "=== First-time setup: Initializing git submodules ==="
+        git submodule update --init --recursive
+        log_success "Git submodules initialized"
+      fi
+
+      # Check if Flink needs to be built
+      if [ ! -f "''${FLINK_DIST}/bin/flink" ]; then
+        log_info "=== First-time setup: Building Flink from source ==="
+        log_info "This takes 10-15 minutes on first run..."
+        cd thirdparty/flink
+        mvn clean install -DskipTests -Dfast -T 1C
+        cd ../..
+        if [ -f "''${FLINK_DIST}/bin/flink" ]; then
+          log_success "Flink built successfully"
+        else
+          log_error "Flink build failed - check Maven output above"
+          exit 1
+        fi
+      fi
+
       echo "🔥 Aggressively stopping all processes..."
 
       # Portable process killing function (works on both Linux and macOS)
       kill_by_pattern() {
-        local pattern="$1"
+        local pattern="''$1"
         # Use ps + grep for maximum portability (works on Linux and macOS)
-        ps aux | grep -E "$pattern" | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null || true
+        ps aux | grep -E "''$pattern" | grep -v grep | awk '{print ''$2}' | xargs kill -9 2>/dev/null || true
       }
 
       # Portable port killing function
       kill_by_port() {
-        local port="$1"
+        local port="''$1"
         if command -v lsof &> /dev/null; then
-          lsof -ti:"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
+          lsof -ti:"''$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
         fi
       }
 
