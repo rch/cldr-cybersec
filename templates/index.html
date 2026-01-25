@@ -1438,8 +1438,8 @@
             const isGroup = group.count > 1;
             if (isGroup) {
                 tags.unshift(`x${group.count}`);
-                // Stacked visual effect
-                card.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1), 0 8px 0 -4px rgba(255,255,255,0.8), 0 8px 2px -4px rgba(0,0,0,0.1)';
+                // Stacked visual effect - using dark theme colors
+                card.style.boxShadow = '0 4px 8px rgba(0,0,0,0.3), 0 8px 0 -4px rgba(30,32,38,0.9), 0 8px 2px -4px rgba(0,0,0,0.2)';
                 card.style.marginBottom = '8px';
             }
 
@@ -1458,7 +1458,7 @@
                     const jsonStr = JSON.stringify(params, null, 2);
                     // Truncate if too long
                     const displayStr = jsonStr.length > 200 ? jsonStr.substring(0, 200) + '...' : jsonStr;
-                    paramsHtml = `<div class="event-params" style="margin-top: 8px; font-family: monospace; font-size: 0.85em; background: #f8fafc; padding: 5px; border-radius: 4px; overflow: hidden; color: #4a5568;">${displayStr}</div>`;
+                    paramsHtml = `<div class="event-params" style="margin-top: 8px; font-family: var(--font-mono); font-size: 0.85em; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 2px; overflow: hidden; color: var(--text-secondary); border: 1px solid var(--color-grid);">${displayStr}</div>`;
                 } catch (e) {
                     // Ignore parsing errors
                 }
@@ -1524,12 +1524,16 @@
         }
 
         function getEventColor(str) {
+            // Use HSL for better control - ensure bright, saturated colors for dark theme
             let hash = 0;
             for (let i = 0; i < str.length; i++) {
                 hash = str.charCodeAt(i) + ((hash << 5) - hash);
             }
-            const c = (hash & 0x00FFFFFF).toString(16).toUpperCase();
-            return '#' + '00000'.substring(0, 6 - c.length) + c;
+            // Hue: 0-360, Saturation: 60-80%, Lightness: 55-70% for dark theme visibility
+            const hue = Math.abs(hash) % 360;
+            const saturation = 60 + (Math.abs(hash >> 8) % 20); // 60-80%
+            const lightness = 55 + (Math.abs(hash >> 16) % 15);  // 55-70%
+            return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
         }
 
         // Responsive masonry
@@ -2239,8 +2243,11 @@
                 document.getElementById('fsn-regions').textContent = '0';
                 document.getElementById('fsn-services').textContent = '0';
                 document.getElementById('fsn-events').textContent = '0';
+                document.getElementById('fsn-loading').textContent = 'No events in table';
+                document.getElementById('fsn-loading').style.display = 'block';
                 return;
             }
+            document.getElementById('fsn-loading').style.display = 'none';
 
             // Handle fallback mode (just event_names, no region/service)
             if (data.fallback) {

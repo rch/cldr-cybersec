@@ -568,6 +568,30 @@ def fsn_aggregate():
                 "services": []
             })
 
+        # Parse event_data JSON if it exists (raw table may only have event_data column)
+        if "event_data" in df.columns:
+            parsed_fields = []
+            for _, row in df.iterrows():
+                try:
+                    if row["event_data"] and isinstance(row["event_data"], str):
+                        event = json.loads(row["event_data"])
+                        parsed_fields.append({
+                            "awsRegion": event.get("awsRegion", ""),
+                            "eventSource": event.get("eventSource", ""),
+                            "eventName": event.get("eventName", ""),
+                            "errorCode": event.get("errorCode")
+                        })
+                    else:
+                        parsed_fields.append({})
+                except:
+                    parsed_fields.append({})
+
+            if parsed_fields:
+                parsed_df = pd.DataFrame(parsed_fields)
+                for col in parsed_df.columns:
+                    if col not in df.columns:
+                        df[col] = parsed_df[col]
+
         # Apply time filters if provided
         ts_col = None
         for col in ["event_timestamp", "event_time", "processing_time"]:
@@ -580,18 +604,34 @@ def fsn_aggregate():
         if ts_col and time_end:
             df = df[df[ts_col] <= pd.to_datetime(time_end)]
 
-        # Determine region column
-        region_col = "aws_region" if "aws_region" in df.columns else "region" if "region" in df.columns else None
+        # Determine region column (check both snake_case and camelCase)
+        region_col = None
+        for col in ["aws_region", "awsRegion", "region"]:
+            if col in df.columns:
+                region_col = col
+                break
 
         # Determine service column
-        service_col = "event_source" if "event_source" in df.columns else None
+        service_col = None
+        for col in ["event_source", "eventSource"]:
+            if col in df.columns:
+                service_col = col
+                break
+
+        # Determine event name column for fallback
+        event_name_col = None
+        for col in ["event_name", "eventName"]:
+            if col in df.columns:
+                event_name_col = col
+                break
 
         if not region_col or not service_col:
             # Fallback to event_name grouping if no region/service columns
-            if "event_name" in df.columns:
-                pivot = df.groupby("event_name").agg(
-                    count=("event_name", "count")
+            if event_name_col:
+                pivot = df.groupby(event_name_col).agg(
+                    count=(event_name_col, "count")
                 ).reset_index()
+                pivot = pivot.rename(columns={event_name_col: "event_name"})
                 pivot["error_rate"] = 0
                 return jsonify({
                     "data": pivot.to_dict(orient="records"),
@@ -665,11 +705,49 @@ def fsn_drilldown():
         scan = table.scan()
         df = scan.to_pandas()
 
-        # Determine column names
-        region_col = "aws_region" if "aws_region" in df.columns else "region"
-        service_col = "event_source" if "event_source" in df.columns else None
+        # Parse event_data JSON if needed
+        if "event_data" in df.columns:
+            parsed_fields = []
+            for _, row in df.iterrows():
+                try:
+                    if row["event_data"] and isinstance(row["event_data"], str):
+                        event = json.loads(row["event_data"])
+                        parsed_fields.append({
+                            "awsRegion": event.get("awsRegion", ""),
+                            "eventSource": event.get("eventSource", ""),
+                            "eventName": event.get("eventName", "")
+                        })
+                    else:
+                        parsed_fields.append({})
+                except:
+                    parsed_fields.append({})
 
-        if region_col not in df.columns or service_col not in df.columns:
+            if parsed_fields:
+                parsed_df = pd.DataFrame(parsed_fields)
+                for col in parsed_df.columns:
+                    if col not in df.columns:
+                        df[col] = parsed_df[col]
+
+        # Determine column names (check both snake_case and camelCase)
+        region_col = None
+        for col in ["aws_region", "awsRegion", "region"]:
+            if col in df.columns:
+                region_col = col
+                break
+
+        service_col = None
+        for col in ["event_source", "eventSource"]:
+            if col in df.columns:
+                service_col = col
+                break
+
+        event_name_col = None
+        for col in ["event_name", "eventName"]:
+            if col in df.columns:
+                event_name_col = col
+                break
+
+        if not region_col or not service_col:
             return jsonify({"error": "Required columns not found"}), 400
 
         # Filter to selected region and service
@@ -684,10 +762,12 @@ def fsn_drilldown():
             })
 
         # Aggregate by event_name
-        if "event_name" in filtered.columns:
-            events = filtered.groupby("event_name").agg(
-                count=("event_name", "count")
-            ).reset_index().to_dict(orient="records")
+        if event_name_col and event_name_col in filtered.columns:
+            events = filtered.groupby(event_name_col).agg(
+                count=(event_name_col, "count")
+            ).reset_index()
+            events = events.rename(columns={event_name_col: "event_name"})
+            events = events.to_dict(orient="records")
         else:
             events = [{"event_name": "Unknown", "count": len(filtered)}]
 
