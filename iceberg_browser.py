@@ -1376,12 +1376,14 @@ def get_table_details(table_name):
         # Snapshots (Limit to last 50 for performance)
         snapshots = []
         for s in metadata.snapshots[-50:]:
+            # Summary is a pydantic model - use model_dump() to serialize
+            summary_dict = s.summary.model_dump() if hasattr(s.summary, 'model_dump') else {"operation": str(s.summary.operation)}
             snapshots.append({
                 "snapshot_id": s.snapshot_id,
                 "timestamp_ms": s.timestamp_ms,
                 "timestamp": datetime.fromtimestamp(s.timestamp_ms / 1000).isoformat(),
                 "manifest_list": s.manifest_list,
-                "summary": dict(s.summary)
+                "summary": summary_dict
             })
             
         # Reverse snapshots to show newest first
