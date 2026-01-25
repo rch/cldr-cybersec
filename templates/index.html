@@ -1266,15 +1266,59 @@
         }
 
         // ========================================
-        // 3D Chart Visualization (disabled to prevent WebGL context exhaustion)
-        // The CardVisualizer was creating too many WebGL contexts which caused
-        // the main FSN renderer to lose its context. Since CloudTrail events
-        // don't have metric_history data anyway, we disable this feature.
+        // Card Mini-Visualizations (2D Canvas sparklines)
+        // Lightweight alternative to WebGL - shows event timing within groups
         // ========================================
         const cardVisualizer = {
-            createMiniChart: function(container, data) {
-                // Disabled - CloudTrail events don't have metric_history
-                // and multiple WebGL contexts cause FSN to stop rendering
+            createMiniChart: function(container, events) {
+                if (!container || !events || events.length < 2) return;
+
+                const canvas = document.createElement('canvas');
+                canvas.width = container.clientWidth || 200;
+                canvas.height = 40;
+                canvas.style.width = '100%';
+                canvas.style.height = '40px';
+                container.appendChild(canvas);
+
+                const ctx = canvas.getContext('2d');
+                if (!ctx) return;
+
+                // Extract timestamps and create time buckets
+                const times = events.map(e => new Date(e.event_time || e.eventTime).getTime()).sort();
+                const minTime = times[0];
+                const maxTime = times[times.length - 1];
+                const range = maxTime - minTime || 1;
+
+                // Create histogram buckets
+                const bucketCount = Math.min(20, events.length);
+                const buckets = new Array(bucketCount).fill(0);
+                times.forEach(t => {
+                    const bucket = Math.min(bucketCount - 1, Math.floor((t - minTime) / range * bucketCount));
+                    buckets[bucket]++;
+                });
+
+                const maxBucket = Math.max(...buckets);
+                const barWidth = canvas.width / bucketCount;
+                const barGap = 1;
+
+                // Draw bars with gradient
+                buckets.forEach((count, i) => {
+                    const barHeight = (count / maxBucket) * (canvas.height - 4);
+                    const x = i * barWidth;
+                    const y = canvas.height - barHeight - 2;
+
+                    // Amber gradient based on height
+                    const intensity = 0.4 + (count / maxBucket) * 0.6;
+                    ctx.fillStyle = `rgba(212, 168, 75, ${intensity})`;
+                    ctx.fillRect(x + barGap/2, y, barWidth - barGap, barHeight);
+                });
+
+                // Add subtle baseline
+                ctx.strokeStyle = 'rgba(212, 168, 75, 0.3)';
+                ctx.beginPath();
+                ctx.moveTo(0, canvas.height - 1);
+                ctx.lineTo(canvas.width, canvas.height - 1);
+                ctx.stroke();
             }
         };
 
@@ -1372,14 +1416,14 @@
                 card.style.marginBottom = '8px';
             }
 
-            // Check for metrics for visualization
-            const metricData = group.metric_history || (group.events && group.events[0].metric_history);
+            // Show sparkline for grouped events (2+ events in the group)
+            const showSparkline = isGroup && group.events && group.events.length >= 2;
             const vizId = `viz-${eventId}-${Math.random().toString(36).substr(2, 9)}`;
 
             // Format request parameters for display if available
             let paramsHtml = '';
             // Hide params if showing visualization to avoid clutter
-            if (group.requestParameters && !isGroup && !metricData) {
+            if (group.requestParameters && !isGroup && !showSparkline) {
                 try {
                     // It might be a string or object
                     const params = typeof group.requestParameters === 'string' ?
@@ -1402,7 +1446,7 @@
                     ${!isGroup ? `<div class="event-card-time">${timestamp}</div>` : ''}
                 </div>
                 <div class="event-card-body">
-                    ${metricData ? `<div id="${vizId}" class="card-viz" style="width: 100%; height: 150px; margin-bottom: 10px;"></div>` : ''}
+                    ${showSparkline ? `<div id="${vizId}" class="card-viz" style="width: 100%; height: 40px; margin-bottom: 10px;"></div>` : ''}
                     ${group.user_identity || group.name ? `
                         <div class="event-card-detail">
                             <span class="event-card-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg></span>
@@ -1439,12 +1483,12 @@
                 ` : ''}
             `;
 
-            // Initialize chart after append
-            if (metricData) {
+            // Initialize sparkline chart after append for grouped events
+            if (showSparkline) {
                 setTimeout(() => {
                     const vizContainer = card.querySelector(`#${vizId}`);
                     if (vizContainer) {
-                        cardVisualizer.createMiniChart(vizContainer, metricData);
+                        cardVisualizer.createMiniChart(vizContainer, group.events);
                     }
                 }, 0);
             }
