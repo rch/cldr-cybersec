@@ -98,6 +98,20 @@ async def apply_pyflink_fixes(diagnostics: dict, dry_run: bool = True) -> list[d
             result["message"] = "Re-detected Python path and updated flink-conf.yaml"
             results.append(result)
 
+        elif failure_mode_id == "PYFLINK_011":
+            # Iceberg AWS bundle missing - build and install
+            result = await _fix_iceberg_jars_missing(flink_home, dry_run)
+            result["failure_mode_id"] = "PYFLINK_011"
+            results.append(result)
+
+        elif failure_mode_id == "PYFLINK_012":
+            # Iceberg Flink runtime missing - build and install
+            # Same fix as PYFLINK_011 - builds both JARs
+            if not any(r.get("failure_mode_id") == "PYFLINK_011" for r in results):
+                result = await _fix_iceberg_jars_missing(flink_home, dry_run)
+                result["failure_mode_id"] = "PYFLINK_012"
+                results.append(result)
+
     return results
 
 
@@ -277,6 +291,119 @@ async def _fix_python_path_mismatch(
     except Exception as e:
         result["success"] = False
         result["message"] = f"Error updating config: {e}"
+
+    return result
+
+
+async def _fix_iceberg_jars_missing(flink_home: Path | None, dry_run: bool) -> dict[str, Any]:
+    """Fix: Build and install Iceberg JARs (Flink runtime + AWS bundle).
+
+    This builds the iceberg-flink-runtime-1.20 and iceberg-aws-bundle JARs
+    from the thirdparty/iceberg submodule and copies them to Flink's lib directory.
+    """
+    import subprocess
+
+    result = {
+        "action": "build_iceberg_jars",
+        "command": "./gradlew :iceberg-flink:iceberg-flink-runtime-1.20:shadowJar :iceberg-aws-bundle:shadowJar",
+    }
+
+    if not flink_home or not flink_home.exists():
+        result["success"] = False
+        result["message"] = "FLINK_HOME not found - cannot install Iceberg JARs"
+        return result
+
+    # Determine iceberg directory
+    devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
+    iceberg_dir = Path(devenv_root) / "thirdparty" / "iceberg"
+
+    if not iceberg_dir.exists():
+        result["success"] = False
+        result["message"] = f"Iceberg source not found at {iceberg_dir}. Run: git submodule update --init --recursive"
+        return result
+
+    lib_dir = flink_home / "lib"
+
+    if dry_run:
+        result["success"] = True
+        result["dry_run"] = True
+        result["message"] = "Would build and install Iceberg JARs"
+        result["steps"] = [
+            f"cd {iceberg_dir}",
+            "./gradlew -PflinkVersions=1.20 :iceberg-flink:iceberg-flink-runtime-1.20:shadowJar :iceberg-aws-bundle:shadowJar -x test",
+            f"cp flink/v1.20/flink-runtime/build/libs/iceberg-flink-runtime-1.20-*.jar {lib_dir}/",
+            f"cp aws-bundle/build/libs/iceberg-aws-bundle-*.jar {lib_dir}/",
+        ]
+        return result
+
+    # Build the JARs
+    try:
+        result["build_output"] = []
+
+        build_cmd = [
+            "./gradlew",
+            "-PflinkVersions=1.20",
+            ":iceberg-flink:iceberg-flink-runtime-1.20:shadowJar",
+            ":iceberg-aws-bundle:shadowJar",
+            "-x", "test",
+            "-x", "integrationTest",
+            "-x", "generateGitProperties",
+        ]
+
+        result["build_command"] = " ".join(build_cmd)
+
+        proc = subprocess.run(
+            build_cmd,
+            capture_output=True,
+            text=True,
+            timeout=900,  # 15 min timeout for build
+            cwd=str(iceberg_dir),
+        )
+
+        if proc.returncode != 0:
+            result["success"] = False
+            result["message"] = "Gradle build failed"
+            result["error"] = proc.stderr[-2000:] if len(proc.stderr) > 2000 else proc.stderr
+            return result
+
+        result["build_output"].append("Gradle build succeeded")
+
+        # Copy the JARs
+        copied_jars = []
+
+        # Copy Flink runtime JAR
+        flink_runtime_dir = iceberg_dir / "flink" / "v1.20" / "flink-runtime" / "build" / "libs"
+        for jar in flink_runtime_dir.glob("iceberg-flink-runtime-1.20-*.jar"):
+            if not jar.name.endswith("-sources.jar") and not jar.name.endswith("-javadoc.jar"):
+                dest = lib_dir / jar.name
+                shutil.copy(jar, dest)
+                copied_jars.append(str(dest))
+
+        # Copy AWS bundle JAR
+        aws_bundle_dir = iceberg_dir / "aws-bundle" / "build" / "libs"
+        for jar in aws_bundle_dir.glob("iceberg-aws-bundle-*.jar"):
+            if not jar.name.endswith("-sources.jar") and not jar.name.endswith("-javadoc.jar"):
+                dest = lib_dir / jar.name
+                shutil.copy(jar, dest)
+                copied_jars.append(str(dest))
+
+        if copied_jars:
+            result["success"] = True
+            result["message"] = f"Built and installed {len(copied_jars)} Iceberg JAR(s)"
+            result["installed_jars"] = copied_jars
+            result["restart_required"] = True
+            result["restart_command"] = "devenv tasks run restart:clean"
+        else:
+            result["success"] = False
+            result["message"] = "Build succeeded but no JARs found to copy"
+            result["searched"] = [str(flink_runtime_dir), str(aws_bundle_dir)]
+
+    except subprocess.TimeoutExpired:
+        result["success"] = False
+        result["message"] = "Gradle build timed out after 15 minutes"
+    except Exception as e:
+        result["success"] = False
+        result["message"] = f"Error building/installing JARs: {e}"
 
     return result
 

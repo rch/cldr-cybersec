@@ -134,11 +134,27 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
     configured_python_path = None
     configured_python_exists = False
     flink_conf_mtime = None
+    iceberg_aws_bundle_exists = False
+    iceberg_flink_runtime_exists = False
 
     if flink_home and flink_home_exists:
         flink_bin = flink_home / "bin" / "flink"
         flink_binary_exists = flink_bin.exists()
         diagnostics["flink_config"]["flink_binary_exists"] = flink_binary_exists
+
+        # Check for Iceberg JARs in lib directory
+        lib_dir = flink_home / "lib"
+        if lib_dir.exists():
+            iceberg_runtime_jars = list(lib_dir.glob("iceberg-flink-runtime-1.20-*.jar"))
+            iceberg_aws_bundle_jars = list(lib_dir.glob("iceberg-aws-bundle-*.jar"))
+
+            iceberg_flink_runtime_exists = bool(iceberg_runtime_jars)
+            iceberg_aws_bundle_exists = bool(iceberg_aws_bundle_jars)
+
+            diagnostics["flink_config"]["iceberg_jars"] = {
+                "flink_runtime": [j.name for j in iceberg_runtime_jars] if iceberg_runtime_jars else "MISSING",
+                "aws_bundle": [j.name for j in iceberg_aws_bundle_jars] if iceberg_aws_bundle_jars else "MISSING",
+            }
 
         flink_conf = flink_home / "conf" / "flink-conf.yaml"
         if flink_conf.exists():
@@ -455,6 +471,40 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
                 "details": [f"Bootstrap config has flink_home={flink_home}, but $FLINK_HOME not set in shell"],
             })
             recommendations.append(f"Export FLINK_HOME: export FLINK_HOME={flink_home}")
+
+    # PYFLINK_011: Iceberg AWS Bundle Missing
+    if flink_home_exists and not iceberg_aws_bundle_exists:
+        fm = get_failure_mode("PYFLINK_011")
+        if fm:
+            rpn = fm.calculate_rpn()
+            detected_issues.append({
+                "failure_mode_id": "PYFLINK_011",
+                "name": fm.name,
+                "severity": "critical",
+                "symptom": fm.symptom,
+                "rpn": rpn.rpn,
+                "remediation": fm.remediation_steps,
+                "details": [f"iceberg-aws-bundle-*.jar not found in {flink_home}/lib/"],
+            })
+            recommendations.insert(0, "Run: cybersec bootstrap run (to build and install Iceberg JARs)")
+
+    # PYFLINK_012: Iceberg Flink Runtime Missing
+    if flink_home_exists and not iceberg_flink_runtime_exists:
+        fm = get_failure_mode("PYFLINK_012")
+        if fm:
+            rpn = fm.calculate_rpn()
+            detected_issues.append({
+                "failure_mode_id": "PYFLINK_012",
+                "name": fm.name,
+                "severity": "critical",
+                "symptom": fm.symptom,
+                "rpn": rpn.rpn,
+                "remediation": fm.remediation_steps,
+                "details": [f"iceberg-flink-runtime-1.20-*.jar not found in {flink_home}/lib/"],
+            })
+            # Don't duplicate if PYFLINK_011 already added bootstrap recommendation
+            if iceberg_aws_bundle_exists:
+                recommendations.insert(0, "Run: cybersec bootstrap run (to build and install Iceberg JARs)")
 
     # === Summary ===
 

@@ -335,6 +335,48 @@ PYFLINK_010 = FailureMode(
     solution_level=AutomationLevel.A,
 )
 
+PYFLINK_011 = FailureMode(
+    failure_mode_id="PYFLINK_011",
+    category="pyflink",
+    name="Iceberg AWS Bundle Missing",
+    description="iceberg-aws-bundle JAR not installed in Flink lib directory",
+    base_severity=9,   # Critical - S3FileIO completely fails
+    base_occurrence=5,  # Moderate - common on fresh setup or after Flink rebuild
+    base_detection=1,   # Very easy to detect - just check file exists
+    symptom="NoClassDefFoundError: software/amazon/awssdk/core/exception/SdkException",
+    cause="iceberg-aws-bundle-*.jar not in $FLINK_HOME/lib/, bootstrap skipped or failed",
+    detection_method="Check for iceberg-aws-bundle-*.jar in $FLINK_HOME/lib/",
+    remediation_steps=[
+        "Run bootstrap to build and install: cybersec bootstrap run",
+        "Or manually build: cd thirdparty/iceberg && ./gradlew :iceberg-aws-bundle:shadowJar",
+        "Then copy: cp aws-bundle/build/libs/iceberg-aws-bundle-*.jar $FLINK_HOME/lib/",
+        "Restart Flink: devenv tasks run restart:clean",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
+PYFLINK_012 = FailureMode(
+    failure_mode_id="PYFLINK_012",
+    category="pyflink",
+    name="Iceberg Flink Runtime Missing",
+    description="iceberg-flink-runtime JAR not installed in Flink lib directory",
+    base_severity=9,   # Critical - Iceberg catalog fails completely
+    base_occurrence=5,  # Moderate - common on fresh setup
+    base_detection=1,   # Very easy to detect
+    symptom="'No factory implements IcebergCatalog' or 'Could not find a suitable table factory'",
+    cause="iceberg-flink-runtime-1.20-*.jar not in $FLINK_HOME/lib/",
+    detection_method="Check for iceberg-flink-runtime-1.20-*.jar in $FLINK_HOME/lib/",
+    remediation_steps=[
+        "Run bootstrap to build and install: cybersec bootstrap run",
+        "Or manually build: cd thirdparty/iceberg && ./gradlew :iceberg-flink:iceberg-flink-runtime-1.20:shadowJar",
+        "Then copy: cp flink/v1.20/flink-runtime/build/libs/iceberg-flink-runtime-1.20-*.jar $FLINK_HOME/lib/",
+        "Restart Flink: devenv tasks run restart:clean",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
 # Infrastructure failure modes
 INFRA_001 = FailureMode(
     failure_mode_id="INFRA_001",
@@ -436,6 +478,8 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "PYFLINK_008": PYFLINK_008,
     "PYFLINK_009": PYFLINK_009,
     "PYFLINK_010": PYFLINK_010,
+    "PYFLINK_011": PYFLINK_011,
+    "PYFLINK_012": PYFLINK_012,
     "INFRA_001": INFRA_001,
     "INFRA_002": INFRA_002,
     "INFRA_003": INFRA_003,
@@ -446,7 +490,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
 CATEGORIES: dict[str, list[str]] = {
     "iceberg": ["ICE_001", "ICE_002", "ICE_003"],
     "flink": ["FLINK_001", "FLINK_002", "FLINK_003"],
-    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_010"],
+    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_010", "PYFLINK_011", "PYFLINK_012"],
     "infra": ["INFRA_001", "INFRA_002", "INFRA_003"],
     "data": ["DATA_001"],
 }
