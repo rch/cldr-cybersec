@@ -59,17 +59,64 @@ async def cmd_health_pyflink(cmd: ParsedCommand) -> CommandResult:
 
     Use when PyFlink jobs fail with "Python process exits with code: 1".
     Shows diagnostics AND planned fixes (like terraform plan).
+    Also runs conftest policy validation for comprehensive checks.
 
     Options:
         --json, -j  Output as JSON
     """
     from ..health.pyflink_diagnostics import gather_pyflink_diagnostics
     from ..health.pyflink_fixes import apply_pyflink_fixes
+    from ..health.environment import run_conftest
+    from ..config.runtime import gather_runtime_config, merge_runtime_config
+    from ..config import load_config, hydrate_config
+    from pathlib import Path
+    import json
 
-    # Gather diagnostics
+    # Gather FMEA-based diagnostics
     data = await gather_pyflink_diagnostics()
 
-    # Also compute planned fixes (dry-run) to show what would be changed
+    # Run policy checks for additional validation
+    try:
+        # Load and hydrate config
+        try:
+            static_config = load_config("local")
+            static_dict = hydrate_config(static_config)
+        except FileNotFoundError:
+            static_dict = {}
+
+        runtime_config = await gather_runtime_config()
+        merged = merge_runtime_config(static_dict, runtime_config)
+
+        # Write config and run conftest
+        config_path = Path("build/config.json")
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_path, "w") as f:
+            json.dump(merged, f, indent=2)
+
+        policy_result = run_conftest(config_path)
+        data["policy_check"] = {
+            "failures": policy_result.get("failures", []),
+            "warnings": policy_result.get("warnings", []),
+            "success": policy_result.get("success", True),
+        }
+
+        # Add policy failures as issues if not already detected by FMEA
+        for failure in policy_result.get("failures", []):
+            # Check if this issue is already in FMEA issues
+            if not any(failure in str(issue) for issue in data.get("issues", [])):
+                data.setdefault("issues", []).append({
+                    "failure_mode_id": "POLICY",
+                    "name": "Policy Violation",
+                    "severity": "critical",
+                    "symptom": failure,
+                    "rpn": 0,
+                    "remediation": [failure],
+                })
+
+    except Exception as e:
+        data["policy_check"] = {"error": str(e)}
+
+    # Compute planned fixes (dry-run) to show what would be changed
     issues = data.get("issues", [])
     if issues:
         planned_fixes = await apply_pyflink_fixes(data, dry_run=True)
@@ -394,6 +441,35 @@ def _format_pyflink_diagnostics(data: dict) -> str:
                 lines.append("  Log errors:")
                 for detail in issue.get("details", [])[:3]:
                     lines.append(f"    {detail[:70]}...")
+
+    # Policy check results
+    policy_check = data.get("policy_check", {})
+    if policy_check:
+        lines.append("")
+        lines.append("=" * 40)
+        lines.append("POLICY VALIDATION")
+        lines.append("=" * 40)
+
+        if policy_check.get("error"):
+            lines.append(f"  ⚠ Policy check error: {policy_check['error']}")
+        else:
+            failures = policy_check.get("failures", [])
+            warnings = policy_check.get("warnings", [])
+
+            if failures:
+                lines.append("  Failures:")
+                for msg in failures:
+                    lines.append(f"    ✗ {msg}")
+
+            if warnings:
+                lines.append("  Warnings:")
+                for msg in warnings:
+                    lines.append(f"    ⚠ {msg}")
+
+            if not failures and not warnings:
+                lines.append("  ✓ All policy checks passed")
+            elif not failures:
+                lines.append(f"  ✓ Passed with {len(warnings)} warning(s)")
 
     # Recommendations (prioritized action items)
     recommendations = data.get("recommendations", [])
