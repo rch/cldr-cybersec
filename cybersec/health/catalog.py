@@ -131,6 +131,130 @@ FLINK_003 = FailureMode(
     solution_level=AutomationLevel.C,
 )
 
+# PyFlink-specific failure modes
+PYFLINK_001 = FailureMode(
+    failure_mode_id="PYFLINK_001",
+    category="pyflink",
+    name="PyFlink Not Installed",
+    description="PyFlink package not installed or not importable",
+    base_severity=9,   # Critical - PyFlink jobs can't run
+    base_occurrence=4,  # Moderate - common on fresh setup
+    base_detection=1,   # Very easy to detect
+    symptom="ImportError when running PyFlink jobs, 'No module named pyflink'",
+    cause="apache-flink package not installed in Python environment",
+    detection_method="import pyflink succeeds",
+    remediation_steps=[
+        "Install PyFlink: uv pip install apache-flink",
+        "Verify installation: python -c 'import pyflink; print(pyflink.__version__)'",
+        "Ensure using correct Python environment (devenv venv)",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
+PYFLINK_002 = FailureMode(
+    failure_mode_id="PYFLINK_002",
+    category="pyflink",
+    name="Python Path Mismatch",
+    description="Flink using different Python than PyFlink installed in",
+    base_severity=8,   # High - jobs fail with cryptic errors
+    base_occurrence=6,  # High on macOS - common issue
+    base_detection=4,   # Moderate - need to compare paths
+    symptom="'Python process exits with code: 1', PyFlink import errors in TaskManager logs",
+    cause="PYFLINK_CLIENT_EXECUTABLE not set or points to wrong Python",
+    detection_method="Compare sys.executable with flink-conf.yaml python settings",
+    remediation_steps=[
+        "Set PYFLINK_CLIENT_EXECUTABLE to devenv Python path",
+        "Add to flink-conf.yaml: python.client.executable: /path/to/python",
+        "Add to flink-conf.yaml: python.executable: /path/to/python",
+        "Restart Flink cluster after configuration change",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.B,
+)
+
+PYFLINK_003 = FailureMode(
+    failure_mode_id="PYFLINK_003",
+    category="pyflink",
+    name="kafka-python Missing",
+    description="kafka-python package required but not installed",
+    base_severity=7,   # High - Kafka connectors fail
+    base_occurrence=4,  # Moderate - common oversight
+    base_detection=1,   # Very easy to detect
+    symptom="'No module named kafka' errors, Kafka source/sink fails",
+    cause="kafka-python package not installed",
+    detection_method="import kafka succeeds",
+    remediation_steps=[
+        "Install kafka-python: uv pip install kafka-python",
+        "Verify: python -c 'import kafka; print(\"OK\")'",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
+PYFLINK_004 = FailureMode(
+    failure_mode_id="PYFLINK_004",
+    category="pyflink",
+    name="FLINK_HOME Not Set",
+    description="FLINK_HOME environment variable not configured",
+    base_severity=8,   # High - can't submit jobs
+    base_occurrence=4,  # Moderate - common on fresh setup
+    base_detection=1,   # Very easy to detect
+    symptom="'flink' command not found, job submission fails",
+    cause="Flink not installed or FLINK_HOME not exported",
+    detection_method="FLINK_HOME env var set and points to valid directory",
+    remediation_steps=[
+        "Run bootstrap: devenv tasks run restart:clean (builds Flink on first run)",
+        "Or set manually: export FLINK_HOME=/path/to/flink-1.20.1",
+        "Verify: $FLINK_HOME/bin/flink --version",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
+PYFLINK_005 = FailureMode(
+    failure_mode_id="PYFLINK_005",
+    category="pyflink",
+    name="macOS Python Configuration",
+    description="macOS-specific Python path issues with Flink",
+    base_severity=7,   # High - jobs fail
+    base_occurrence=7,  # Very high on macOS
+    base_detection=3,   # Good - can detect platform
+    symptom="PyFlink works locally but fails in Flink cluster on macOS",
+    cause="macOS has multiple Python installations, Flink picks wrong one",
+    detection_method="Platform is Darwin AND python settings not in flink-conf.yaml",
+    remediation_steps=[
+        "Get devenv Python: which python3 (inside devenv shell)",
+        "Edit $FLINK_HOME/conf/flink-conf.yaml:",
+        "  python.client.executable: /path/to/devenv/python3",
+        "  python.executable: /path/to/devenv/python3",
+        "Restart Flink: ./bin/stop-cluster.sh && ./bin/start-cluster.sh",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.B,
+)
+
+PYFLINK_006 = FailureMode(
+    failure_mode_id="PYFLINK_006",
+    category="pyflink",
+    name="Job Submission Log Errors",
+    description="Errors detected in PyFlink job submission log",
+    base_severity=6,   # Moderate-high
+    base_occurrence=5,  # Moderate
+    base_detection=2,   # Easy - check log file
+    symptom="Job submission fails, errors in /tmp/cloudtrail_submit.log",
+    cause="Various - check log for specific error",
+    detection_method="Check /tmp/cloudtrail_submit.log for ERROR/Exception lines",
+    remediation_steps=[
+        "Review full log: cat /tmp/cloudtrail_submit.log",
+        "Check for Python errors (import, syntax)",
+        "Check for Flink errors (cluster connectivity, resource allocation)",
+        "Verify Flink cluster is running: curl http://localhost:8081/overview",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.C,
+)
+
 # Infrastructure failure modes
 INFRA_001 = FailureMode(
     failure_mode_id="INFRA_001",
@@ -222,6 +346,12 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "FLINK_001": FLINK_001,
     "FLINK_002": FLINK_002,
     "FLINK_003": FLINK_003,
+    "PYFLINK_001": PYFLINK_001,
+    "PYFLINK_002": PYFLINK_002,
+    "PYFLINK_003": PYFLINK_003,
+    "PYFLINK_004": PYFLINK_004,
+    "PYFLINK_005": PYFLINK_005,
+    "PYFLINK_006": PYFLINK_006,
     "INFRA_001": INFRA_001,
     "INFRA_002": INFRA_002,
     "INFRA_003": INFRA_003,
@@ -232,6 +362,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
 CATEGORIES: dict[str, list[str]] = {
     "iceberg": ["ICE_001", "ICE_002", "ICE_003"],
     "flink": ["FLINK_001", "FLINK_002", "FLINK_003"],
+    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006"],
     "infra": ["INFRA_001", "INFRA_002", "INFRA_003"],
     "data": ["DATA_001"],
 }

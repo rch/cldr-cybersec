@@ -313,13 +313,48 @@ def _format_pyflink_diagnostics(data: dict) -> str:
             for line in py_lines[-3:]:
                 lines.append(f"      {line[:80]}...")
 
-    # Recommendations
+    # Issues (FMEA-based)
+    issues = data.get("issues", [])
+    if issues:
+        lines.append("")
+        lines.append("=" * 40)
+        lines.append("DETECTED ISSUES")
+        lines.append("=" * 40)
+        for issue in issues:
+            severity = issue.get("severity", "unknown")
+            severity_icon = {"critical": "✗", "warning": "⚠", "info": "ℹ"}.get(severity, "?")
+            lines.append("")
+            lines.append(f"{severity_icon} [{issue.get('failure_mode_id', '?')}] {issue.get('name', 'Unknown')}")
+            lines.append(f"  Severity: {severity.upper()} (RPN: {issue.get('rpn', 'N/A')})")
+            lines.append(f"  Symptom: {issue.get('symptom', 'N/A')}")
+            remediation = issue.get("remediation", [])
+            if remediation:
+                lines.append("  Remediation:")
+                for step in remediation:
+                    lines.append(f"    → {step}")
+            if issue.get("details"):
+                lines.append("  Log errors:")
+                for detail in issue.get("details", [])[:3]:
+                    lines.append(f"    {detail[:70]}...")
+
+    # Recommendations (prioritized action items)
     recommendations = data.get("recommendations", [])
     if recommendations:
         lines.append("")
-        lines.append("Recommendations:")
-        for rec in recommendations:
-            lines.append(f"  • {rec}")
+        lines.append("=" * 40)
+        lines.append("RECOMMENDED ACTIONS")
+        lines.append("=" * 40)
+        for i, rec in enumerate(recommendations, 1):
+            lines.append(f"  {i}. {rec}")
+
+    # Status summary
+    status = data.get("status", {})
+    if status:
+        lines.append("")
+        if status.get("healthy"):
+            lines.append("✓ PyFlink environment is healthy")
+        else:
+            lines.append(f"Status: {status.get('critical_issues', 0)} critical, {status.get('warning_issues', 0)} warnings")
 
     return "\n".join(lines)
 
