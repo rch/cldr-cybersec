@@ -1266,88 +1266,17 @@
         }
 
         // ========================================
-        // 3D Chart Visualization
+        // 3D Chart Visualization (disabled to prevent WebGL context exhaustion)
+        // The CardVisualizer was creating too many WebGL contexts which caused
+        // the main FSN renderer to lose its context. Since CloudTrail events
+        // don't have metric_history data anyway, we disable this feature.
         // ========================================
-        class CardVisualizer {
-            constructor() {
-                this.renderers = [];
+        const cardVisualizer = {
+            createMiniChart: function(container, data) {
+                // Disabled - CloudTrail events don't have metric_history
+                // and multiple WebGL contexts cause FSN to stop rendering
             }
-
-            createMiniChart(container, data) {
-                if (!container || !data || data.length === 0) return;
-
-                const width = container.clientWidth;
-                const height = 150;
-
-                // Scene setup
-                const scene = new THREE.Scene();
-
-                const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
-                camera.position.set(10, 10, 20);
-                camera.lookAt(5, 0, 5);
-
-                const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-                renderer.setSize(width, height);
-                container.appendChild(renderer.domElement);
-                this.renderers.push(renderer);
-
-                // Lighting
-                const ambientLight = new THREE.AmbientLight(0x404040);
-                scene.add(ambientLight);
-
-                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-                directionalLight.position.set(5, 10, 7);
-                scene.add(directionalLight);
-
-                // Create bars using D3 scales and Three.js meshes
-                const xScale = d3.scaleBand()
-                    .domain(d3.range(data.length))
-                    .range([0, 10])
-                    .padding(0.2);
-
-                const yScale = d3.scaleLinear()
-                    .domain([0, 100]) // Assuming data is 0-100
-                    .range([0, 8]);
-
-                const geometry = new THREE.BoxGeometry(xScale.bandwidth(), 1, 1);
-
-                // Color scale
-                const colorScale = d3.scaleSequential(d3.interpolateViridis)
-                    .domain([0, 100]);
-
-                data.forEach((value, index) => {
-                    const color = new THREE.Color(colorScale(value));
-                    const material = new THREE.MeshPhongMaterial({ color: color });
-                    const bar = new THREE.Mesh(geometry, material);
-
-                    const barHeight = yScale(value);
-                    bar.scale.y = Math.max(0.1, barHeight);
-                    bar.position.x = xScale(index);
-                    bar.position.y = barHeight / 2;
-                    bar.position.z = 0;
-
-                    scene.add(bar);
-                });
-
-                // ground plane (grid)
-                const gridHelper = new THREE.GridHelper(20, 10, 0xcccccc, 0xeeeeee);
-                gridHelper.position.set(5, 0, 5);
-                scene.add(gridHelper);
-
-                // Render function
-                const animate = () => {
-                    if (container.closest('body')) { // Stop animating if removed from DOM
-                        requestAnimationFrame(animate);
-                        renderer.render(scene, camera);
-                    } else {
-                        renderer.dispose();
-                    }
-                };
-                animate();
-            }
-        }
-
-        const cardVisualizer = new CardVisualizer();
+        };
 
         function groupSimilarEvents(events) {
             if (!events || events.length === 0) return [];

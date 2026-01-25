@@ -299,78 +299,78 @@ def get_events():
         user_identity = request.args.get("user_identity")
         source_ip = request.args.get("source_ip")
         region = request.args.get("region")
+        event_source = request.args.get("event_source")
         
         # Start with table scan
         scan = table.scan()
-        
-        # Apply filters if provided
-        # Note: PyIceberg filter syntax may need adjustment based on version
-        # For now, we'll fetch data and filter with pandas
-        
+
         # Convert to pandas DataFrame
         df = scan.to_pandas()
-        
-        # Apply filters (check column existence first)
-        if event_name and "event_name" in df.columns:
+
+        # Parse event_data JSON first if it exists (needed for filtering)
+        if "event_data" in df.columns:
+            def parse_event_data(row):
+                try:
+                    if row and isinstance(row, str):
+                        return json.loads(row)
+                    return {}
+                except:
+                    return {}
+
+            parsed = df["event_data"].apply(parse_event_data)
+
+            # Extract common fields for filtering
+            df["event_name"] = parsed.apply(lambda x: x.get("eventName", ""))
+            df["event_source"] = parsed.apply(lambda x: x.get("eventSource", ""))
+            df["region"] = parsed.apply(lambda x: x.get("awsRegion", ""))
+            df["source_ip_address"] = parsed.apply(lambda x: x.get("sourceIPAddress", ""))
+            df["user_identity"] = parsed.apply(lambda x:
+                x.get("userIdentity", {}).get("userName", "") or
+                x.get("userIdentity", {}).get("arn", "").split("/")[-1] if x.get("userIdentity") else ""
+            )
+
+        # Apply filters (now works with extracted fields)
+        if event_name:
             df = df[df["event_name"].str.contains(event_name, case=False, na=False)]
-        if user_identity and "user_identity" in df.columns:
+        if event_source:
+            df = df[df["event_source"].str.contains(event_source, case=False, na=False)]
+        if user_identity:
             df = df[df["user_identity"].str.contains(user_identity, case=False, na=False)]
-        if source_ip and "source_ip_address" in df.columns:
-            df = df[df["source_ip_address"] == source_ip]
-        elif source_ip and "source_ip" in df.columns:
-            df = df[df["source_ip"] == source_ip]
-        if region and "region" in df.columns:
-            df = df[df["region"] == region]
-        elif region and "aws_region" in df.columns:
-            df = df[df["aws_region"] == region]
-        
+        if source_ip:
+            df = df[df["source_ip_address"].str.contains(source_ip, case=False, na=False)]
+        if region:
+            df = df[df["region"].str.contains(region, case=False, na=False)]
+
         # Get total count before pagination
         total_count = len(df)
-        
+
         # Sort by timestamp descending (check multiple possible column names)
         for ts_col in ["event_time", "event_timestamp", "eventTime", "processing_time"]:
             if ts_col in df.columns:
                 df = df.sort_values(ts_col, ascending=False)
                 break
-        
+
         # Apply pagination
         df = df.iloc[offset:offset + limit]
         
         # Convert to records
         events = df.to_dict(orient="records")
-        
-        # Process events: parse JSON and handle types
+
+        # Process events: expand event_data JSON and handle types
         processed_events = []
         for event in events:
-            # Parse event_data JSON if it exists
+            # Parse and merge full event_data JSON for frontend
             if "event_data" in event and event["event_data"]:
                 try:
                     event_data_str = event["event_data"]
                     if isinstance(event_data_str, str):
                         event_data = json.loads(event_data_str)
-                        
-                        # Flatten common fields for frontend
-                        # Map CloudTrail fields to what frontend expects
-                        if "eventName" in event_data:
-                            event["event_name"] = event_data["eventName"]
-                        if "userIdentity" in event_data:
-                            userIdentity = event_data["userIdentity"]
-                            if isinstance(userIdentity, dict):
-                                if "userName" in userIdentity:
-                                    event["user_identity"] = userIdentity["userName"]
-                                elif "arn" in userIdentity:
-                                    # Extract user from ARN
-                                    event["user_identity"] = userIdentity["arn"].split("/")[-1]
-                        if "sourceIPAddress" in event_data:
-                            event["source_ip_address"] = event_data["sourceIPAddress"]
-                        if "awsRegion" in event_data:
-                            event["region"] = event_data["awsRegion"]
+                        # Extract additional fields not already extracted
                         if "errorCode" in event_data:
                             event["error_code"] = event_data["errorCode"]
                         if "errorMessage" in event_data:
                             event["error_message"] = event_data["errorMessage"]
-                            
-                        # Merge the rest
+                        # Merge all fields from event_data
                         event.update(event_data)
                 except Exception as e:
                     print(f"Error parsing event_data: {e}")
