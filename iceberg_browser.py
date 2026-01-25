@@ -965,30 +965,40 @@ def fsn_drilldown():
 
 # Store metrics for change detection and rate calculation
 _last_snapshot_id = None
-_last_event_count = 0
+_last_event_count = None  # None = not initialized yet
 _event_timestamps = []  # Track event times for rate calculation
 
 
 def get_table_changes():
     """Check if table has changed and calculate events per minute"""
     global _last_snapshot_id, _last_event_count, _event_timestamps
-    
+
     try:
         table = get_table()
         if not table:
             return None
-        
+
         metadata = table.metadata
         current_snapshot_id = metadata.current_snapshot_id
-        
+
         # Get current count
         scan = table.scan()
         df = scan.to_pandas()
         current_count = len(df)
-        
-        # Calculate new events
+
+        # First call - initialize baseline (don't count existing events as "new")
+        if _last_event_count is None:
+            _last_event_count = current_count
+            _last_snapshot_id = current_snapshot_id
+            return {
+                "total_events": current_count,
+                "events_per_minute": 0,
+                "timestamp": datetime.now().isoformat()
+            }
+
+        # Calculate new events since last check
         new_events = current_count - _last_event_count
-        
+
         # Update tracking
         if new_events > 0:
             now = time.time()
@@ -996,13 +1006,13 @@ def get_table_changes():
             _event_timestamps.extend([now] * new_events)
             _last_event_count = current_count
             _last_snapshot_id = current_snapshot_id
-        
+
         # Calculate events per minute (last 60 seconds)
         now = time.time()
         cutoff = now - 60
         _event_timestamps[:] = [ts for ts in _event_timestamps if ts > cutoff]
         events_per_minute = len(_event_timestamps)
-        
+
         return {
             "total_events": current_count,
             "events_per_minute": events_per_minute,
@@ -1010,8 +1020,6 @@ def get_table_changes():
         }
     except Exception as e:
         return {"error": str(e)}
-    
-    return None
 
 
 @app.route("/api/stream")
