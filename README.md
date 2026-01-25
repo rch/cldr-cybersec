@@ -56,42 +56,74 @@ This repository includes a complete local development environment using [devenv]
 ### Quick Start
 
 ```bash
-devenv up  # Start all services (Polaris catalog initializes automatically)
+# Clone and enter devenv shell
+git clone https://github.com/cloudera/cybersec.git
+cd cybersec
+devenv shell
+
+# Install CLI tools
+uv pip install -e .
+
+# Start services and run initial bootstrap (builds Flink from source on first run)
+devenv tasks run restart:clean
+
+# Verify environment
+cybersec --cmd "/bootstrap status"
 ```
 
-That's it! All services start and configure themselves automatically:
-- PostgreSQL initializes with required databases
-- Polaris starts and creates the catalog with proper permissions
-- MinIO, Flink, and Iceberg Browser become available
+On first run, `restart:clean` automatically:
+- Initializes git submodules
+- Builds Flink from source (~10-15 minutes)
+- Starts all services (PostgreSQL, Polaris, MinIO, Flink, etc.)
 
-### Verification
+### CLI Usage
 
-```bash
-devenv tasks run polaris:check  # Verify Polaris configuration
-```
-
-### Clean Restart
+The `cybersec` CLI provides unified commands that work identically across CLI, MCP, and TUI:
 
 ```bash
-devenv tasks run restart:clean  # Stop all processes and restart
+# Health diagnostics
+cybersec --cmd "/health"                    # FMEA-based health check
+cybersec --cmd "/health pyflink"            # PyFlink diagnostics
+cybersec --cmd "/health diagnose FLINK_001" # Diagnose specific issue
+
+# Bootstrap and configuration
+cybersec --cmd "/bootstrap status"          # Check service health
+cybersec --cmd "/bootstrap info"            # Show configuration
+cybersec --cmd "/bootstrap verify"          # Verify environment
+
+# JSON output for scripting
+cybersec --cmd "/health pyflink --json"
 ```
 
 ### Services
 
-- **Apache Flink**: Job management at http://localhost:8081
-- **Iceberg Browser**: CloudTrail events UI at http://localhost:5050
-- **MinIO Console**: Object storage at http://localhost:9011 (minioadmin/minioadmin)
-- **Apache Polaris**: REST catalog at http://localhost:8181
-- **PostgreSQL**: Metadata storage on port 5438
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Apache Flink | http://localhost:8081 | - |
+| Iceberg Browser | http://localhost:5050 | - |
+| MinIO Console | http://localhost:9011 | minioadmin/minioadmin |
+| Apache Polaris | http://localhost:8181 | - |
+| PostgreSQL | localhost:5438 | postgres |
+| Prometheus | http://localhost:9090 | - |
+| NiFi | http://localhost:8450 | - |
 
 ### Key Tasks
 
-- `polaris:check` - Verify Polaris is properly configured
-- `polaris:init` - Manually re-initialize Polaris (if needed)
-- `restart:clean` - Clean restart of all services
-- `docs:build` - Build documentation
+```bash
+devenv tasks run restart:clean  # Clean restart (auto-bootstraps on fresh clone)
+devenv tasks run polaris:check  # Verify Polaris configuration
+devenv tasks run docs:build     # Build documentation
+```
 
-**Note**: Polaris initialization happens automatically on `devenv up`. The `polaris:init` task is only needed if automatic initialization fails.
+### MCP Integration
 
-See [docs/POLARIS_SETUP.md](docs/POLARIS_SETUP.md) for detailed Polaris configuration and troubleshooting.
+For AI-assisted development, the cybersec MCP server provides the same commands:
+
+```python
+# In Claude Code or other MCP clients
+cmd("/health pyflink")
+cmd("/bootstrap status --json")
+```
+
+See [CLAUDE.md](CLAUDE.md) for detailed development instructions.
 
