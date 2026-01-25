@@ -12,9 +12,11 @@ app = typer.Typer(
 
 # Import subcommands
 from . import bootstrap
+from . import health
 
-# Register bootstrap subcommand
+# Register subcommands
 app.add_typer(bootstrap.app, name="bootstrap")
+app.add_typer(health.app, name="health")
 
 
 @app.callback()
