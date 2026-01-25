@@ -884,8 +884,9 @@
                     select.appendChild(opt);
                 });
 
-                // Show preview of current theme
+                // Show preview and apply current theme
                 updateThemePreview(currentTheme);
+                applyThemePreview(currentTheme);
 
                 // Update preview on change
                 select.addEventListener('change', (e) => {
