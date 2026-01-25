@@ -34,8 +34,25 @@ async def dispatch(command_input: str | ParsedCommand) -> CommandResult:
     else:
         cmd = command_input
 
-    # Find handler
-    handler_info = get_command(cmd.full_path)
+    # Find handler - try progressively shorter paths
+    # e.g., for "health fix pyflink", try:
+    #   1. health.fix.pyflink (if first arg could be sub-subcommand)
+    #   2. health.fix (with pyflink as arg)
+    #   3. health (with fix as arg)
+
+    handler_info = None
+
+    # First, check if first arg is actually a sub-subcommand
+    if cmd.args and cmd.subcommand:
+        nested_path = f"{cmd.command}.{cmd.subcommand}.{cmd.args[0]}"
+        handler_info = get_command(nested_path)
+        if handler_info:
+            # Remove the sub-subcommand from args
+            cmd.args = cmd.args[1:]
+
+    # Try the parsed full path
+    if not handler_info:
+        handler_info = get_command(cmd.full_path)
 
     # If no specific subcommand handler, try parent command
     if not handler_info and cmd.subcommand:

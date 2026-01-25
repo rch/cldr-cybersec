@@ -3,6 +3,7 @@
 Commands:
     /health                 - Run FMEA health diagnostics
     /health pyflink         - PyFlink diagnostics
+    /health fix pyflink     - Fix detected PyFlink issues
     /health diagnose <id>   - Diagnose specific failure mode
     /health fix <id>        - Remediation for failure mode
 """
@@ -67,6 +68,52 @@ async def cmd_health_pyflink(cmd: ParsedCommand) -> CommandResult:
 
     return CommandResult(
         success=True,
+        data=data,
+        formatted=formatted,
+    )
+
+
+async def cmd_health_fix_pyflink(cmd: ParsedCommand) -> CommandResult:
+    """Fix detected PyFlink issues.
+
+    Runs diagnostics, identifies issues, and applies fixes.
+    Default is dry-run mode (shows what would be done).
+
+    Options:
+        --execute   Actually apply fixes (default: dry-run)
+        --json, -j  Output as JSON
+    """
+    from ..health.pyflink_diagnostics import gather_pyflink_diagnostics
+    from ..health.pyflink_fixes import apply_pyflink_fixes
+
+    dry_run = not cmd.options.get("execute", False)
+
+    # First gather diagnostics
+    diagnostics = await gather_pyflink_diagnostics()
+    issues = diagnostics.get("issues", [])
+
+    if not issues:
+        return CommandResult(
+            success=True,
+            data={"status": "healthy", "fixes_applied": []},
+            formatted="✓ No issues detected. PyFlink environment is healthy.",
+        )
+
+    # Apply fixes
+    fix_results = await apply_pyflink_fixes(diagnostics, dry_run=dry_run)
+
+    data = {
+        "dry_run": dry_run,
+        "issues_found": len(issues),
+        "fixes": fix_results,
+    }
+
+    formatted = _format_pyflink_fixes(fix_results, dry_run)
+
+    all_success = all(f.get("success", False) for f in fix_results)
+
+    return CommandResult(
+        success=all_success or dry_run,
         data=data,
         formatted=formatted,
     )
@@ -396,6 +443,73 @@ def _format_diagnosis(data: dict, failure_mode_id: str) -> str:
     return "\n".join(lines)
 
 
+def _format_pyflink_fixes(fix_results: list, dry_run: bool) -> str:
+    """Format PyFlink fix results for human display."""
+    lines = []
+
+    if dry_run:
+        lines.append("PyFlink Fix (DRY RUN)")
+        lines.append("=" * 40)
+        lines.append("The following changes would be made:")
+    else:
+        lines.append("PyFlink Fix")
+        lines.append("=" * 40)
+
+    lines.append("")
+
+    for fix in fix_results:
+        fm_id = fix.get("failure_mode_id", "?")
+        action = fix.get("action", "unknown")
+        success = fix.get("success", False)
+        message = fix.get("message", "")
+
+        icon = "✓" if success else "✗"
+        lines.append(f"{icon} [{fm_id}] {message}")
+
+        if fix.get("dry_run"):
+            if fix.get("command"):
+                lines.append(f"    Command: {fix['command']}")
+            if fix.get("lines_to_add"):
+                lines.append("    Would add to flink-conf.yaml:")
+                for line in fix["lines_to_add"]:
+                    lines.append(f"      {line}")
+
+        elif action == "update_flink_config":
+            if fix.get("config_file"):
+                lines.append(f"    Config: {fix['config_file']}")
+            if fix.get("backup"):
+                lines.append(f"    Backup: {fix['backup']}")
+            if fix.get("restart_required"):
+                lines.append("    ⚠ Restart required:")
+                lines.append(f"      {fix.get('restart_command', '$FLINK_HOME/bin/stop-cluster.sh && $FLINK_HOME/bin/start-cluster.sh')}")
+
+        elif action == "manual_required":
+            lines.append(f"    Details: {fix.get('details', '')}")
+
+        elif action == "review_required":
+            lines.append(f"    Details: {fix.get('details', '')}")
+
+        lines.append("")
+
+    # Summary
+    success_count = sum(1 for f in fix_results if f.get("success"))
+    total = len(fix_results)
+
+    if dry_run:
+        lines.append(f"Would apply {total} fix(es)")
+        lines.append("")
+        lines.append("To execute these fixes, run:")
+        lines.append("  cybersec --cmd \"/health fix pyflink --execute\"")
+    else:
+        lines.append(f"Applied {success_count}/{total} fix(es)")
+        if any(f.get("restart_required") for f in fix_results):
+            lines.append("")
+            lines.append("⚠ Flink cluster restart required to apply changes:")
+            lines.append("  $FLINK_HOME/bin/stop-cluster.sh && $FLINK_HOME/bin/start-cluster.sh")
+
+    return "\n".join(lines)
+
+
 def _format_fix(data: dict, failure_mode_id: str) -> str:
     """Format fix result for human display."""
     lines = []
@@ -452,6 +566,20 @@ def register_health_commands():
         examples=[
             "/health pyflink",
             "/health pyflink --json",
+        ],
+    )
+
+    register_command(
+        "health.fix.pyflink",
+        cmd_health_fix_pyflink,
+        description="Fix detected PyFlink issues",
+        options=[
+            {"name": "execute", "description": "Execute fixes (default: dry-run)"},
+            {"name": "json", "short": "j", "description": "Output as JSON"},
+        ],
+        examples=[
+            "/health fix pyflink",
+            "/health fix pyflink --execute",
         ],
     )
 
