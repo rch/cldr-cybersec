@@ -1320,6 +1320,9 @@
             render: function(container, vizRec, group) {
                 if (!container || !vizRec) return;
 
+                // Clear any existing visualization to prevent duplicates
+                container.innerHTML = '';
+
                 const type = vizRec.viz_type;
                 const params = vizRec.params || {};
 
