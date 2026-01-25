@@ -2230,11 +2230,23 @@
 
             // Lazy init on first expand
             if (isHidden && !scene) {
-                initFSN();
-                // Load pending data if available
-                if (window.pendingFSNData) {
+                // Check if we have useful pending data (with actual events)
+                const hasPendingData = window.pendingFSNData &&
+                    window.pendingFSNData.data &&
+                    window.pendingFSNData.data.length > 0;
+
+                if (hasPendingData) {
+                    // Skip the fetch, use cached data directly
+                    fsnProgress.start();
+                    fsnProgress.setStep(0);
+                    initFSNScene();  // Just init scene, don't fetch
+                    fsnProgress.setStep(2);
                     createFSNBlocks(window.pendingFSNData);
+                    fsnProgress.complete();
                     window.pendingFSNData = null;
+                } else {
+                    // No useful pending data, do full init with fetch
+                    initFSN();
                 }
             }
         }
@@ -2247,11 +2259,8 @@
             }
         }
 
-        function initFSN() {
-            // Start progress tracking
-            fsnProgress.start();
-            fsnProgress.setStep(0);  // "Initializing scene..."
-
+        // Initialize just the THREE.js scene (no data fetch)
+        function initFSNScene() {
             const container = document.getElementById('fsn-canvas');
             const width = container.clientWidth;
             const height = container.clientHeight;
@@ -2320,6 +2329,15 @@
 
             // Animation loop
             animate();
+        }
+
+        // Full FSN init with data fetch
+        function initFSN() {
+            // Start progress tracking
+            fsnProgress.start();
+            fsnProgress.setStep(0);  // "Initializing scene..."
+
+            initFSNScene();
 
             // Load data
             fsnProgress.setStep(1);  // "Fetching data..."
