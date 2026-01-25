@@ -24,6 +24,8 @@ dependencies = [
     "psutil>=5.9.0",
     # TOML writing
     "tomli-w>=1.0.0",
+    "ty>=0.0.13",
+    "ortools>=9.12.4544",
 ]
 
 [project.optional-dependencies]
