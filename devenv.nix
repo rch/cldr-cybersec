@@ -835,50 +835,51 @@ except Exception as e:
           cp "$STATE_XML" "$STATE_XML.original" 2>/dev/null || true
 
           # Web server - bind to all interfaces on port 8450 (HTTP only)
-          # Note: Using sed -i '' for macOS compatibility (GNU sed uses -i, BSD sed requires -i '')
-          if [[ "$OSTYPE" == "darwin"* ]]; then
-            SED_INPLACE="sed -i ''"
-          else
-            SED_INPLACE="sed -i"
-          fi
+          # Portable sed in-place: use temp file approach (works on both macOS and Linux)
+          sed_inplace() {
+            local file="$1"
+            local expr="$2"
+            local tmp="${file}.tmp.$$"
+            sed "$expr" "$file" > "$tmp" && mv "$tmp" "$file"
+          }
 
-          $SED_INPLACE 's|^nifi.web.http.host=.*|nifi.web.http.host=0.0.0.0|' "$PROPS"
-          $SED_INPLACE 's|^nifi.web.http.port=.*|nifi.web.http.port=8450|' "$PROPS"
+          sed_inplace "$PROPS" 's|^nifi.web.http.host=.*|nifi.web.http.host=0.0.0.0|'
+          sed_inplace "$PROPS" 's|^nifi.web.http.port=.*|nifi.web.http.port=8450|'
           # Clear HTTPS - NiFi requires HTTP OR HTTPS, not both
-          $SED_INPLACE 's|^nifi.web.https.host=.*|nifi.web.https.host=|' "$PROPS"
-          $SED_INPLACE 's|^nifi.web.https.port=.*|nifi.web.https.port=|' "$PROPS"
+          sed_inplace "$PROPS" 's|^nifi.web.https.host=.*|nifi.web.https.host=|'
+          sed_inplace "$PROPS" 's|^nifi.web.https.port=.*|nifi.web.https.port=|'
 
           # Clear TLS/security properties for HTTP-only mode
-          $SED_INPLACE 's|^nifi.security.keystore=.*|nifi.security.keystore=|' "$PROPS"
-          $SED_INPLACE 's|^nifi.security.keystoreType=.*|nifi.security.keystoreType=|' "$PROPS"
-          $SED_INPLACE 's|^nifi.security.keystorePasswd=.*|nifi.security.keystorePasswd=|' "$PROPS"
-          $SED_INPLACE 's|^nifi.security.keyPasswd=.*|nifi.security.keyPasswd=|' "$PROPS"
-          $SED_INPLACE 's|^nifi.security.truststore=.*|nifi.security.truststore=|' "$PROPS"
-          $SED_INPLACE 's|^nifi.security.truststoreType=.*|nifi.security.truststoreType=|' "$PROPS"
-          $SED_INPLACE 's|^nifi.security.truststorePasswd=.*|nifi.security.truststorePasswd=|' "$PROPS"
+          sed_inplace "$PROPS" 's|^nifi.security.keystore=.*|nifi.security.keystore=|'
+          sed_inplace "$PROPS" 's|^nifi.security.keystoreType=.*|nifi.security.keystoreType=|'
+          sed_inplace "$PROPS" 's|^nifi.security.keystorePasswd=.*|nifi.security.keystorePasswd=|'
+          sed_inplace "$PROPS" 's|^nifi.security.keyPasswd=.*|nifi.security.keyPasswd=|'
+          sed_inplace "$PROPS" 's|^nifi.security.truststore=.*|nifi.security.truststore=|'
+          sed_inplace "$PROPS" 's|^nifi.security.truststoreType=.*|nifi.security.truststoreType=|'
+          sed_inplace "$PROPS" 's|^nifi.security.truststorePasswd=.*|nifi.security.truststorePasswd=|'
 
           # Disable remote input secure mode
-          $SED_INPLACE 's|^nifi.remote.input.secure=.*|nifi.remote.input.secure=false|' "$PROPS"
+          sed_inplace "$PROPS" 's|^nifi.remote.input.secure=.*|nifi.remote.input.secure=false|'
 
           # Set sensitive properties key (required)
-          $SED_INPLACE 's|^nifi.sensitive.props.key=.*|nifi.sensitive.props.key=cybersec-dev-key-12345|' "$PROPS"
+          sed_inplace "$PROPS" 's|^nifi.sensitive.props.key=.*|nifi.sensitive.props.key=cybersec-dev-key-12345|'
 
           # Configure paths to use state directory for data persistence
-          $SED_INPLACE "s|^\(nifi.flow.configuration.file=\).*|\1$NIFI_STATE/flow.json.gz|" "$PROPS"
-          $SED_INPLACE "s|^\(nifi.flow.configuration.json.file=\).*|\1$NIFI_STATE/flow.json.gz|" "$PROPS"
-          $SED_INPLACE "s|^\(nifi.flow.configuration.archive.dir=\).*|\1$NIFI_STATE/flow_archive/|" "$PROPS"
-          $SED_INPLACE "s|^\(nifi.database.directory=\).*|\1$NIFI_STATE/database_repository|" "$PROPS"
-          $SED_INPLACE "s|^\(nifi.flowfile.repository.directory=\).*|\1$NIFI_STATE/flowfile_repository|" "$PROPS"
-          $SED_INPLACE "s|^\(nifi.content.repository.directory.default=\).*|\1$NIFI_STATE/content_repository|" "$PROPS"
-          $SED_INPLACE "s|^\(nifi.provenance.repository.directory.default=\).*|\1$NIFI_STATE/provenance_repository|" "$PROPS"
-          $SED_INPLACE "s|^\(nifi.state.management.configuration.file=\).*|\1$STATE_XML|" "$PROPS"
-          $SED_INPLACE "s|^\(nifi.nar.library.autoload.directory=\).*|\1$NIFI_STATE/extensions|" "$PROPS"
-          $SED_INPLACE "s|^\(nifi.nar.working.directory=\).*|\1$NIFI_STATE/work/nar/|" "$PROPS"
-          $SED_INPLACE "s|^\(nifi.documentation.working.directory=\).*|\1$NIFI_STATE/work/docs/components|" "$PROPS"
-          $SED_INPLACE "s|^\(nifi.status.repository.questdb.persist.location=\).*|\1$NIFI_STATE/status_repository|" "$PROPS"
+          sed_inplace "$PROPS" "s|^\(nifi.flow.configuration.file=\).*|\1$NIFI_STATE/flow.json.gz|"
+          sed_inplace "$PROPS" "s|^\(nifi.flow.configuration.json.file=\).*|\1$NIFI_STATE/flow.json.gz|"
+          sed_inplace "$PROPS" "s|^\(nifi.flow.configuration.archive.dir=\).*|\1$NIFI_STATE/flow_archive/|"
+          sed_inplace "$PROPS" "s|^\(nifi.database.directory=\).*|\1$NIFI_STATE/database_repository|"
+          sed_inplace "$PROPS" "s|^\(nifi.flowfile.repository.directory=\).*|\1$NIFI_STATE/flowfile_repository|"
+          sed_inplace "$PROPS" "s|^\(nifi.content.repository.directory.default=\).*|\1$NIFI_STATE/content_repository|"
+          sed_inplace "$PROPS" "s|^\(nifi.provenance.repository.directory.default=\).*|\1$NIFI_STATE/provenance_repository|"
+          sed_inplace "$PROPS" "s|^\(nifi.state.management.configuration.file=\).*|\1$STATE_XML|"
+          sed_inplace "$PROPS" "s|^\(nifi.nar.library.autoload.directory=\).*|\1$NIFI_STATE/extensions|"
+          sed_inplace "$PROPS" "s|^\(nifi.nar.working.directory=\).*|\1$NIFI_STATE/work/nar/|"
+          sed_inplace "$PROPS" "s|^\(nifi.documentation.working.directory=\).*|\1$NIFI_STATE/work/docs/components|"
+          sed_inplace "$PROPS" "s|^\(nifi.status.repository.questdb.persist.location=\).*|\1$NIFI_STATE/status_repository|"
 
           # Update state-management.xml with absolute path for local state
-          $SED_INPLACE "s|<property name=\"Directory\">./state/local</property>|<property name=\"Directory\">$NIFI_STATE/state/local</property>|g" "$STATE_XML"
+          sed_inplace "$STATE_XML" "s|<property name=\"Directory\">./state/local</property>|<property name=\"Directory\">$NIFI_STATE/state/local</property>|g"
 
           touch "$NIFI_CONFIGURED_MARKER"
           echo "NiFi configured for development mode."
