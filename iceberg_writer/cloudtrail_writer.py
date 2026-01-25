@@ -78,8 +78,22 @@ class IcebergWriter:
             NestedField(14, "processing_time", TimestampType(), required=False),
         )
         
-        # Partition by day based on event_timestamp (optional - can be None for simpler tables)
-        partition_spec = None  # Disable partitioning to avoid complex transforms
+        # Partition by day + region for efficient time-range and region queries
+        # This enables partition pruning in the FSN visualization
+        partition_spec = PartitionSpec(
+            PartitionField(
+                source_id=3,  # event_timestamp
+                field_id=1000,
+                transform=DayTransform(),
+                name="event_day"
+            ),
+            PartitionField(
+                source_id=6,  # aws_region
+                field_id=1001,
+                transform=IdentityTransform(),
+                name="region"
+            )
+        )
         
         # Sort by event_timestamp and event_id for better query performance
         sort_order = SortOrder(

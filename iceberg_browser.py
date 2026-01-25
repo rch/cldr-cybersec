@@ -539,6 +539,170 @@ def get_summary():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/fsn/aggregate")
+def fsn_aggregate():
+    """
+    Pivot-style aggregation for FSN 3D visualization.
+
+    Returns grid data: region × event_source with metrics.
+    Supports partition pruning via time_start/time_end filters.
+    """
+    try:
+        table = get_table()
+        if not table:
+            return jsonify({"error": "Table not found"}), 404
+
+        time_start = request.args.get("time_start")
+        time_end = request.args.get("time_end")
+
+        # Scan table (partition pruning happens automatically with filters)
+        scan = table.scan()
+        df = scan.to_pandas()
+
+        if df.empty:
+            return jsonify({
+                "data": [],
+                "x_axis": "aws_region",
+                "z_axis": "event_source",
+                "regions": [],
+                "services": []
+            })
+
+        # Apply time filters if provided
+        ts_col = None
+        for col in ["event_timestamp", "event_time", "processing_time"]:
+            if col in df.columns:
+                ts_col = col
+                break
+
+        if ts_col and time_start:
+            df = df[df[ts_col] >= pd.to_datetime(time_start)]
+        if ts_col and time_end:
+            df = df[df[ts_col] <= pd.to_datetime(time_end)]
+
+        # Determine region column
+        region_col = "aws_region" if "aws_region" in df.columns else "region" if "region" in df.columns else None
+
+        # Determine service column
+        service_col = "event_source" if "event_source" in df.columns else None
+
+        if not region_col or not service_col:
+            # Fallback to event_name grouping if no region/service columns
+            if "event_name" in df.columns:
+                pivot = df.groupby("event_name").agg(
+                    count=("event_name", "count")
+                ).reset_index()
+                pivot["error_rate"] = 0
+                return jsonify({
+                    "data": pivot.to_dict(orient="records"),
+                    "x_axis": "event_name",
+                    "z_axis": None,
+                    "fallback": True
+                })
+            return jsonify({"error": "Required columns not found", "columns": list(df.columns)}), 400
+
+        # Aggregate by region and event_source
+        agg_dict = {
+            "count": (region_col, "count"),
+        }
+
+        # Check for error column
+        error_col = None
+        for col in ["error_code", "errorCode"]:
+            if col in df.columns:
+                error_col = col
+                break
+
+        pivot = df.groupby([region_col, service_col]).agg(**agg_dict).reset_index()
+
+        # Calculate error rate if we have error data
+        if error_col:
+            error_counts = df.groupby([region_col, service_col])[error_col].apply(
+                lambda x: x.notna().sum()
+            ).reset_index(name="error_count")
+            pivot = pivot.merge(error_counts, on=[region_col, service_col], how="left")
+            pivot["error_rate"] = pivot["error_count"] / pivot["count"]
+            pivot["error_rate"] = pivot["error_rate"].fillna(0)
+        else:
+            pivot["error_rate"] = 0
+
+        # Get unique values for axis labels
+        regions = sorted(df[region_col].dropna().unique().tolist())
+        services = sorted(df[service_col].dropna().unique().tolist())
+
+        # Rename columns for consistency
+        pivot = pivot.rename(columns={region_col: "aws_region", service_col: "event_source"})
+
+        return jsonify({
+            "data": pivot.to_dict(orient="records"),
+            "x_axis": "aws_region",
+            "z_axis": "event_source",
+            "regions": regions,
+            "services": services
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/fsn/drilldown")
+def fsn_drilldown():
+    """
+    Get event_names within a region+service cell for drill-down.
+    """
+    try:
+        table = get_table()
+        if not table:
+            return jsonify({"error": "Table not found"}), 404
+
+        region = request.args.get("region")
+        service = request.args.get("service")
+
+        if not region or not service:
+            return jsonify({"error": "region and service parameters required"}), 400
+
+        scan = table.scan()
+        df = scan.to_pandas()
+
+        # Determine column names
+        region_col = "aws_region" if "aws_region" in df.columns else "region"
+        service_col = "event_source" if "event_source" in df.columns else None
+
+        if region_col not in df.columns or service_col not in df.columns:
+            return jsonify({"error": "Required columns not found"}), 400
+
+        # Filter to selected region and service
+        filtered = df[(df[region_col] == region) & (df[service_col] == service)]
+
+        if filtered.empty:
+            return jsonify({
+                "events": [],
+                "region": region,
+                "service": service,
+                "total": 0
+            })
+
+        # Aggregate by event_name
+        if "event_name" in filtered.columns:
+            events = filtered.groupby("event_name").agg(
+                count=("event_name", "count")
+            ).reset_index().to_dict(orient="records")
+        else:
+            events = [{"event_name": "Unknown", "count": len(filtered)}]
+
+        return jsonify({
+            "events": events,
+            "region": region,
+            "service": service,
+            "total": len(filtered)
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 # Store metrics for change detection and rate calculation
 _last_snapshot_id = None
 _last_event_count = 0

@@ -720,6 +720,15 @@
             width: 100%;
             height: 100%;
             display: block;
+            touch-action: none;  /* Disable browser gestures */
+            -webkit-user-select: none;
+            user-select: none;
+            outline: none;
+        }
+
+        #fsn-canvas:focus {
+            outline: 2px solid var(--color-amber);
+            outline-offset: -2px;
         }
 
         .fsn-overlay {
@@ -1117,19 +1126,38 @@
             <div class="fsn-overlay" id="fsn-overlay">
                 <h3>ICEBERG FSN</h3>
                 <div class="fsn-stats">
-                    <span class="fsn-label">NODES:</span>
-                    <span class="fsn-value" id="fsn-nodes">0</span>
+                    <span class="fsn-label">REGIONS:</span>
+                    <span class="fsn-value" id="fsn-regions">0</span>
+                    <span class="fsn-label">SERVICES:</span>
+                    <span class="fsn-value" id="fsn-services">0</span>
                     <span class="fsn-label">EVENTS:</span>
                     <span class="fsn-value" id="fsn-events">0</span>
-                    <span class="fsn-label">SELECTED:</span>
-                    <span class="fsn-value" id="fsn-selected">None</span>
+                </div>
+                <!-- Selection panel - shown when a block is selected -->
+                <div class="fsn-selection" id="fsn-selection" style="display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--color-amber);">
+                    <div style="margin-bottom: 8px;">
+                        <span class="fsn-label">SELECTED:</span>
+                        <span class="fsn-value" id="fsn-selected-region" style="color: var(--color-info);">-</span>
+                        <span style="color: var(--text-muted);">/</span>
+                        <span class="fsn-value" id="fsn-selected-service" style="color: var(--color-info);">-</span>
+                    </div>
+                    <div style="margin-bottom: 8px;">
+                        <span class="fsn-label">COUNT:</span>
+                        <span class="fsn-value" id="fsn-selected-count">-</span>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 11px;" onclick="fsnScrollToEvents()">View Events</button>
+                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 11px;" onclick="fsnClearSelection()">Clear</button>
+                    </div>
+                </div>
+                <!-- Breadcrumb for drill-down navigation -->
+                <div class="fsn-breadcrumb" id="fsn-breadcrumb" style="display: none; margin-top: 8px; font-size: 11px;">
+                    <span style="cursor: pointer; color: var(--color-amber);" onclick="fsnNavigateToRoot()">Root</span>
+                    <span id="fsn-breadcrumb-path"></span>
                 </div>
             </div>
-            <div class="fsn-controls">
-                <div>Left Click + Drag: Rotate</div>
-                <div>Right Click + Drag: Pan</div>
-                <div>Scroll: Zoom</div>
-                <div>Click Block: Details</div>
+            <div class="fsn-controls" id="fsn-controls">
+                <!-- Controls will be populated dynamically based on device -->
             </div>
             <div class="fsn-loading" id="fsn-loading">INITIALIZING FSN...</div>
             <div class="fsn-tooltip" id="fsn-tooltip"></div>
@@ -1816,11 +1844,34 @@
 
         // ========================================
         // 3D File System Navigator (FSN)
+        // Region × Service Pivot-Style Visualization
         // ========================================
-        let scene, camera, renderer, controls;
+        let scene, camera, renderer;
         let fsnObjects = [];
+        let fsnLabels = [];
         let raycaster, mouse;
         let selectedObject = null;
+        let fsnData = null;
+
+        // FSN State
+        const fsnState = {
+            breadcrumb: [],  // Navigation stack
+            currentLevel: 'root',  // 'root', 'drilldown'
+            selectedRegion: null,
+            selectedService: null
+        };
+
+        // Camera state
+        let cameraRotation = { x: 0.3, y: 0.5 };
+        let cameraPan = { x: 0, y: 0 };
+        let cameraRadius = 60;
+
+        // Input state
+        let pointers = new Map();
+        let lastTapTime = 0;
+        let lastPinchDistance = 0;
+        const CLICK_THRESHOLD_PX = 10;
+        const DOUBLE_TAP_MS = 300;
 
         function initFSN() {
             const container = document.getElementById('fsn-canvas');
@@ -1833,8 +1884,7 @@
 
             // Camera
             camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
-            camera.position.set(30, 30, 30);
-            camera.lookAt(0, 0, 0);
+            updateCameraPosition();
 
             // Renderer
             renderer = new THREE.WebGLRenderer({
@@ -1845,7 +1895,7 @@
             renderer.setSize(width, height);
             renderer.setClearColor(0x0A0A0F, 1);
 
-            // Raycaster for mouse interaction
+            // Raycaster for interaction
             raycaster = new THREE.Raycaster();
             mouse = new THREE.Vector2();
 
@@ -1855,31 +1905,27 @@
             gridHelper.material.transparent = true;
             scene.add(gridHelper);
 
-            // Ambient light - subtle warmth
+            // Lighting
             const ambientLight = new THREE.AmbientLight(0x202030, 0.6);
             scene.add(ambientLight);
 
-            // Key light - Tyrell amber
             const directionalLight = new THREE.DirectionalLight(0xD4A84B, 0.8);
             directionalLight.position.set(10, 20, 10);
             scene.add(directionalLight);
 
-            // Rim light - core green for data glow
             const pointLight1 = new THREE.PointLight(0x00FF88, 0.8, 60);
             pointLight1.position.set(-20, 10, -20);
             scene.add(pointLight1);
 
-            // Accent light - cyan for information
             const pointLight2 = new THREE.PointLight(0x00FFFF, 0.6, 50);
             pointLight2.position.set(20, 10, 20);
             scene.add(pointLight2);
 
-            // Simple orbit controls using mouse
-            setupControls();
+            // Setup unified input handling
+            setupFSNInputHandling(container);
 
-            // Mouse events
-            container.addEventListener('mousemove', onMouseMove, false);
-            container.addEventListener('click', onMouseClick, false);
+            // Update controls help based on device
+            updateControlsHelp();
 
             // Resize handler
             window.addEventListener('resize', onWindowResize, false);
@@ -1887,171 +1933,424 @@
             // Animation loop
             animate();
 
-            // Hide loading
-            document.getElementById('fsn-loading').style.display = 'none';
+            // Load data
+            loadFSNData();
         }
 
-        let isDragging = false;
-        let previousMousePosition = { x: 0, y: 0 };
-        let cameraRotation = { x: 0, y: 0 };
-        let cameraPan = { x: 0, y: 0 };
+        function setupFSNInputHandling(canvas) {
+            // Make canvas focusable for keyboard
+            canvas.setAttribute('tabindex', '0');
+            canvas.style.touchAction = 'none';  // Disable browser gestures
 
-        function setupControls() {
-            const canvas = document.getElementById('fsn-canvas');
+            // Pointer events for unified mouse/touch/pen
+            canvas.addEventListener('pointerdown', onPointerDown);
+            canvas.addEventListener('pointermove', onPointerMove);
+            canvas.addEventListener('pointerup', onPointerUp);
+            canvas.addEventListener('pointercancel', onPointerUp);
 
-            canvas.addEventListener('mousedown', (e) => {
-                isDragging = true;
-                previousMousePosition = { x: e.clientX, y: e.clientY };
+            // Touch events for multi-touch gestures (pinch-zoom)
+            canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+            canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+            canvas.addEventListener('touchend', onTouchEnd);
+
+            // Wheel for zoom
+            canvas.addEventListener('wheel', onWheel, { passive: false });
+
+            // Keyboard
+            canvas.addEventListener('keydown', onKeyDown);
+
+            // Prevent context menu
+            canvas.addEventListener('contextmenu', e => e.preventDefault());
+        }
+
+        function onPointerDown(e) {
+            pointers.set(e.pointerId, {
+                x: e.clientX,
+                y: e.clientY,
+                startX: e.clientX,
+                startY: e.clientY,
+                startTime: Date.now(),
+                type: e.pointerType,
+                button: e.button
             });
+        }
 
-            canvas.addEventListener('mouseup', () => {
-                isDragging = false;
-            });
+        function onPointerMove(e) {
+            const pointer = pointers.get(e.pointerId);
+            if (!pointer) {
+                // Just hovering - update tooltip
+                updateTooltip(e);
+                return;
+            }
 
-            canvas.addEventListener('mousemove', (e) => {
-                if (!isDragging) return;
+            const dx = e.clientX - pointer.x;
+            const dy = e.clientY - pointer.y;
 
-                const deltaX = e.clientX - previousMousePosition.x;
-                const deltaY = e.clientY - previousMousePosition.y;
-
-                if (e.button === 0 || e.buttons === 1) { // Left click - rotate
-                    cameraRotation.y += deltaX * 0.005;
-                    cameraRotation.x += deltaY * 0.005;
+            // Single pointer: rotate (left button) or pan (right button)
+            if (pointers.size === 1) {
+                if (pointer.button === 0 || e.pointerType === 'touch') {
+                    // Left click / touch = rotate
+                    cameraRotation.y += dx * 0.005;
+                    cameraRotation.x += dy * 0.005;
                     cameraRotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, cameraRotation.x));
-                } else if (e.button === 2 || e.buttons === 2) { // Right click - pan
-                    cameraPan.x -= deltaX * 0.05;
-                    cameraPan.y += deltaY * 0.05;
+                } else if (pointer.button === 2) {
+                    // Right click = pan
+                    cameraPan.x -= dx * 0.05;
+                    cameraPan.y += dy * 0.05;
                 }
-
-                previousMousePosition = { x: e.clientX, y: e.clientY };
                 updateCameraPosition();
-            });
+            }
 
-            canvas.addEventListener('wheel', (e) => {
+            pointer.x = e.clientX;
+            pointer.y = e.clientY;
+        }
+
+        function onPointerUp(e) {
+            const pointer = pointers.get(e.pointerId);
+            if (!pointer) return;
+
+            const duration = Date.now() - pointer.startTime;
+            const dx = e.clientX - pointer.startX;
+            const dy = e.clientY - pointer.startY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            // Detect tap/click (short duration, minimal movement)
+            if (duration < 300 && dist < CLICK_THRESHOLD_PX) {
+                const now = Date.now();
+                if (now - lastTapTime < DOUBLE_TAP_MS) {
+                    // Double-tap: drill down
+                    onDoubleTap(e);
+                } else {
+                    // Single tap: select
+                    onTap(e);
+                }
+                lastTapTime = now;
+            }
+
+            pointers.delete(e.pointerId);
+        }
+
+        function onTouchStart(e) {
+            if (e.touches.length === 2) {
                 e.preventDefault();
-                const radius = camera.position.length();
-                const newRadius = Math.max(10, Math.min(100, radius + e.deltaY * 0.05));
-                const scale = newRadius / radius;
-                camera.position.multiplyScalar(scale);
-            });
+                lastPinchDistance = getPinchDistance(e.touches);
+            }
+        }
 
-            canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+        function onTouchMove(e) {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+
+                // Pinch zoom
+                const newDist = getPinchDistance(e.touches);
+                if (lastPinchDistance > 0) {
+                    const scale = newDist / lastPinchDistance;
+                    cameraRadius = Math.max(20, Math.min(120, cameraRadius / scale));
+                    updateCameraPosition();
+                }
+                lastPinchDistance = newDist;
+
+                // Two-finger pan
+                const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                // Could track previous midpoint for panning
+            }
+        }
+
+        function onTouchEnd(e) {
+            lastPinchDistance = 0;
+        }
+
+        function getPinchDistance(touches) {
+            const dx = touches[0].clientX - touches[1].clientX;
+            const dy = touches[0].clientY - touches[1].clientY;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        function onWheel(e) {
+            e.preventDefault();
+            cameraRadius = Math.max(20, Math.min(120, cameraRadius + e.deltaY * 0.05));
+            updateCameraPosition();
+        }
+
+        function onKeyDown(e) {
+            const rotateAmount = 0.1;
+            const panAmount = 2;
+            const zoomAmount = 5;
+
+            switch (e.key) {
+                case 'ArrowLeft':
+                    if (e.shiftKey) cameraPan.x -= panAmount;
+                    else cameraRotation.y -= rotateAmount;
+                    updateCameraPosition();
+                    e.preventDefault();
+                    break;
+                case 'ArrowRight':
+                    if (e.shiftKey) cameraPan.x += panAmount;
+                    else cameraRotation.y += rotateAmount;
+                    updateCameraPosition();
+                    e.preventDefault();
+                    break;
+                case 'ArrowUp':
+                    if (e.shiftKey) cameraPan.y += panAmount;
+                    else cameraRotation.x = Math.max(-Math.PI / 2, cameraRotation.x - rotateAmount);
+                    updateCameraPosition();
+                    e.preventDefault();
+                    break;
+                case 'ArrowDown':
+                    if (e.shiftKey) cameraPan.y -= panAmount;
+                    else cameraRotation.x = Math.min(Math.PI / 2, cameraRotation.x + rotateAmount);
+                    updateCameraPosition();
+                    e.preventDefault();
+                    break;
+                case '+': case '=':
+                    cameraRadius = Math.max(20, cameraRadius - zoomAmount);
+                    updateCameraPosition();
+                    break;
+                case '-':
+                    cameraRadius = Math.min(120, cameraRadius + zoomAmount);
+                    updateCameraPosition();
+                    break;
+                case 'Escape':
+                    fsnClearSelection();
+                    break;
+                case 'Enter':
+                    if (selectedObject) {
+                        fsnDrillDown();
+                    }
+                    break;
+                case 'Backspace':
+                    fsnNavigateBack();
+                    e.preventDefault();
+                    break;
+            }
+        }
+
+        function onTap(e) {
+            updateMouseFromEvent(e);
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(fsnObjects);
+
+            if (intersects.length > 0) {
+                fsnSelectBlock(intersects[0].object);
+            } else {
+                fsnClearSelection();
+            }
+        }
+
+        function onDoubleTap(e) {
+            if (selectedObject) {
+                fsnDrillDown();
+            }
+        }
+
+        function updateMouseFromEvent(e) {
+            const canvas = document.getElementById('fsn-canvas');
+            const rect = canvas.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        }
+
+        function updateTooltip(e) {
+            updateMouseFromEvent(e);
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(fsnObjects);
+
+            const canvas = document.getElementById('fsn-canvas');
+            const tooltip = document.getElementById('fsn-tooltip');
+
+            if (intersects.length > 0) {
+                const obj = intersects[0].object;
+                const data = obj.userData;
+                tooltip.style.display = 'block';
+                tooltip.style.left = (e.clientX + 10) + 'px';
+                tooltip.style.top = (e.clientY + 10) + 'px';
+
+                if (fsnState.currentLevel === 'root') {
+                    tooltip.innerHTML = `
+                        <strong>${data.region} / ${data.service}</strong><br>
+                        Events: ${data.count}<br>
+                        <em>Tap to filter, double-tap to drill</em>
+                    `;
+                } else {
+                    tooltip.innerHTML = `
+                        <strong>${data.name}</strong><br>
+                        Events: ${data.count}
+                    `;
+                }
+                canvas.style.cursor = 'pointer';
+            } else {
+                tooltip.style.display = 'none';
+                canvas.style.cursor = 'grab';
+            }
         }
 
         function updateCameraPosition() {
-            const radius = 50;
-            const x = radius * Math.sin(cameraRotation.y) * Math.cos(cameraRotation.x);
-            const y = radius * Math.sin(cameraRotation.x) + 30;
-            const z = radius * Math.cos(cameraRotation.y) * Math.cos(cameraRotation.x);
+            const x = cameraRadius * Math.sin(cameraRotation.y) * Math.cos(cameraRotation.x);
+            const y = cameraRadius * Math.sin(cameraRotation.x) + 30;
+            const z = cameraRadius * Math.cos(cameraRotation.y) * Math.cos(cameraRotation.x);
 
             camera.position.set(x + cameraPan.x, y + cameraPan.y, z);
             camera.lookAt(cameraPan.x, 0, 0);
         }
 
-        function onMouseMove(event) {
-            const canvas = document.getElementById('fsn-canvas');
-            const rect = canvas.getBoundingClientRect();
-            mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-            mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        function updateControlsHelp() {
+            const controls = document.getElementById('fsn-controls');
+            const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
-            // Update raycaster
-            raycaster.setFromCamera(mouse, camera);
-            const intersects = raycaster.intersectObjects(fsnObjects);
+            controls.innerHTML = isTouch ? `
+                <div>1-Finger: Rotate</div>
+                <div>2-Finger: Pan/Zoom</div>
+                <div>Tap: Filter | Double-tap: Drill</div>
+            ` : `
+                <div>Drag: Rotate | Right-Drag: Pan</div>
+                <div>Scroll: Zoom | Click: Filter</div>
+                <div>Double-click: Drill | Esc: Clear</div>
+            `;
+        }
 
-            const tooltip = document.getElementById('fsn-tooltip');
-            if (intersects.length > 0) {
-                const obj = intersects[0].object;
-                tooltip.style.display = 'block';
-                tooltip.style.left = (event.clientX + 10) + 'px';
-                tooltip.style.top = (event.clientY + 10) + 'px';
-                tooltip.innerHTML = `
-                    <strong>${obj.userData.name}</strong><br>
-                    Events: ${obj.userData.count}<br>
-                    Click for details
-                `;
-                canvas.style.cursor = 'pointer';
-            } else {
-                tooltip.style.display = 'none';
-                canvas.style.cursor = 'default';
+        async function loadFSNData() {
+            try {
+                const response = await fetch('/api/fsn/aggregate');
+                fsnData = await response.json();
+
+                if (fsnData.error) {
+                    console.error('FSN API error:', fsnData.error);
+                    document.getElementById('fsn-loading').textContent = 'No data available';
+                    return;
+                }
+
+                createFSNBlocks(fsnData);
+                document.getElementById('fsn-loading').style.display = 'none';
+            } catch (error) {
+                console.error('Error loading FSN data:', error);
+                document.getElementById('fsn-loading').textContent = 'Error loading data';
             }
         }
 
-        function onMouseClick(event) {
-            raycaster.setFromCamera(mouse, camera);
-            const intersects = raycaster.intersectObjects(fsnObjects);
-
-            if (intersects.length > 0) {
-                const obj = intersects[0].object;
-                selectObject(obj);
-            }
-        }
-
-        function selectObject(obj) {
-            // Deselect previous
-            if (selectedObject) {
-                selectedObject.material.emissive.setHex(selectedObject.userData.originalEmissive);
-            }
-
-            // Select new
-            selectedObject = obj;
-            selectedObject.userData.originalEmissive = selectedObject.material.emissive.getHex();
-            selectedObject.material.emissive.setHex(0xD4A84B);  // Tyrell amber highlight
-
-            // Update overlay
-            document.getElementById('fsn-selected').textContent = obj.userData.name;
-
-            // Apply filter
-            currentFilters = { event_name: obj.userData.name };
-            loadEvents();
-        }
-
-        function createFSNBlocks(summary) {
+        function createFSNBlocks(data) {
             // Clear existing
             fsnObjects.forEach(obj => scene.remove(obj));
             fsnObjects = [];
+            fsnLabels.forEach(label => scene.remove(label));
+            fsnLabels = [];
 
-            if (!summary.event_names) return;
+            if (!data.data || data.data.length === 0) {
+                document.getElementById('fsn-regions').textContent = '0';
+                document.getElementById('fsn-services').textContent = '0';
+                document.getElementById('fsn-events').textContent = '0';
+                return;
+            }
 
-            const eventNames = Object.entries(summary.event_names);
-            const maxCount = Math.max(...eventNames.map(([_, count]) => count));
+            // Handle fallback mode (just event_names, no region/service)
+            if (data.fallback) {
+                createFallbackBlocks(data);
+                return;
+            }
 
-            const gridSize = Math.ceil(Math.sqrt(eventNames.length));
+            const regions = data.regions || [...new Set(data.data.map(d => d.aws_region))];
+            const services = data.services || [...new Set(data.data.map(d => d.event_source))];
+            const maxCount = Math.max(...data.data.map(d => d.count));
+            const totalEvents = data.data.reduce((sum, d) => sum + d.count, 0);
+
+            const spacing = 10;
+            const startX = -(regions.length * spacing) / 2 + spacing / 2;
+            const startZ = -(services.length * spacing) / 2 + spacing / 2;
+
+            regions.forEach((region, xIdx) => {
+                services.forEach((service, zIdx) => {
+                    const cell = data.data.find(d =>
+                        d.aws_region === region && d.event_source === service
+                    );
+
+                    if (cell && cell.count > 0) {
+                        const height = Math.max(2, (cell.count / maxCount) * 25);
+                        const errorRate = cell.error_rate || 0;
+
+                        // Color based on error rate
+                        const blockColor = getColorForErrorRate(errorRate);
+
+                        const geometry = new THREE.BoxGeometry(6, height, 6);
+                        const material = new THREE.MeshPhongMaterial({
+                            color: 0x12121A,
+                            emissive: blockColor,
+                            emissiveIntensity: 0.2,
+                            shininess: 80,
+                            specular: 0xD4A84B
+                        });
+
+                        const block = new THREE.Mesh(geometry, material);
+                        block.position.set(
+                            startX + xIdx * spacing,
+                            height / 2,
+                            startZ + zIdx * spacing
+                        );
+
+                        block.userData = {
+                            region: region,
+                            service: service,
+                            count: cell.count,
+                            errorRate: errorRate,
+                            originalEmissive: blockColor
+                        };
+
+                        // Wireframe
+                        const edges = new THREE.EdgesGeometry(geometry);
+                        const line = new THREE.LineSegments(
+                            edges,
+                            new THREE.LineBasicMaterial({ color: 0xD4A84B, opacity: 0.6, transparent: true })
+                        );
+                        block.add(line);
+
+                        scene.add(block);
+                        fsnObjects.push(block);
+                    }
+                });
+            });
+
+            // Update stats
+            document.getElementById('fsn-regions').textContent = regions.length;
+            document.getElementById('fsn-services').textContent = services.length;
+            document.getElementById('fsn-events').textContent = totalEvents;
+
+            fsnState.currentLevel = 'root';
+        }
+
+        function createFallbackBlocks(data) {
+            // Fallback: show event_names in a grid
+            const events = data.data;
+            const maxCount = Math.max(...events.map(d => d.count));
+            const totalEvents = events.reduce((sum, d) => sum + d.count, 0);
+
+            const gridSize = Math.ceil(Math.sqrt(events.length));
             const spacing = 8;
             const startX = -(gridSize * spacing) / 2;
             const startZ = -(gridSize * spacing) / 2;
 
-            eventNames.forEach(([name, count], index) => {
+            events.forEach((event, index) => {
                 const row = Math.floor(index / gridSize);
                 const col = index % gridSize;
+                const height = Math.max(2, (event.count / maxCount) * 20);
 
-                // Height based on event count
-                const height = Math.max(2, (count / maxCount) * 20);
-
-                // Create block - Event Horizon containment module aesthetic
                 const geometry = new THREE.BoxGeometry(5, height, 5);
                 const blockColor = getColorForIndex(index);
                 const material = new THREE.MeshPhongMaterial({
-                    color: 0x12121A,  // Dark charcoal base
+                    color: 0x12121A,
                     emissive: blockColor,
                     emissiveIntensity: 0.15,
                     shininess: 80,
-                    specular: 0xD4A84B  // Amber specular highlights
+                    specular: 0xD4A84B
                 });
 
                 const block = new THREE.Mesh(geometry, material);
-                block.position.set(
-                    startX + col * spacing,
-                    height / 2,
-                    startZ + row * spacing
-                );
+                block.position.set(startX + col * spacing, height / 2, startZ + row * spacing);
 
                 block.userData = {
-                    name: name,
-                    count: count,
-                    index: index
+                    name: event.event_name,
+                    count: event.count,
+                    originalEmissive: blockColor
                 };
 
-                // Add wireframe - Tyrell amber containment lines
                 const edges = new THREE.EdgesGeometry(geometry);
                 const line = new THREE.LineSegments(
                     edges,
@@ -2063,24 +2362,194 @@
                 fsnObjects.push(block);
             });
 
-            // Update stats
-            document.getElementById('fsn-nodes').textContent = eventNames.length;
-            document.getElementById('fsn-events').textContent = summary.total_events || 0;
+            document.getElementById('fsn-regions').textContent = '-';
+            document.getElementById('fsn-services').textContent = events.length;
+            document.getElementById('fsn-events').textContent = totalEvents;
+        }
+
+        function getColorForErrorRate(rate) {
+            // Green → Amber → Red based on error rate
+            if (rate < 0.05) return 0x00FF88;  // Core green
+            if (rate < 0.15) return 0x00FFFF;  // Cyan
+            if (rate < 0.30) return 0xFFB347;  // Warning amber
+            return 0xFF4444;  // Breach red
         }
 
         function getColorForIndex(index) {
-            // Tyrell Keiretsu color palette - status-inspired
-            const colors = [
-                0x00FF88,  // Core green - success
-                0x00FFFF,  // Horizon cyan - info
-                0xD4A84B,  // Tyrell amber - primary
-                0xFFB347,  // Warning amber
-                0xFF4444,  // Breach red - error
-                0x00FF88,  // Core green variant
-                0x00CCCC,  // Muted cyan
-                0xCD853F   // Bronze
-            ];
+            const colors = [0x00FF88, 0x00FFFF, 0xD4A84B, 0xFFB347, 0xFF4444, 0x00CCCC, 0xCD853F];
             return colors[index % colors.length];
+        }
+
+        function fsnSelectBlock(obj) {
+            // Deselect previous
+            if (selectedObject && selectedObject !== obj) {
+                selectedObject.material.emissive.setHex(selectedObject.userData.originalEmissive);
+            }
+
+            // Select new
+            selectedObject = obj;
+            obj.material.emissive.setHex(0xD4A84B);
+
+            const data = obj.userData;
+
+            // Show selection panel
+            document.getElementById('fsn-selection').style.display = 'block';
+
+            if (fsnState.currentLevel === 'root') {
+                document.getElementById('fsn-selected-region').textContent = data.region;
+                document.getElementById('fsn-selected-service').textContent = data.service;
+                document.getElementById('fsn-selected-count').textContent = data.count;
+
+                // Filter table by region and service
+                currentFilters = {
+                    region: data.region,
+                    event_source: data.service
+                };
+            } else {
+                document.getElementById('fsn-selected-region').textContent = data.name;
+                document.getElementById('fsn-selected-service').textContent = '';
+                document.getElementById('fsn-selected-count').textContent = data.count;
+
+                currentFilters = { event_name: data.name };
+            }
+
+            currentPage = 0;
+            loadEvents();
+        }
+
+        function fsnClearSelection() {
+            if (selectedObject) {
+                selectedObject.material.emissive.setHex(selectedObject.userData.originalEmissive);
+                selectedObject = null;
+            }
+
+            document.getElementById('fsn-selection').style.display = 'none';
+            currentFilters = {};
+            currentPage = 0;
+            loadEvents();
+        }
+
+        async function fsnDrillDown() {
+            if (!selectedObject) return;
+
+            const data = selectedObject.userData;
+
+            if (fsnState.currentLevel === 'root' && data.region && data.service) {
+                try {
+                    const response = await fetch(
+                        `/api/fsn/drilldown?region=${encodeURIComponent(data.region)}&service=${encodeURIComponent(data.service)}`
+                    );
+                    const drillData = await response.json();
+
+                    if (drillData.events && drillData.events.length > 0) {
+                        fsnState.breadcrumb.push({
+                            level: 'root',
+                            region: data.region,
+                            service: data.service
+                        });
+                        fsnState.currentLevel = 'drilldown';
+                        fsnState.selectedRegion = data.region;
+                        fsnState.selectedService = data.service;
+
+                        // Recreate blocks for event names
+                        createDrillDownBlocks(drillData.events);
+                        updateBreadcrumb();
+
+                        // Clear selection
+                        selectedObject = null;
+                        document.getElementById('fsn-selection').style.display = 'none';
+                    }
+                } catch (error) {
+                    console.error('Drill-down error:', error);
+                }
+            }
+        }
+
+        function createDrillDownBlocks(events) {
+            // Clear existing
+            fsnObjects.forEach(obj => scene.remove(obj));
+            fsnObjects = [];
+
+            const maxCount = Math.max(...events.map(e => e.count));
+            const gridSize = Math.ceil(Math.sqrt(events.length));
+            const spacing = 8;
+            const startX = -(gridSize * spacing) / 2;
+            const startZ = -(gridSize * spacing) / 2;
+
+            events.forEach((event, index) => {
+                const row = Math.floor(index / gridSize);
+                const col = index % gridSize;
+                const height = Math.max(2, (event.count / maxCount) * 20);
+
+                const geometry = new THREE.BoxGeometry(5, height, 5);
+                const blockColor = getColorForIndex(index);
+                const material = new THREE.MeshPhongMaterial({
+                    color: 0x12121A,
+                    emissive: blockColor,
+                    emissiveIntensity: 0.2,
+                    shininess: 80,
+                    specular: 0xD4A84B
+                });
+
+                const block = new THREE.Mesh(geometry, material);
+                block.position.set(startX + col * spacing, height / 2, startZ + row * spacing);
+
+                block.userData = {
+                    name: event.event_name,
+                    count: event.count,
+                    originalEmissive: blockColor
+                };
+
+                const edges = new THREE.EdgesGeometry(geometry);
+                const line = new THREE.LineSegments(
+                    edges,
+                    new THREE.LineBasicMaterial({ color: 0xD4A84B, opacity: 0.6, transparent: true })
+                );
+                block.add(line);
+
+                scene.add(block);
+                fsnObjects.push(block);
+            });
+
+            document.getElementById('fsn-services').textContent = events.length;
+        }
+
+        function fsnNavigateToRoot() {
+            fsnState.breadcrumb = [];
+            fsnState.currentLevel = 'root';
+            fsnState.selectedRegion = null;
+            fsnState.selectedService = null;
+            selectedObject = null;
+
+            loadFSNData();
+            updateBreadcrumb();
+            document.getElementById('fsn-selection').style.display = 'none';
+            currentFilters = {};
+            loadEvents();
+        }
+
+        function fsnNavigateBack() {
+            if (fsnState.breadcrumb.length > 0) {
+                fsnState.breadcrumb.pop();
+                fsnNavigateToRoot();
+            }
+        }
+
+        function updateBreadcrumb() {
+            const breadcrumb = document.getElementById('fsn-breadcrumb');
+            const path = document.getElementById('fsn-breadcrumb-path');
+
+            if (fsnState.breadcrumb.length === 0) {
+                breadcrumb.style.display = 'none';
+            } else {
+                breadcrumb.style.display = 'block';
+                const last = fsnState.breadcrumb[fsnState.breadcrumb.length - 1];
+                path.innerHTML = ` → <span style="color: var(--color-info);">${last.region} / ${last.service}</span>`;
+            }
+        }
+
+        function fsnScrollToEvents() {
+            document.getElementById('table-container').scrollIntoView({ behavior: 'smooth' });
         }
 
         function animate() {
