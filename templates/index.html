@@ -2131,46 +2131,78 @@
             selectedService: null
         };
 
-        // FSN Progress tracking
+        // FSN Progress tracking with synthetic increments
         const fsnProgress = {
             startTime: null,
             steps: [
                 { name: 'Initializing scene', weight: 10 },
-                { name: 'Fetching data', weight: 60 },
-                { name: 'Rendering blocks', weight: 30 }
+                { name: 'Fetching data', weight: 50 },
+                { name: 'Laying out grid', weight: 15 },
+                { name: 'Rendering blocks', weight: 25 }
             ],
             currentStep: 0,
+            currentProgress: 0,
+            syntheticInterval: null,
 
             start() {
                 this.startTime = Date.now();
                 this.currentStep = 0;
+                this.currentProgress = 0;
+                this.stopSynthetic();
                 const loadingEl = document.getElementById('fsn-loading');
                 if (loadingEl) loadingEl.style.display = 'block';
-                this.update();
+                this.updateDisplay();
             },
 
             setStep(index, substep = '') {
+                this.stopSynthetic();
                 this.currentStep = index;
+
+                // Calculate base progress for this step
+                let baseProgress = 0;
+                for (let i = 0; i < index; i++) {
+                    baseProgress += this.steps[i].weight;
+                }
+                this.currentProgress = baseProgress;
+
                 const step = this.steps[index];
                 const stepEl = document.getElementById('fsn-step');
                 if (stepEl) {
                     stepEl.textContent = substep || step.name + '...';
-                    stepEl.style.color = '';  // Reset color
+                    stepEl.style.color = '';
                 }
-                this.update();
+                this.updateDisplay();
+
+                // Start synthetic progress for this step
+                this.startSynthetic();
             },
 
-            update() {
-                // Calculate cumulative progress
-                let progress = 0;
-                for (let i = 0; i < this.currentStep; i++) {
-                    progress += this.steps[i].weight;
+            startSynthetic() {
+                const step = this.steps[this.currentStep];
+                if (!step) return;
+
+                const stepEnd = this.currentProgress + step.weight;
+                const increment = step.weight / 20;  // 20 increments per step
+
+                this.syntheticInterval = setInterval(() => {
+                    if (this.currentProgress < stepEnd - increment) {
+                        this.currentProgress += increment;
+                        this.updateDisplay();
+                    }
+                }, 100);
+            },
+
+            stopSynthetic() {
+                if (this.syntheticInterval) {
+                    clearInterval(this.syntheticInterval);
+                    this.syntheticInterval = null;
                 }
+            },
 
+            updateDisplay() {
                 const progressEl = document.getElementById('fsn-progress');
-                if (progressEl) progressEl.style.width = progress + '%';
+                if (progressEl) progressEl.style.width = this.currentProgress + '%';
 
-                // Update elapsed time
                 if (this.startTime) {
                     const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
                     const timeEl = document.getElementById('fsn-time');
@@ -2179,6 +2211,8 @@
             },
 
             complete() {
+                this.stopSynthetic();
+                this.currentProgress = 100;
                 const progressEl = document.getElementById('fsn-progress');
                 const stepEl = document.getElementById('fsn-step');
                 if (progressEl) progressEl.style.width = '100%';
@@ -2186,10 +2220,11 @@
                 setTimeout(() => {
                     const loadingEl = document.getElementById('fsn-loading');
                     if (loadingEl) loadingEl.style.display = 'none';
-                }, 300);
+                }, 500);
             },
 
             error(message) {
+                this.stopSynthetic();
                 const stepEl = document.getElementById('fsn-step');
                 if (stepEl) {
                     stepEl.textContent = message;
@@ -2198,6 +2233,7 @@
             },
 
             empty() {
+                this.stopSynthetic();
                 const stepEl = document.getElementById('fsn-step');
                 const progressEl = document.getElementById('fsn-progress');
                 const timeEl = document.getElementById('fsn-time');
@@ -2237,13 +2273,15 @@
 
                 if (hasPendingData) {
                     // Skip the fetch, use cached data directly
-                    fsnProgress.start();
-                    fsnProgress.setStep(0);
-                    initFSNScene();  // Just init scene, don't fetch
-                    fsnProgress.setStep(2);
-                    createFSNBlocks(window.pendingFSNData);
-                    fsnProgress.complete();
-                    window.pendingFSNData = null;
+                    (async () => {
+                        fsnProgress.start();
+                        fsnProgress.setStep(0);
+                        initFSNScene();
+                        fsnProgress.setStep(2);
+                        await createFSNBlocks(window.pendingFSNData);
+                        fsnProgress.complete();
+                        window.pendingFSNData = null;
+                    })();
                 } else {
                     // No useful pending data, do full init with fetch
                     initFSN();
@@ -2627,8 +2665,8 @@
                     return;
                 }
 
-                fsnProgress.setStep(2);  // "Rendering blocks..."
-                createFSNBlocks(fsnData);
+                fsnProgress.setStep(2);  // "Laying out grid..."
+                await createFSNBlocks(fsnData);
                 fsnProgress.complete();
             } catch (error) {
                 console.error('Error loading FSN data:', error);
@@ -2636,7 +2674,7 @@
             }
         }
 
-        function createFSNBlocks(data) {
+        async function createFSNBlocks(data) {
             // Clear existing
             fsnObjects.forEach(obj => scene.remove(obj));
             fsnObjects = [];
@@ -2653,7 +2691,7 @@
 
             // Handle fallback mode (just event_names, no region/service)
             if (data.fallback) {
-                createFallbackBlocks(data);
+                await createFallbackBlocks(data);
                 return;
             }
 
@@ -2666,6 +2704,9 @@
             const startX = -(regions.length * spacing) / 2 + spacing / 2;
             const startZ = -(services.length * spacing) / 2 + spacing / 2;
 
+            // First pass: create flat blocks (2D layout)
+            const blocksToAnimate = [];
+
             regions.forEach((region, xIdx) => {
                 services.forEach((service, zIdx) => {
                     const cell = data.data.find(d =>
@@ -2673,14 +2714,15 @@
                     );
 
                     if (cell && cell.count > 0) {
-                        const height = Math.max(2, (cell.count / maxCount) * 25);
+                        const targetHeight = Math.max(2, (cell.count / maxCount) * 25);
                         const errorRate = cell.error_rate || 0;
+                        const initialHeight = 0.5;  // Start flat
 
                         // Color based on error rate
                         const blockColor = getColorForErrorRate(errorRate);
 
                         const themeColors = getThemeBlockColors();
-                        const geometry = new THREE.BoxGeometry(6, height, 6);
+                        const geometry = new THREE.BoxGeometry(6, initialHeight, 6);
                         const material = new THREE.MeshPhongMaterial({
                             color: themeColors.base,
                             emissive: blockColor,
@@ -2692,7 +2734,7 @@
                         const block = new THREE.Mesh(geometry, material);
                         block.position.set(
                             startX + xIdx * spacing,
-                            height / 2,
+                            initialHeight / 2,
                             startZ + zIdx * spacing
                         );
 
@@ -2701,17 +2743,11 @@
                             service: service,
                             count: cell.count,
                             errorRate: errorRate,
-                            originalEmissive: blockColor
+                            originalEmissive: blockColor,
+                            targetHeight: targetHeight
                         };
 
-                        // Wireframe
-                        const edges = new THREE.EdgesGeometry(geometry);
-                        const line = new THREE.LineSegments(
-                            edges,
-                            new THREE.LineBasicMaterial({ color: themeColors.specular, opacity: 0.6, transparent: true })
-                        );
-                        block.add(line);
-
+                        blocksToAnimate.push(block);
                         scene.add(block);
                         fsnObjects.push(block);
                     }
@@ -2724,10 +2760,62 @@
             document.getElementById('fsn-events').textContent = totalEvents;
             updateFSNSummary(regions.length, services.length);
 
+            // Brief pause to show 2D layout
+            await new Promise(resolve => setTimeout(resolve, 150));
+
+            // Animate blocks to full height
+            fsnProgress.setStep(3);  // "Rendering blocks..."
+            await animateBlocksToHeight(blocksToAnimate);
+
             fsnState.currentLevel = 'root';
         }
 
-        function createFallbackBlocks(data) {
+        // Animate blocks from flat to target height
+        async function animateBlocksToHeight(blocks, blockSize = 6) {
+            const duration = 400;  // ms
+            const startTime = Date.now();
+
+            return new Promise(resolve => {
+                function animateFrame() {
+                    const elapsed = Date.now() - startTime;
+                    const progress = Math.min(elapsed / duration, 1);
+                    // Ease out cubic for smooth deceleration
+                    const eased = 1 - Math.pow(1 - progress, 3);
+
+                    blocks.forEach(block => {
+                        const targetHeight = block.userData.targetHeight;
+                        const size = block.userData.blockSize || blockSize;
+                        const currentHeight = 0.5 + (targetHeight - 0.5) * eased;
+
+                        // Update geometry
+                        block.geometry.dispose();
+                        block.geometry = new THREE.BoxGeometry(size, currentHeight, size);
+                        block.position.y = currentHeight / 2;
+
+                        // Update wireframe
+                        if (block.children.length > 0) {
+                            block.remove(block.children[0]);
+                        }
+                        const themeColors = getThemeBlockColors();
+                        const edges = new THREE.EdgesGeometry(block.geometry);
+                        const line = new THREE.LineSegments(
+                            edges,
+                            new THREE.LineBasicMaterial({ color: themeColors.specular, opacity: 0.6, transparent: true })
+                        );
+                        block.add(line);
+                    });
+
+                    if (progress < 1) {
+                        requestAnimationFrame(animateFrame);
+                    } else {
+                        resolve();
+                    }
+                }
+                animateFrame();
+            });
+        }
+
+        async function createFallbackBlocks(data) {
             // Fallback: show event_names in a grid
             const events = data.data;
             const maxCount = Math.max(...events.map(d => d.count));
@@ -2738,13 +2826,16 @@
             const startX = -(gridSize * spacing) / 2;
             const startZ = -(gridSize * spacing) / 2;
 
+            const blocksToAnimate = [];
+
             events.forEach((event, index) => {
                 const row = Math.floor(index / gridSize);
                 const col = index % gridSize;
-                const height = Math.max(2, (event.count / maxCount) * 20);
+                const targetHeight = Math.max(2, (event.count / maxCount) * 20);
+                const initialHeight = 0.5;
 
                 const themeColors = getThemeBlockColors();
-                const geometry = new THREE.BoxGeometry(5, height, 5);
+                const geometry = new THREE.BoxGeometry(5, initialHeight, 5);
                 const blockColor = getColorForIndex(index);
                 const material = new THREE.MeshPhongMaterial({
                     color: themeColors.base,
@@ -2755,21 +2846,17 @@
                 });
 
                 const block = new THREE.Mesh(geometry, material);
-                block.position.set(startX + col * spacing, height / 2, startZ + row * spacing);
+                block.position.set(startX + col * spacing, initialHeight / 2, startZ + row * spacing);
 
                 block.userData = {
                     name: event.event_name,
                     count: event.count,
-                    originalEmissive: blockColor
+                    originalEmissive: blockColor,
+                    targetHeight: targetHeight,
+                    blockSize: 5  // Different size for fallback blocks
                 };
 
-                const edges = new THREE.EdgesGeometry(geometry);
-                const line = new THREE.LineSegments(
-                    edges,
-                    new THREE.LineBasicMaterial({ color: themeColors.specular, opacity: 0.6, transparent: true })
-                );
-                block.add(line);
-
+                blocksToAnimate.push(block);
                 scene.add(block);
                 fsnObjects.push(block);
             });
@@ -2777,6 +2864,13 @@
             document.getElementById('fsn-regions').textContent = '-';
             document.getElementById('fsn-services').textContent = events.length;
             document.getElementById('fsn-events').textContent = totalEvents;
+
+            // Brief pause to show 2D layout
+            await new Promise(resolve => setTimeout(resolve, 150));
+
+            // Animate blocks to full height
+            fsnProgress.setStep(3);
+            await animateBlocksToHeight(blocksToAnimate, 5);  // Pass block size
         }
 
         // Get theme block colors
