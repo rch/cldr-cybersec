@@ -863,23 +863,45 @@
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            color: #00ffff;
-            font-family: 'Courier New', monospace;
-            font-size: 24px;
-            text-shadow: 0 0 20px rgba(0, 255, 255, 0.8);
+            text-align: center;
+            min-width: 200px;
+        }
+
+        .fsn-progress-step {
+            color: var(--color-info);
+            font-family: var(--font-mono);
+            font-size: 14px;
+            margin-bottom: 10px;
+            text-shadow: 0 0 10px currentColor;
             animation: pulse 2s ease-in-out infinite;
         }
 
+        .fsn-progress-bar {
+            width: 200px;
+            height: 4px;
+            background: var(--color-grid);
+            border-radius: 2px;
+            overflow: hidden;
+            margin: 0 auto 8px;
+        }
+
+        .fsn-progress-fill {
+            height: 100%;
+            width: 0%;
+            background: var(--color-info);
+            transition: width 0.3s ease;
+            box-shadow: 0 0 8px var(--color-info);
+        }
+
+        .fsn-progress-time {
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+            font-size: 11px;
+        }
+
         @keyframes pulse {
-
-            0%,
-            100% {
-                opacity: 0.5;
-            }
-
-            50% {
-                opacity: 1;
-            }
+            0%, 100% { opacity: 0.6; }
+            50% { opacity: 1; }
         }
 
         .fsn-tooltip {
@@ -1058,7 +1080,13 @@
                 <div class="fsn-controls" id="fsn-controls">
                     <!-- Controls will be populated dynamically based on device -->
                 </div>
-                <div class="fsn-loading" id="fsn-loading">INITIALIZING FSN...</div>
+                <div class="fsn-loading" id="fsn-loading">
+                    <div class="fsn-progress-step" id="fsn-step">Initializing...</div>
+                    <div class="fsn-progress-bar">
+                        <div class="fsn-progress-fill" id="fsn-progress"></div>
+                    </div>
+                    <div class="fsn-progress-time" id="fsn-time"></div>
+                </div>
                 <div class="fsn-tooltip" id="fsn-tooltip"></div>
             </div>
         </div>
@@ -2103,6 +2131,82 @@
             selectedService: null
         };
 
+        // FSN Progress tracking
+        const fsnProgress = {
+            startTime: null,
+            steps: [
+                { name: 'Initializing scene', weight: 10 },
+                { name: 'Fetching data', weight: 60 },
+                { name: 'Rendering blocks', weight: 30 }
+            ],
+            currentStep: 0,
+
+            start() {
+                this.startTime = Date.now();
+                this.currentStep = 0;
+                const loadingEl = document.getElementById('fsn-loading');
+                if (loadingEl) loadingEl.style.display = 'block';
+                this.update();
+            },
+
+            setStep(index, substep = '') {
+                this.currentStep = index;
+                const step = this.steps[index];
+                const stepEl = document.getElementById('fsn-step');
+                if (stepEl) {
+                    stepEl.textContent = substep || step.name + '...';
+                    stepEl.style.color = '';  // Reset color
+                }
+                this.update();
+            },
+
+            update() {
+                // Calculate cumulative progress
+                let progress = 0;
+                for (let i = 0; i < this.currentStep; i++) {
+                    progress += this.steps[i].weight;
+                }
+
+                const progressEl = document.getElementById('fsn-progress');
+                if (progressEl) progressEl.style.width = progress + '%';
+
+                // Update elapsed time
+                if (this.startTime) {
+                    const elapsed = ((Date.now() - this.startTime) / 1000).toFixed(1);
+                    const timeEl = document.getElementById('fsn-time');
+                    if (timeEl) timeEl.textContent = elapsed + 's elapsed';
+                }
+            },
+
+            complete() {
+                const progressEl = document.getElementById('fsn-progress');
+                const stepEl = document.getElementById('fsn-step');
+                if (progressEl) progressEl.style.width = '100%';
+                if (stepEl) stepEl.textContent = 'Complete';
+                setTimeout(() => {
+                    const loadingEl = document.getElementById('fsn-loading');
+                    if (loadingEl) loadingEl.style.display = 'none';
+                }, 300);
+            },
+
+            error(message) {
+                const stepEl = document.getElementById('fsn-step');
+                if (stepEl) {
+                    stepEl.textContent = message;
+                    stepEl.style.color = 'var(--color-error)';
+                }
+            },
+
+            empty() {
+                const stepEl = document.getElementById('fsn-step');
+                const progressEl = document.getElementById('fsn-progress');
+                const timeEl = document.getElementById('fsn-time');
+                if (stepEl) stepEl.textContent = 'No events in table';
+                if (progressEl) progressEl.style.width = '100%';
+                if (timeEl) timeEl.textContent = 'Table is empty';
+            }
+        };
+
         // Camera state
         let cameraRotation = { x: 0.3, y: 0.5 };
         let cameraPan = { x: 0, y: 0 };
@@ -2144,6 +2248,10 @@
         }
 
         function initFSN() {
+            // Start progress tracking
+            fsnProgress.start();
+            fsnProgress.setStep(0);  // "Initializing scene..."
+
             const container = document.getElementById('fsn-canvas');
             const width = container.clientWidth;
             const height = container.clientHeight;
@@ -2214,6 +2322,7 @@
             animate();
 
             // Load data
+            fsnProgress.setStep(1);  // "Fetching data..."
             loadFSNData();
         }
 
@@ -2496,15 +2605,16 @@
 
                 if (fsnData.error) {
                     console.error('FSN API error:', fsnData.error);
-                    document.getElementById('fsn-loading').textContent = 'No data available';
+                    fsnProgress.error('No data available');
                     return;
                 }
 
+                fsnProgress.setStep(2);  // "Rendering blocks..."
                 createFSNBlocks(fsnData);
-                document.getElementById('fsn-loading').style.display = 'none';
+                fsnProgress.complete();
             } catch (error) {
                 console.error('Error loading FSN data:', error);
-                document.getElementById('fsn-loading').textContent = 'Error loading data';
+                fsnProgress.error('Error loading data');
             }
         }
 
@@ -2519,11 +2629,9 @@
                 document.getElementById('fsn-regions').textContent = '0';
                 document.getElementById('fsn-services').textContent = '0';
                 document.getElementById('fsn-events').textContent = '0';
-                document.getElementById('fsn-loading').textContent = 'No events in table';
-                document.getElementById('fsn-loading').style.display = 'block';
+                fsnProgress.empty();
                 return;
             }
-            document.getElementById('fsn-loading').style.display = 'none';
 
             // Handle fallback mode (just event_names, no region/service)
             if (data.fallback) {
