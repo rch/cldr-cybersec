@@ -9,6 +9,9 @@
   env.AWS_ACCESS_KEY_ID = "minioadmin";
   env.AWS_SECRET_ACCESS_KEY = "minioadmin";
 
+  # Flink home - built from source in thirdparty/flink
+  env.FLINK_HOME = "${config.devenv.root}/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1";
+
 
   # https://devenv.sh/packages/
   packages = with pkgs; [

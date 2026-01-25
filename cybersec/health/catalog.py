@@ -319,17 +319,17 @@ PYFLINK_010 = FailureMode(
     failure_mode_id="PYFLINK_010",
     category="pyflink",
     name="FLINK_HOME Not Exported",
-    description="FLINK_HOME env var not set in current shell (devenv sets it internally)",
+    description="FLINK_HOME env var not set in current shell",
     base_severity=5,   # Moderate - inconvenience, not blocking
     base_occurrence=6,  # High - common outside devenv shell
     base_detection=1,   # Very easy to detect
     symptom="$FLINK_HOME not available in shell, manual flink commands fail",
-    cause="Running outside devenv shell or FLINK_HOME not exported",
+    cause="Running outside devenv shell or shell not refreshed after devenv.nix change",
     detection_method="Check if FLINK_HOME environment variable is set",
     remediation_steps=[
-        "Enter devenv shell: devenv shell",
-        "Or export manually: export FLINK_HOME=$(cybersec --cmd '/bootstrap info --json' | jq -r '.data.flink_home')",
-        "Or use full path from bootstrap config",
+        "Re-enter devenv shell: exit && devenv shell",
+        "Or run: direnv reload (if using direnv)",
+        "Verify: echo $FLINK_HOME",
     ],
     observation_level=AutomationLevel.A,
     solution_level=AutomationLevel.A,
