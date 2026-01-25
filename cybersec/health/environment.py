@@ -1,0 +1,335 @@
+"""Environment configuration generator for conftest policies.
+
+Generates a JSON snapshot of the current environment state that can be
+validated against Rego policies using conftest.
+"""
+
+import json
+import os
+import platform
+import socket
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+
+async def gather_environment_config() -> dict[str, Any]:
+    """Gather complete environment configuration for policy validation.
+
+    Returns:
+        Environment config dict suitable for conftest validation.
+    """
+    from ..bootstrap import BootstrapService
+
+    config: dict[str, Any] = {
+        "platform": {},
+        "python": {},
+        "flink": {},
+        "services": {},
+    }
+
+    # Platform info
+    is_macos = platform.system() == "Darwin"
+    config["platform"] = {
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "is_macos": is_macos,
+        "is_linux": platform.system() == "Linux",
+    }
+
+    # Python environment
+    pyflink_installed = False
+    try:
+        import pyflink
+        pyflink_installed = True
+        config["python"]["pyflink_version"] = getattr(pyflink, "__version__", "unknown")
+    except ImportError:
+        pass
+
+    kafka_installed = False
+    try:
+        import kafka
+        kafka_installed = True
+    except ImportError:
+        pass
+
+    config["python"] = {
+        "version": sys.version.split()[0],
+        "executable": sys.executable,
+        "pyflink_installed": pyflink_installed,
+        "kafka_installed": kafka_installed,
+    }
+
+    # Check devenv python
+    devenv_root = os.environ.get("DEVENV_ROOT", "")
+    if devenv_root:
+        devenv_python = f"{devenv_root}/.devenv/profile/bin/python3"
+        config["python"]["devenv_python"] = devenv_python
+        config["python"]["devenv_python_exists"] = Path(devenv_python).exists()
+
+    # Flink configuration
+    service = BootstrapService()
+    bootstrap_config = service.get_config()
+    flink_home = bootstrap_config.get_flink_home()
+
+    flink_home_exists = flink_home.exists() if flink_home else False
+    flink_home_env = os.environ.get("FLINK_HOME", "")
+    flink_home_env_set = bool(flink_home_env)
+
+    config["flink"] = {
+        "home": str(flink_home) if flink_home else "",
+        "home_exists": flink_home_exists,
+        "home_env": flink_home_env,
+        "home_env_set": flink_home_env_set,
+        "binary_exists": False,
+        "python_configured": False,
+        "configured_python_path": "",
+        "configured_python_exists": False,
+        "process_stale": False,
+    }
+
+    if flink_home and flink_home_exists:
+        flink_bin = flink_home / "bin" / "flink"
+        config["flink"]["binary_exists"] = flink_bin.exists()
+
+        flink_conf = flink_home / "conf" / "flink-conf.yaml"
+        if flink_conf.exists():
+            try:
+                content = flink_conf.read_text()
+                config_mtime = os.path.getmtime(flink_conf)
+                config["flink"]["config_mtime"] = config_mtime
+
+                python_settings = [
+                    line.strip() for line in content.split("\n")
+                    if ("python.executable" in line.lower() or "python.client.executable" in line.lower())
+                    and not line.strip().startswith("#")
+                ]
+                config["flink"]["python_configured"] = len(python_settings) > 0
+                config["flink"]["python_settings"] = python_settings
+
+                # Extract configured path
+                for setting in python_settings:
+                    if "python.executable:" in setting and "client" not in setting:
+                        configured_path = setting.split(":", 1)[1].strip()
+                        config["flink"]["configured_python_path"] = configured_path
+                        config["flink"]["configured_python_exists"] = Path(configured_path).exists()
+                        break
+                    elif "python.client.executable:" in setting:
+                        configured_path = setting.split(":", 1)[1].strip()
+                        if not config["flink"]["configured_python_path"]:
+                            config["flink"]["configured_python_path"] = configured_path
+                            config["flink"]["configured_python_exists"] = Path(configured_path).exists()
+
+                # Check if process is stale
+                try:
+                    result = subprocess.run(
+                        ["pgrep", "-f", "TaskManager"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        tm_pid = result.stdout.strip().split()[0]
+                        # On Linux, check /proc for process start time
+                        proc_stat = Path(f"/proc/{tm_pid}/stat")
+                        if proc_stat.exists():
+                            boot_time = None
+                            with open("/proc/stat") as f:
+                                for line in f:
+                                    if line.startswith("btime"):
+                                        boot_time = int(line.split()[1])
+                                        break
+                            if boot_time:
+                                with open(proc_stat) as f:
+                                    stat_fields = f.read().split()
+                                    starttime_ticks = int(stat_fields[21])
+                                    clk_tck = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
+                                    tm_start = boot_time + (starttime_ticks / clk_tck)
+                                    if config_mtime > tm_start:
+                                        config["flink"]["process_stale"] = True
+                except Exception:
+                    pass
+
+            except Exception as e:
+                config["flink"]["config_error"] = str(e)
+
+    # Services health checks
+    config["services"] = {
+        "postgres": await _check_postgres(bootstrap_config.postgres_port or 5438),
+        "minio": await _check_minio(bootstrap_config.minio_endpoint or "http://localhost:9010"),
+        "polaris": await _check_polaris(bootstrap_config.polaris_api_url or "http://localhost:8181"),
+        "flink": await _check_flink(bootstrap_config.flink_url or "http://localhost:8081"),
+        "iceberg_browser": await _check_http(
+            "http://localhost:5050/health",
+            bootstrap_config.iceberg_browser_port or 5050
+        ),
+    }
+
+    return config
+
+
+async def _check_postgres(port: int) -> dict[str, Any]:
+    """Check PostgreSQL connectivity."""
+    result = {"port": port, "healthy": False}
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        sock.connect(("localhost", port))
+        sock.close()
+        result["healthy"] = True
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+async def _check_minio(endpoint: str) -> dict[str, Any]:
+    """Check MinIO health."""
+    result = {"endpoint": endpoint, "healthy": False}
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{endpoint}/minio/health/live")
+            result["healthy"] = resp.status_code == 200
+            result["status_code"] = resp.status_code
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+async def _check_polaris(url: str) -> dict[str, Any]:
+    """Check Polaris health."""
+    result = {"url": url, "healthy": False}
+    try:
+        # Polaris admin health endpoint
+        admin_url = url.replace(":8181", ":8182")
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{admin_url}/q/health/ready")
+            result["healthy"] = resp.status_code == 200
+            result["status_code"] = resp.status_code
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+async def _check_flink(url: str) -> dict[str, Any]:
+    """Check Flink JobManager and TaskManagers."""
+    result = {"url": url, "jobmanager_healthy": False, "taskmanager_count": 0}
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            # Check overview
+            resp = await client.get(f"{url}/overview")
+            if resp.status_code == 200:
+                result["jobmanager_healthy"] = True
+                data = resp.json()
+                result["taskmanager_count"] = data.get("taskmanagers", 0)
+                result["slots_total"] = data.get("slots-total", 0)
+                result["slots_available"] = data.get("slots-available", 0)
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+async def _check_http(url: str, port: int) -> dict[str, Any]:
+    """Generic HTTP health check."""
+    result = {"url": url, "port": port, "healthy": False}
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(url)
+            result["healthy"] = resp.status_code == 200
+            result["status_code"] = resp.status_code
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+async def write_environment_config(output_path: Path | None = None) -> Path:
+    """Gather environment config and write to JSON file.
+
+    Args:
+        output_path: Output file path. Defaults to build/environment.json
+
+    Returns:
+        Path to the written config file
+    """
+    if output_path is None:
+        output_path = Path("build/environment.json")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    config = await gather_environment_config()
+
+    with open(output_path, "w") as f:
+        json.dump(config, f, indent=2)
+
+    return output_path
+
+
+def run_conftest(config_path: Path, policy_dir: Path | None = None) -> dict[str, Any]:
+    """Run conftest against the environment config.
+
+    Args:
+        config_path: Path to environment.json
+        policy_dir: Policy directory. Defaults to policy/environment/
+
+    Returns:
+        Conftest results with failures, warnings, and successes
+    """
+    if policy_dir is None:
+        policy_dir = Path("policy/environment")
+
+    result = {
+        "success": True,
+        "failures": [],
+        "warnings": [],
+        "output": "",
+    }
+
+    try:
+        proc = subprocess.run(
+            [
+                "conftest", "test",
+                str(config_path),
+                "--policy", str(policy_dir),
+                "--all-namespaces",
+                "--output", "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        result["output"] = proc.stdout
+        result["stderr"] = proc.stderr
+
+        if proc.stdout:
+            try:
+                conftest_output = json.loads(proc.stdout)
+                for item in conftest_output:
+                    for failure in item.get("failures", []):
+                        result["failures"].append(failure.get("msg", str(failure)))
+                    for warning in item.get("warnings", []):
+                        result["warnings"].append(warning.get("msg", str(warning)))
+
+                result["success"] = len(result["failures"]) == 0
+            except json.JSONDecodeError:
+                result["parse_error"] = "Failed to parse conftest JSON output"
+
+        # Non-zero exit with failures is expected
+        if proc.returncode != 0 and not result["failures"]:
+            result["success"] = False
+            result["error"] = proc.stderr or f"conftest exited with code {proc.returncode}"
+
+    except FileNotFoundError:
+        result["success"] = False
+        result["error"] = "conftest not found. Install with: nix-env -iA nixpkgs.conftest"
+    except subprocess.TimeoutExpired:
+        result["success"] = False
+        result["error"] = "conftest timed out"
+    except Exception as e:
+        result["success"] = False
+        result["error"] = str(e)
+
+    return result

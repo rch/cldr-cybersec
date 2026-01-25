@@ -119,6 +119,43 @@
     "docs:build".exec = "mdbook build docs";
     "docs:open".exec = "mdbook build docs --open";
 
+    # Policy validation using conftest
+    "policy:check".exec = ''
+      echo "🔍 Running policy validation..."
+
+      # Generate environment config
+      uv run python -c "
+import asyncio
+from cybersec.health.environment import write_environment_config
+asyncio.run(write_environment_config())
+print('Environment config written to build/environment.json')
+"
+
+      # Run conftest
+      echo ""
+      echo "Running conftest policies..."
+      conftest test build/environment.json --policy policy/environment/ --all-namespaces || {
+        echo ""
+        echo "⚠️  Policy violations detected. Fix issues above and re-run."
+        exit 1
+      }
+      echo ""
+      echo "✅ All policy checks passed"
+    '';
+
+    "policy:generate".exec = ''
+      echo "📝 Generating environment config..."
+      uv run python -c "
+import asyncio
+from cybersec.health.environment import write_environment_config
+asyncio.run(write_environment_config())
+print('Environment config written to build/environment.json')
+"
+      echo ""
+      echo "Config written. Run validation with:"
+      echo "  conftest test build/environment.json --policy policy/environment/"
+    '';
+
     # Manual Polaris catalog initialization (normally runs automatically via polaris-init process)
     # Use this if automatic initialization failed or you need to re-initialize
     "polaris:init".exec = ''

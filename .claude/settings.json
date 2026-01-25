@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "cybersec": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "cybersec.mcp.server"],
+      "cwd": "/home/rch/local/src/cldr/cybersec"
+    }
+  }
+}

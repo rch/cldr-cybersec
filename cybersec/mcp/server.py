@@ -40,6 +40,7 @@ Add --json to any command for structured output:
 Available command groups:
 - /health - FMEA-based health diagnostics
 - /bootstrap - Environment setup and configuration
+- /policy - Conftest policy validation
 """,
 )
 
