@@ -136,6 +136,14 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
     flink_conf_mtime = None
     iceberg_aws_bundle_exists = False
     iceberg_flink_runtime_exists = False
+    iceberg_submodule_initialized = False
+
+    # Check if Iceberg submodule is initialized
+    devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
+    iceberg_dir = Path(devenv_root) / "thirdparty" / "iceberg"
+    iceberg_gradlew = iceberg_dir / "gradlew"
+    iceberg_submodule_initialized = iceberg_gradlew.exists()
+    diagnostics["flink_config"]["iceberg_submodule_initialized"] = iceberg_submodule_initialized
 
     if flink_home and flink_home_exists:
         flink_bin = flink_home / "bin" / "flink"
@@ -477,16 +485,29 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
         fm = get_failure_mode("PYFLINK_011")
         if fm:
             rpn = fm.calculate_rpn()
+            details = [f"iceberg-aws-bundle-*.jar not found in {flink_home}/lib/"]
+            remediation = fm.remediation_steps.copy()
+
+            # If submodule not initialized, add that as first step
+            if not iceberg_submodule_initialized:
+                details.insert(0, "Iceberg submodule not initialized")
+                remediation.insert(0, "First run: git submodule update --init --recursive")
+
             detected_issues.append({
                 "failure_mode_id": "PYFLINK_011",
                 "name": fm.name,
                 "severity": "critical",
                 "symptom": fm.symptom,
                 "rpn": rpn.rpn,
-                "remediation": fm.remediation_steps,
-                "details": [f"iceberg-aws-bundle-*.jar not found in {flink_home}/lib/"],
+                "remediation": remediation,
+                "details": details,
             })
-            recommendations.insert(0, "Run: cybersec bootstrap run (to build and install Iceberg JARs)")
+
+            if not iceberg_submodule_initialized:
+                recommendations.insert(0, "Run: git submodule update --init --recursive")
+                recommendations.insert(1, "Then: cybersec bootstrap run (to build Iceberg JARs)")
+            else:
+                recommendations.insert(0, "Run: cybersec bootstrap run (to build and install Iceberg JARs)")
 
     # PYFLINK_012: Iceberg Flink Runtime Missing
     if flink_home_exists and not iceberg_flink_runtime_exists:

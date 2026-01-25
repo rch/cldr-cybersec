@@ -322,6 +322,14 @@ async def _fix_iceberg_jars_missing(flink_home: Path | None, dry_run: bool) -> d
         result["message"] = f"Iceberg source not found at {iceberg_dir}. Run: git submodule update --init --recursive"
         return result
 
+    # Check if submodule is initialized (has gradlew)
+    gradlew = iceberg_dir / "gradlew"
+    if not gradlew.exists():
+        result["success"] = False
+        result["message"] = "Iceberg submodule not initialized. Run: git submodule update --init --recursive"
+        result["command"] = "git submodule update --init --recursive"
+        return result
+
     lib_dir = flink_home / "lib"
 
     if dry_run:
