@@ -252,6 +252,69 @@ PYFLINK_006 = FailureMode(
     solution_level=AutomationLevel.C,
 )
 
+PYFLINK_007 = FailureMode(
+    failure_mode_id="PYFLINK_007",
+    category="pyflink",
+    name="Config Written But Not Applied",
+    description="flink-conf.yaml has Python settings but Flink not using them",
+    base_severity=8,   # High - fix appears successful but doesn't work
+    base_occurrence=6,  # High - common after fix without restart
+    base_detection=3,   # Moderate - need to check both config and runtime
+    symptom="'Python process exits with code: 1' persists after /health fix pyflink",
+    cause="Flink cluster not restarted after config change, JVM still using old config",
+    detection_method="Config has python.executable but TaskManager logs show wrong Python",
+    remediation_steps=[
+        "Stop Flink cluster: $FLINK_HOME/bin/stop-cluster.sh",
+        "Verify config: grep python $FLINK_HOME/conf/flink-conf.yaml",
+        "Start Flink cluster: $FLINK_HOME/bin/start-cluster.sh",
+        "Or run: devenv tasks run restart:clean",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
+PYFLINK_008 = FailureMode(
+    failure_mode_id="PYFLINK_008",
+    category="pyflink",
+    name="Flink Cluster Stale After Config Change",
+    description="Flink JVM processes running with old configuration",
+    base_severity=7,   # High - silent failure
+    base_occurrence=5,  # Moderate - happens when restart skipped
+    base_detection=4,   # Moderate - need to compare timestamps
+    symptom="Config file newer than Flink process start time",
+    cause="Flink cluster not restarted after flink-conf.yaml modification",
+    detection_method="Compare flink-conf.yaml mtime vs TaskManager process start time",
+    remediation_steps=[
+        "Stop Flink: $FLINK_HOME/bin/stop-cluster.sh",
+        "Start Flink: $FLINK_HOME/bin/start-cluster.sh",
+        "Verify processes restarted: ps aux | grep -i taskmanager",
+        "Or run full restart: devenv tasks run restart:clean",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
+PYFLINK_009 = FailureMode(
+    failure_mode_id="PYFLINK_009",
+    category="pyflink",
+    name="Python Executable Not Found by Flink",
+    description="Configured Python path in flink-conf.yaml does not exist or is not executable",
+    base_severity=8,   # High - jobs fail immediately
+    base_occurrence=3,  # Low-moderate - config error
+    base_detection=2,   # Easy - check file exists
+    symptom="'Python process exits with code: 1', Python path in config invalid",
+    cause="Configured python.executable path does not exist or changed",
+    detection_method="Check if python.executable path from flink-conf.yaml exists and is executable",
+    remediation_steps=[
+        "Check configured path: grep python.executable $FLINK_HOME/conf/flink-conf.yaml",
+        "Verify path exists: ls -la /path/to/python3",
+        "Re-run fix to update path: cybersec --cmd '/health fix pyflink'",
+        "Restart cluster: devenv tasks run restart:clean",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
 # Infrastructure failure modes
 INFRA_001 = FailureMode(
     failure_mode_id="INFRA_001",
@@ -349,6 +412,9 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "PYFLINK_004": PYFLINK_004,
     "PYFLINK_005": PYFLINK_005,
     "PYFLINK_006": PYFLINK_006,
+    "PYFLINK_007": PYFLINK_007,
+    "PYFLINK_008": PYFLINK_008,
+    "PYFLINK_009": PYFLINK_009,
     "INFRA_001": INFRA_001,
     "INFRA_002": INFRA_002,
     "INFRA_003": INFRA_003,
@@ -359,7 +425,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
 CATEGORIES: dict[str, list[str]] = {
     "iceberg": ["ICE_001", "ICE_002", "ICE_003"],
     "flink": ["FLINK_001", "FLINK_002", "FLINK_003"],
-    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006"],
+    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009"],
     "infra": ["INFRA_001", "INFRA_002", "INFRA_003"],
     "data": ["DATA_001"],
 }

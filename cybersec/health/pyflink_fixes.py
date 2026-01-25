@@ -79,6 +79,25 @@ async def apply_pyflink_fixes(diagnostics: dict, dry_run: bool = True) -> list[d
                 "details": "Check /tmp/cloudtrail_submit.log for specific errors",
             })
 
+        elif failure_mode_id == "PYFLINK_007":
+            # Config written but not applied - need cluster restart
+            result = await _fix_flink_cluster_restart(flink_home, dry_run)
+            result["failure_mode_id"] = "PYFLINK_007"
+            results.append(result)
+
+        elif failure_mode_id == "PYFLINK_008":
+            # Flink cluster stale - need cluster restart
+            result = await _fix_flink_cluster_restart(flink_home, dry_run)
+            result["failure_mode_id"] = "PYFLINK_008"
+            results.append(result)
+
+        elif failure_mode_id == "PYFLINK_009":
+            # Python executable not found - re-run config fix
+            result = await _fix_python_path_mismatch(diagnostics, flink_home, dry_run)
+            result["failure_mode_id"] = "PYFLINK_009"
+            result["message"] = "Re-detected Python path and updated flink-conf.yaml"
+            results.append(result)
+
     return results
 
 
@@ -258,5 +277,82 @@ async def _fix_python_path_mismatch(
     except Exception as e:
         result["success"] = False
         result["message"] = f"Error updating config: {e}"
+
+    return result
+
+
+async def _fix_flink_cluster_restart(flink_home: Path | None, dry_run: bool) -> dict[str, Any]:
+    """Fix: Restart Flink cluster to apply configuration changes."""
+    import subprocess
+
+    result = {
+        "action": "restart_flink_cluster",
+        "command": "devenv tasks run restart:clean",
+    }
+
+    if not flink_home or not flink_home.exists():
+        result["success"] = False
+        result["message"] = "FLINK_HOME not found - cannot restart cluster"
+        return result
+
+    if dry_run:
+        result["success"] = True
+        result["dry_run"] = True
+        result["message"] = "Would restart Flink cluster via devenv tasks"
+        result["steps"] = [
+            f"Stop cluster: {flink_home}/bin/stop-cluster.sh",
+            f"Start cluster: {flink_home}/bin/start-cluster.sh",
+            "Or: devenv tasks run restart:clean",
+        ]
+        return result
+
+    # Execute restart using stop/start scripts directly for targeted restart
+    try:
+        stop_script = flink_home / "bin" / "stop-cluster.sh"
+        start_script = flink_home / "bin" / "start-cluster.sh"
+
+        if not stop_script.exists() or not start_script.exists():
+            result["success"] = False
+            result["message"] = "Flink cluster scripts not found"
+            return result
+
+        # Stop cluster
+        stop_proc = subprocess.run(
+            [str(stop_script)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(flink_home),
+        )
+
+        # Small delay to ensure clean shutdown
+        import time
+        time.sleep(2)
+
+        # Start cluster
+        start_proc = subprocess.run(
+            [str(start_script)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(flink_home),
+        )
+
+        if start_proc.returncode == 0:
+            result["success"] = True
+            result["message"] = "Flink cluster restarted successfully"
+            result["stop_output"] = stop_proc.stdout
+            result["start_output"] = start_proc.stdout
+        else:
+            result["success"] = False
+            result["message"] = "Failed to restart Flink cluster"
+            result["error"] = start_proc.stderr
+
+    except subprocess.TimeoutExpired:
+        result["success"] = False
+        result["message"] = "Timeout restarting Flink cluster"
+    except Exception as e:
+        result["success"] = False
+        result["message"] = f"Error restarting cluster: {e}"
 
     return result

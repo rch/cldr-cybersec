@@ -125,6 +125,10 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
         "flink_home_exists": flink_home_exists,
     }
 
+    configured_python_path = None
+    configured_python_exists = False
+    flink_conf_mtime = None
+
     if flink_home and flink_home_exists:
         flink_bin = flink_home / "bin" / "flink"
         flink_binary_exists = flink_bin.exists()
@@ -133,6 +137,9 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
         flink_conf = flink_home / "conf" / "flink-conf.yaml"
         if flink_conf.exists():
             try:
+                flink_conf_mtime = os.path.getmtime(flink_conf)
+                diagnostics["flink_config"]["config_mtime"] = flink_conf_mtime
+
                 content = flink_conf.read_text()
                 python_settings = [
                     line.strip() for line in content.split("\n")
@@ -141,8 +148,77 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
                 ]
                 diagnostics["flink_config"]["python_settings"] = python_settings or ["none configured"]
                 python_settings_configured = len(python_settings) > 0
+
+                # Extract the configured Python path
+                for setting in python_settings:
+                    if "python.executable:" in setting and "client" not in setting:
+                        configured_python_path = setting.split(":", 1)[1].strip()
+                        break
+                    elif "python.client.executable:" in setting and not configured_python_path:
+                        configured_python_path = setting.split(":", 1)[1].strip()
+
+                if configured_python_path:
+                    configured_python_exists = Path(configured_python_path).exists()
+                    diagnostics["flink_config"]["configured_python_path"] = configured_python_path
+                    diagnostics["flink_config"]["configured_python_exists"] = configured_python_exists
+
             except Exception as e:
                 diagnostics["flink_config"]["config_error"] = str(e)
+
+    # Check Flink process start times vs config mtime
+    flink_process_stale = False
+    taskmanager_start_time = None
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "TaskManager"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            tm_pid = result.stdout.strip().split()[0]
+            # Get process start time
+            stat_result = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", tm_pid],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if stat_result.returncode == 0:
+                diagnostics["flink_config"]["taskmanager_pid"] = tm_pid
+                diagnostics["flink_config"]["taskmanager_start"] = stat_result.stdout.strip()
+
+                # Parse and compare times (approximate check)
+                # If config was modified after TM started, cluster is stale
+                if flink_conf_mtime:
+                    # Use /proc on Linux for more precise timing
+                    proc_stat = Path(f"/proc/{tm_pid}/stat")
+                    if proc_stat.exists():
+                        # Process start time from /proc
+                        import time
+                        boot_time = None
+                        try:
+                            with open("/proc/stat") as f:
+                                for line in f:
+                                    if line.startswith("btime"):
+                                        boot_time = int(line.split()[1])
+                                        break
+                            with open(proc_stat) as f:
+                                stat_fields = f.read().split()
+                                # Field 22 is starttime in clock ticks since boot
+                                starttime_ticks = int(stat_fields[21])
+                                clk_tck = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
+                                taskmanager_start_time = boot_time + (starttime_ticks / clk_tck)
+                                diagnostics["flink_config"]["taskmanager_start_epoch"] = taskmanager_start_time
+
+                                if flink_conf_mtime > taskmanager_start_time:
+                                    flink_process_stale = True
+                                    diagnostics["flink_config"]["process_stale"] = True
+                                    diagnostics["flink_config"]["config_newer_than_process"] = True
+                        except Exception:
+                            pass
+    except Exception as e:
+        diagnostics["flink_config"]["process_check_error"] = str(e)
 
     # Logs
     submit_log_errors = []
@@ -307,6 +383,56 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
                 "details": submit_log_errors[:3],  # Include first 3 errors
             })
             recommendations.append("Review /tmp/cloudtrail_submit.log for error details")
+
+    # PYFLINK_007: Config Written But Not Applied
+    # Detect: config has python settings, but still getting "Python process exits with code: 1"
+    python_exit_error = any("Python process exits with code: 1" in err for err in submit_log_errors)
+    if python_settings_configured and python_exit_error:
+        fm = get_failure_mode("PYFLINK_007")
+        if fm:
+            rpn = fm.calculate_rpn()
+            detected_issues.append({
+                "failure_mode_id": "PYFLINK_007",
+                "name": fm.name,
+                "severity": "critical",
+                "symptom": fm.symptom,
+                "rpn": rpn.rpn,
+                "remediation": fm.remediation_steps,
+                "details": ["Config has Python settings but error persists - cluster likely not restarted"],
+            })
+            recommendations.insert(0, "Restart Flink cluster: devenv tasks run restart:clean")
+
+    # PYFLINK_008: Flink Cluster Stale After Config Change
+    if flink_process_stale:
+        fm = get_failure_mode("PYFLINK_008")
+        if fm:
+            rpn = fm.calculate_rpn()
+            detected_issues.append({
+                "failure_mode_id": "PYFLINK_008",
+                "name": fm.name,
+                "severity": "critical",
+                "symptom": fm.symptom,
+                "rpn": rpn.rpn,
+                "remediation": fm.remediation_steps,
+                "details": ["flink-conf.yaml modified after TaskManager started"],
+            })
+            recommendations.insert(0, "Restart Flink cluster to apply config: devenv tasks run restart:clean")
+
+    # PYFLINK_009: Python Executable Not Found by Flink
+    if configured_python_path and not configured_python_exists:
+        fm = get_failure_mode("PYFLINK_009")
+        if fm:
+            rpn = fm.calculate_rpn()
+            detected_issues.append({
+                "failure_mode_id": "PYFLINK_009",
+                "name": fm.name,
+                "severity": "critical",
+                "symptom": fm.symptom,
+                "rpn": rpn.rpn,
+                "remediation": fm.remediation_steps,
+                "details": [f"Configured path does not exist: {configured_python_path}"],
+            })
+            recommendations.insert(0, f"Fix Python path in flink-conf.yaml: {configured_python_path} not found")
 
     # === Summary ===
 
