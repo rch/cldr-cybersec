@@ -539,6 +539,116 @@ def get_summary():
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================================
+# Mock Visualization Inference Service
+# ============================================================================
+# Simulates an ML/LLM agent that recommends visualizations for event cards.
+# Future: Replace with real inference service (local LLM, API call, etc.)
+
+VIZ_TYPES = {
+    "sparkline": "Time distribution histogram for grouped events",
+    "threat_score": "Security risk indicator (0-100)",
+    "geo_badge": "Geographic region indicator",
+    "error_pulse": "Error rate animation",
+    "user_glyph": "User identity icon based on access pattern",
+    "none": "No visualization needed",
+}
+
+
+def mock_viz_inference(event_group: dict) -> dict:
+    """
+    Mock inference function that returns visualization recommendations.
+
+    In production, this would call an ML model or LLM to analyze the event
+    and recommend appropriate visualizations.
+
+    Args:
+        event_group: A grouped event dict with count, events list, etc.
+
+    Returns:
+        Dict with viz_type, confidence, and optional parameters
+    """
+    count = event_group.get("count", 1)
+    event_name = event_group.get("event_name", "")
+    has_error = bool(event_group.get("error_code"))
+    region = event_group.get("region", "")
+
+    # Simple rule-based mock (simulating what an ML model might decide)
+
+    # High-volume grouped events get sparklines
+    if count >= 3:
+        return {
+            "viz_type": "sparkline",
+            "confidence": 0.9,
+            "reason": f"High event volume ({count} events)",
+        }
+
+    # Error events get threat scoring
+    if has_error:
+        # Mock threat score based on event type
+        threat_keywords = ["Delete", "Terminate", "Remove", "Revoke"]
+        score = 60 if any(k in event_name for k in threat_keywords) else 30
+        return {
+            "viz_type": "threat_score",
+            "confidence": 0.85,
+            "score": score,
+            "reason": f"Error event: {event_group.get('error_code')}",
+        }
+
+    # Sensitive operations get elevated threat scores
+    sensitive_ops = ["CreateAccessKey", "AttachUserPolicy", "ConsoleLogin", "AssumeRole"]
+    if event_name in sensitive_ops:
+        return {
+            "viz_type": "threat_score",
+            "confidence": 0.75,
+            "score": 40 + (count * 5),  # Higher if repeated
+            "reason": f"Sensitive operation: {event_name}",
+        }
+
+    # Cross-region activity gets geo badge
+    if region and count >= 2:
+        return {
+            "viz_type": "geo_badge",
+            "confidence": 0.7,
+            "region": region,
+            "reason": "Regional activity pattern",
+        }
+
+    # Default: no special visualization
+    return {
+        "viz_type": "none",
+        "confidence": 0.5,
+        "reason": "Standard event",
+    }
+
+
+@app.route("/api/viz/infer", methods=["POST"])
+def viz_infer():
+    """
+    Inference endpoint for card visualizations.
+
+    Accepts a list of event groups and returns visualization recommendations.
+    Future: This endpoint signature stays the same when swapping to real inference.
+    """
+    try:
+        data = request.get_json()
+        event_groups = data.get("events", [])
+
+        recommendations = []
+        for group in event_groups:
+            rec = mock_viz_inference(group)
+            rec["event_id"] = group.get("event_id") or group.get("eventID") or group.get("id")
+            recommendations.append(rec)
+
+        return jsonify({
+            "recommendations": recommendations,
+            "model": "mock-rules-v1",  # Future: "llama-3-8b", "gpt-4-turbo", etc.
+            "latency_ms": 5,  # Mock latency
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/fsn/aggregate")
 def fsn_aggregate():
     """
