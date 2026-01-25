@@ -319,8 +319,17 @@ start_datagen() {
     fi
     
     # Submit the job in background
+    # Use devenv Python for PyFlink compatibility (especially on macOS)
+    local PYCLIENT
+    if [ -f "$PWD/.devenv/profile/bin/python3" ]; then
+        PYCLIENT="$PWD/.devenv/profile/bin/python3"
+    else
+        PYCLIENT="python3"
+    fi
+
     log_info "Submitting CloudTrail DataGen job to Flink..."
-    "$FLINK_HOME/bin/flink" run -pyclientexec python -py flink_jobs/cloudtrail_datagen.py > /tmp/cloudtrail.log 2>&1 &
+    log_info "Using Python: $PYCLIENT"
+    "$FLINK_HOME/bin/flink" run -pyclientexec "$PYCLIENT" -py flink_jobs/cloudtrail_datagen.py > /tmp/cloudtrail.log 2>&1 &
     local submit_pid=$!
     echo $submit_pid > /tmp/cloudtrail.pid
 
