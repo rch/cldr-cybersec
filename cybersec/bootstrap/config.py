@@ -87,6 +87,9 @@ class BootstrapConfig:
     nifi_otlp_port: int = 4319
     nifi_version: str = "2.0.0"
 
+    # UI configuration
+    ui_theme: str = "solarized-dark"
+
     def get_minio_data_dir(self) -> Path:
         """Get MinIO data directory, using default if not set."""
         if self.minio_data_dir:
@@ -251,6 +254,10 @@ class SettingsManager:
             if "nifi_state_dir" in data["paths"]:
                 flat["nifi_state_dir"] = data["paths"]["nifi_state_dir"]
 
+        # UI section
+        if "ui" in data:
+            flat["ui_theme"] = data["ui"].get("theme", "solarized-dark")
+
         return BootstrapConfig.from_dict(flat)
 
     def _apply_env_overrides(self):
@@ -356,6 +363,9 @@ class SettingsManager:
                 "version": self._config.nifi_version,
                 "home": self._config.nifi_home,
                 "state_dir": self._config.nifi_state_dir,
+            },
+            "ui": {
+                "theme": self._config.ui_theme,
             },
         }
 

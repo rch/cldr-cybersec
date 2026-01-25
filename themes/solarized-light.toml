@@ -1,0 +1,37 @@
+[meta]
+name = "Solarized Light"
+author = "Ethan Schoonover"
+url = "https://ethanschoonover.com/solarized/"
+
+[colors]
+color-amber = "#b58900"
+color-gold = "#b58900"
+color-bronze = "#cb4b16"
+color-void = "#fdf6e3"
+color-charcoal = "#eee8d5"
+color-containment = "#eee8d5"
+color-grid = "#93a1a1"
+color-success = "#859900"
+color-info = "#2aa198"
+color-warning = "#cb4b16"
+color-error = "#dc322f"
+text-primary = "#657b83"
+text-secondary = "#839496"
+text-muted = "#93a1a1"
+text-terminal = "#859900"
+
+[effects]
+glow-amber = "none"
+glow-success = "none"
+shadow-card = "0 2px 8px rgba(0, 0, 0, 0.1)"
+
+[three]
+fog = 0xfdf6e3
+grid-primary = 0xb58900
+grid-secondary = 0x93a1a1
+ambient-light = 0xeee8d5
+directional-light = 0xb58900
+point-light-1 = 0x859900
+point-light-2 = 0x2aa198
+block-base = 0xeee8d5
+block-specular = 0xb58900

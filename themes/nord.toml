@@ -1,0 +1,37 @@
+[meta]
+name = "Nord"
+author = "Arctic Ice Studio"
+url = "https://www.nordtheme.com/"
+
+[colors]
+color-amber = "#ebcb8b"
+color-gold = "#ebcb8b"
+color-bronze = "#d08770"
+color-void = "#2e3440"
+color-charcoal = "#3b4252"
+color-containment = "#434c5e"
+color-grid = "#4c566a"
+color-success = "#a3be8c"
+color-info = "#88c0d0"
+color-warning = "#ebcb8b"
+color-error = "#bf616a"
+text-primary = "#eceff4"
+text-secondary = "#d8dee9"
+text-muted = "#4c566a"
+text-terminal = "#a3be8c"
+
+[effects]
+glow-amber = "none"
+glow-success = "none"
+shadow-card = "0 2px 12px rgba(0, 0, 0, 0.25)"
+
+[three]
+fog = 0x2e3440
+grid-primary = 0x88c0d0
+grid-secondary = 0x4c566a
+ambient-light = 0x3b4252
+directional-light = 0x88c0d0
+point-light-1 = 0xa3be8c
+point-light-2 = 0x81a1c1
+block-base = 0x3b4252
+block-specular = 0x88c0d0

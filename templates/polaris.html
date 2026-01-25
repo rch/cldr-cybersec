@@ -460,7 +460,35 @@
         // Store catalog structure
         let catalogData = null;
 
-        document.addEventListener('DOMContentLoaded', initialize);
+        // Theme loader - load and apply user's theme preference
+        async function loadTheme() {
+            try {
+                const response = await fetch('/api/ui/theme');
+                const { theme } = await response.json();
+                await applyTheme(theme);
+            } catch (err) {
+                console.warn('Failed to load theme preference:', err);
+            }
+        }
+
+        async function applyTheme(themeId) {
+            try {
+                const response = await fetch(`/api/themes/${themeId}`);
+                const theme = await response.json();
+
+                // Apply CSS variables to document root
+                Object.entries(theme.variables || {}).forEach(([key, value]) => {
+                    document.documentElement.style.setProperty(key, value);
+                });
+            } catch (err) {
+                console.warn('Failed to apply theme:', err);
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', async function() {
+            await loadTheme();
+            initialize();
+        });
 
         async function initialize() {
             try {

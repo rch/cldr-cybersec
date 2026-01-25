@@ -278,6 +278,37 @@
             margin-top: 4px;
         }
 
+        .config-field select {
+            width: 100%;
+            padding: 10px 14px;
+            background: var(--color-containment);
+            border: 1px solid var(--color-grid);
+            border-radius: 2px;
+            color: var(--text-primary);
+            font-family: var(--font-body);
+            font-size: 14px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .config-field select:focus {
+            outline: none;
+            border-color: var(--color-amber);
+            box-shadow: 0 0 0 1px rgba(212, 168, 75, 0.2);
+        }
+
+        .theme-preview {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .theme-swatch {
+            width: 24px;
+            height: 24px;
+            border-radius: 2px;
+            border: 1px solid var(--color-grid);
+        }
+
         .btn {
             padding: 12px 24px;
             border: none;
@@ -604,6 +635,19 @@
                     </div>
                     <div id="settings-form" style="display: none;">
                         <div class="config-section">
+                            <h3>Appearance</h3>
+                            <div class="config-grid">
+                                <div class="config-field">
+                                    <label for="ui_theme">Theme</label>
+                                    <select id="ui_theme">
+                                        <!-- Populated by JavaScript -->
+                                    </select>
+                                    <div class="theme-preview" id="theme-preview"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="config-section">
                             <h3>Paths</h3>
                             <div class="config-grid">
                                 <div class="config-field">
@@ -820,6 +864,70 @@
             }
         }
 
+        // Load theme options
+        async function loadThemeOptions() {
+            try {
+                const [themesResponse, currentResponse] = await Promise.all([
+                    fetch('/api/themes'),
+                    fetch('/api/ui/theme')
+                ]);
+                const themes = await themesResponse.json();
+                const { theme: currentTheme } = await currentResponse.json();
+
+                const select = document.getElementById('ui_theme');
+                select.innerHTML = '';
+                themes.forEach(t => {
+                    const opt = document.createElement('option');
+                    opt.value = t.id;
+                    opt.textContent = t.name;
+                    opt.selected = t.id === currentTheme;
+                    select.appendChild(opt);
+                });
+
+                // Show preview of current theme
+                updateThemePreview(currentTheme);
+
+                // Update preview on change
+                select.addEventListener('change', (e) => {
+                    updateThemePreview(e.target.value);
+                    applyThemePreview(e.target.value);
+                });
+            } catch (error) {
+                console.error('Error loading themes:', error);
+            }
+        }
+
+        async function updateThemePreview(themeId) {
+            try {
+                const response = await fetch(`/api/themes/${themeId}`);
+                const theme = await response.json();
+                const preview = document.getElementById('theme-preview');
+                const vars = theme.variables || {};
+
+                // Show color swatches
+                const colors = ['--color-void', '--color-amber', '--color-success', '--color-info', '--color-error'];
+                preview.innerHTML = colors.map(c =>
+                    `<div class="theme-swatch" style="background: ${vars[c] || '#333'}" title="${c}"></div>`
+                ).join('');
+            } catch (error) {
+                console.error('Error loading theme preview:', error);
+            }
+        }
+
+        async function applyThemePreview(themeId) {
+            try {
+                const response = await fetch(`/api/themes/${themeId}`);
+                const theme = await response.json();
+
+                // Apply CSS variables for live preview
+                Object.entries(theme.variables || {}).forEach(([key, value]) => {
+                    document.documentElement.style.setProperty(key, value);
+                });
+            } catch (error) {
+                console.error('Error applying theme preview:', error);
+            }
+        }
+
         // Load settings
         async function loadSettings() {
             const loading = document.getElementById('settings-loading');
@@ -838,6 +946,9 @@
                     document.getElementById('catalog_warehouse').value = data.config.catalog_warehouse || '';
                 }
 
+                // Load theme options
+                await loadThemeOptions();
+
                 loading.style.display = 'none';
                 form.style.display = 'block';
             } catch (error) {
@@ -854,6 +965,7 @@
                 iceberg_browser_port: parseInt(document.getElementById('iceberg_browser_port').value),
                 catalog_name: document.getElementById('catalog_name').value,
                 catalog_warehouse: document.getElementById('catalog_warehouse').value,
+                ui_theme: document.getElementById('ui_theme').value,
             };
 
             try {

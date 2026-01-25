@@ -301,8 +301,13 @@ def get_events():
         region = request.args.get("region")
         event_source = request.args.get("event_source")
         
-        # Start with table scan
-        scan = table.scan()
+        # Start with table scan - use limit to prevent loading entire table
+        # PyIceberg scan().to_pandas() loads all matching rows, so we need to be careful
+        # For large tables, we sample recent data files only
+        MAX_SCAN_ROWS = 10000  # Cap to prevent memory issues
+
+        # Note: limit is a parameter to scan(), not a chained method
+        scan = table.scan(limit=MAX_SCAN_ROWS)
 
         # Convert to pandas DataFrame
         df = scan.to_pandas()
@@ -420,8 +425,10 @@ def get_event_detail(event_id):
         table = get_table()
         if not table:
             return jsonify({"error": "Table not found"}), 404
-        
-        scan = table.scan()
+
+        # Use a reasonable limit - event IDs should be unique so we just need to find it
+        # Note: Ideally we'd use row_filter but PyIceberg doesn't support complex filters well
+        scan = table.scan(limit=50000)
         df = scan.to_pandas()
 
         # Find event by ID - check both possible column names
@@ -497,45 +504,38 @@ def get_event_detail(event_id):
 
 @app.route("/api/summary")
 def get_summary():
-    """Get summary statistics and aggregations"""
+    """Get summary statistics from snapshot metadata (fast, no full scan)"""
     try:
         table = get_table()
         if not table:
             return jsonify({"error": "Table not found"}), 404
-        
-        scan = table.scan()
-        df = scan.to_pandas()
-        
+
+        metadata = table.metadata
+        snapshots = metadata.snapshots
+
+        if not snapshots:
+            return jsonify({"total_events": 0})
+
+        # Get counts from latest snapshot summary (no scan needed!)
+        latest = snapshots[-1]
+        summary_props = latest.summary.additional_properties if hasattr(latest.summary, 'additional_properties') else {}
+
+        total_records = int(summary_props.get('total-records', 0))
+
         summary = {
-            "total_events": len(df),
+            "total_events": total_records,
         }
-        
-        # Add column-specific summaries based on what columns exist
-        if "event_name" in df.columns:
-            summary["event_names"] = df["event_name"].value_counts().head(10).to_dict()
-        if "region" in df.columns:
-            summary["regions"] = df["region"].value_counts().to_dict()
-        if "user_identity" in df.columns:
-            summary["users"] = df["user_identity"].value_counts().head(10).to_dict()
-        if "source_ip_address" in df.columns:
-            summary["source_ips"] = df["source_ip_address"].value_counts().head(10).to_dict()
-        if "name" in df.columns:
-            summary["names"] = df["name"].value_counts().head(10).to_dict()
-        if "amount" in df.columns:
-            summary["amount_stats"] = {
-                "mean": float(df["amount"].mean()),
-                "min": int(df["amount"].min()),
-                "max": int(df["amount"].max()),
-                "total": int(df["amount"].sum())
-            }
-        
-        # Time range
-        if "event_time" in df.columns and not df["event_time"].empty:
-            summary["earliest_event"] = df["event_time"].min().isoformat()
-            summary["latest_event"] = df["event_time"].max().isoformat()
-        
+
+        # Get time range from first and last snapshots
+        if len(snapshots) > 0:
+            first_snapshot = snapshots[0]
+            summary["earliest_event"] = datetime.fromtimestamp(first_snapshot.timestamp_ms / 1000).isoformat()
+            summary["latest_event"] = datetime.fromtimestamp(latest.timestamp_ms / 1000).isoformat()
+
         return jsonify(summary)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -735,8 +735,10 @@ def fsn_aggregate():
         time_start = request.args.get("time_start")
         time_end = request.args.get("time_end")
 
-        # Scan table (partition pruning happens automatically with filters)
-        scan = table.scan()
+        # Scan table with limit to prevent memory issues on large tables
+        # For FSN visualization, we sample recent data to show patterns
+        FSN_SCAN_LIMIT = 50000  # Enough to show meaningful patterns
+        scan = table.scan(limit=FSN_SCAN_LIMIT)
         df = scan.to_pandas()
 
         if df.empty:
@@ -882,7 +884,9 @@ def fsn_drilldown():
         if not region or not service:
             return jsonify({"error": "region and service parameters required"}), 400
 
-        scan = table.scan()
+        # Scan with limit to prevent memory issues
+        DRILLDOWN_LIMIT = 50000
+        scan = table.scan(limit=DRILLDOWN_LIMIT)
         df = scan.to_pandas()
 
         # Parse event_data JSON if needed
@@ -981,10 +985,12 @@ def get_table_changes():
         metadata = table.metadata
         current_snapshot_id = metadata.current_snapshot_id
 
-        # Get current count
-        scan = table.scan()
-        df = scan.to_pandas()
-        current_count = len(df)
+        # Get current count from snapshot metadata (no scan needed!)
+        current_count = 0
+        if metadata.snapshots:
+            latest = metadata.snapshots[-1]
+            summary_props = latest.summary.additional_properties if hasattr(latest.summary, 'additional_properties') else {}
+            current_count = int(summary_props.get('total-records', 0))
 
         # First call - initialize baseline (don't count existing events as "new")
         if _last_event_count is None:
@@ -1073,6 +1079,50 @@ def polaris_page():
 def settings_page():
     """Bootstrap settings page"""
     return render_template("settings.html")
+
+
+# ============================================================================
+# Theme API
+# ============================================================================
+
+
+@app.route("/api/themes")
+def api_themes():
+    """List available themes."""
+    try:
+        from cybersec.themes import list_themes
+        return jsonify(list_themes())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/themes/<theme_id>")
+def api_theme(theme_id):
+    """Get theme CSS variables and THREE.js colors."""
+    try:
+        from cybersec.themes import get_theme
+        return jsonify(get_theme(theme_id))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ui/theme", methods=["GET", "POST"])
+def api_ui_theme():
+    """Get or set current UI theme preference."""
+    try:
+        from cybersec.bootstrap import BootstrapService
+        service = BootstrapService()
+
+        if request.method == "POST":
+            data = request.json or {}
+            theme_id = data.get("theme", "solarized-dark")
+            service.update_config(ui_theme=theme_id)
+            return jsonify({"theme": theme_id})
+
+        config = service.get_config()
+        return jsonify({"theme": config.ui_theme})
+    except Exception as e:
+        return jsonify({"error": str(e), "theme": "solarized-dark"}), 500
 
 
 @app.route("/api/bootstrap/info")

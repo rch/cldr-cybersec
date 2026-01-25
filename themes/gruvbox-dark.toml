@@ -1,0 +1,37 @@
+[meta]
+name = "Gruvbox Dark"
+author = "Pavel Pertsev"
+url = "https://github.com/morhetz/gruvbox"
+
+[colors]
+color-amber = "#fe8019"
+color-gold = "#fabd2f"
+color-bronze = "#d65d0e"
+color-void = "#282828"
+color-charcoal = "#1d2021"
+color-containment = "#3c3836"
+color-grid = "#504945"
+color-success = "#b8bb26"
+color-info = "#83a598"
+color-warning = "#fe8019"
+color-error = "#fb4934"
+text-primary = "#ebdbb2"
+text-secondary = "#d5c4a1"
+text-muted = "#665c54"
+text-terminal = "#b8bb26"
+
+[effects]
+glow-amber = "0 0 10px rgba(254, 128, 25, 0.25)"
+glow-success = "0 0 10px rgba(184, 187, 38, 0.25)"
+shadow-card = "0 3px 12px rgba(0, 0, 0, 0.35)"
+
+[three]
+fog = 0x282828
+grid-primary = 0xfe8019
+grid-secondary = 0x504945
+ambient-light = 0x1d2021
+directional-light = 0xfe8019
+point-light-1 = 0xb8bb26
+point-light-2 = 0x83a598
+block-base = 0x1d2021
+block-specular = 0xfe8019

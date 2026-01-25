@@ -1,0 +1,37 @@
+[meta]
+name = "Keiretsu Dark"
+author = "Cybersec Project"
+url = "https://github.com/rch/cldr-cybersec"
+
+[colors]
+color-amber = "#D4A84B"
+color-gold = "#FFD700"
+color-bronze = "#CD853F"
+color-void = "#0A0A0F"
+color-charcoal = "#12121A"
+color-containment = "#1A1A24"
+color-grid = "#252532"
+color-success = "#00FF88"
+color-info = "#00FFFF"
+color-warning = "#FFB347"
+color-error = "#FF4444"
+text-primary = "#E8E8F0"
+text-secondary = "#A0A0B0"
+text-muted = "#606070"
+text-terminal = "#00FF88"
+
+[effects]
+glow-amber = "0 0 20px rgba(212, 168, 75, 0.3)"
+glow-success = "0 0 10px rgba(0, 255, 136, 0.4)"
+shadow-card = "0 4px 20px rgba(0, 0, 0, 0.4)"
+
+[three]
+fog = 0x0A0A0F
+grid-primary = 0xD4A84B
+grid-secondary = 0x252532
+ambient-light = 0x202030
+directional-light = 0xD4A84B
+point-light-1 = 0x00FF88
+point-light-2 = 0x00FFFF
+block-base = 0x12121A
+block-specular = 0xD4A84B

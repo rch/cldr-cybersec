@@ -1124,8 +1124,42 @@
         let currentView = 'table';
         let cachedEvents = [];
 
+        // Theme system - store THREE.js colors for FSN
+        window.themeThree = {};
+
+        // Load and apply theme from server
+        async function loadTheme() {
+            try {
+                const response = await fetch('/api/ui/theme');
+                const { theme } = await response.json();
+                await applyTheme(theme);
+            } catch (error) {
+                console.error('Failed to load theme:', error);
+            }
+        }
+
+        async function applyTheme(themeId) {
+            try {
+                const response = await fetch(`/api/themes/${themeId}`);
+                const theme = await response.json();
+
+                // Apply CSS variables to :root
+                Object.entries(theme.variables || {}).forEach(([key, value]) => {
+                    document.documentElement.style.setProperty(key, value);
+                });
+
+                // Store THREE.js colors for FSN
+                window.themeThree = theme.three || {};
+
+                console.log(`Theme applied: ${theme.meta?.name || themeId}`);
+            } catch (error) {
+                console.error('Failed to apply theme:', error);
+            }
+        }
+
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', function () {
+            loadTheme();  // Load theme first
             loadStats();
             loadEvents();
             initMasonryColumns();
@@ -2114,9 +2148,19 @@
             const width = container.clientWidth;
             const height = container.clientHeight;
 
-            // Scene - Solarized Dark aesthetic
+            // Get theme colors (with Solarized Dark defaults)
+            const t = window.themeThree || {};
+            const fogColor = t.fog || 0x002b36;
+            const gridPrimary = t['grid-primary'] || 0xb58900;
+            const gridSecondary = t['grid-secondary'] || 0x586e75;
+            const ambientColor = t['ambient-light'] || 0x073642;
+            const directionalColor = t['directional-light'] || 0xb58900;
+            const pointLight1Color = t['point-light-1'] || 0x859900;
+            const pointLight2Color = t['point-light-2'] || 0x2aa198;
+
+            // Scene with theme fog
             scene = new THREE.Scene();
-            scene.fog = new THREE.Fog(0x002b36, 50, 200);
+            scene.fog = new THREE.Fog(fogColor, 50, 200);
 
             // Camera
             camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
@@ -2129,31 +2173,31 @@
                 alpha: true
             });
             renderer.setSize(width, height);
-            renderer.setClearColor(0x002b36, 1);
+            renderer.setClearColor(fogColor, 1);
 
             // Raycaster for interaction
             raycaster = new THREE.Raycaster();
             mouse = new THREE.Vector2();
 
-            // Grid - Solarized Yellow/base01
-            const gridHelper = new THREE.GridHelper(100, 20, 0xb58900, 0x586e75);
+            // Grid with theme colors
+            const gridHelper = new THREE.GridHelper(100, 20, gridPrimary, gridSecondary);
             gridHelper.material.opacity = 0.4;
             gridHelper.material.transparent = true;
             scene.add(gridHelper);
 
-            // Lighting - Solarized palette
-            const ambientLight = new THREE.AmbientLight(0x073642, 0.6);
+            // Lighting with theme colors
+            const ambientLight = new THREE.AmbientLight(ambientColor, 0.6);
             scene.add(ambientLight);
 
-            const directionalLight = new THREE.DirectionalLight(0xb58900, 0.8);
+            const directionalLight = new THREE.DirectionalLight(directionalColor, 0.8);
             directionalLight.position.set(10, 20, 10);
             scene.add(directionalLight);
 
-            const pointLight1 = new THREE.PointLight(0x859900, 0.8, 60);
+            const pointLight1 = new THREE.PointLight(pointLight1Color, 0.8, 60);
             pointLight1.position.set(-20, 10, -20);
             scene.add(pointLight1);
 
-            const pointLight2 = new THREE.PointLight(0x2aa198, 0.6, 50);
+            const pointLight2 = new THREE.PointLight(pointLight2Color, 0.6, 50);
             pointLight2.position.set(20, 10, 20);
             scene.add(pointLight2);
 
@@ -2509,13 +2553,14 @@
                         // Color based on error rate
                         const blockColor = getColorForErrorRate(errorRate);
 
+                        const themeColors = getThemeBlockColors();
                         const geometry = new THREE.BoxGeometry(6, height, 6);
                         const material = new THREE.MeshPhongMaterial({
-                            color: 0x073642,
+                            color: themeColors.base,
                             emissive: blockColor,
                             emissiveIntensity: 0.2,
                             shininess: 80,
-                            specular: 0xb58900
+                            specular: themeColors.specular
                         });
 
                         const block = new THREE.Mesh(geometry, material);
@@ -2537,7 +2582,7 @@
                         const edges = new THREE.EdgesGeometry(geometry);
                         const line = new THREE.LineSegments(
                             edges,
-                            new THREE.LineBasicMaterial({ color: 0xb58900, opacity: 0.6, transparent: true })
+                            new THREE.LineBasicMaterial({ color: themeColors.specular, opacity: 0.6, transparent: true })
                         );
                         block.add(line);
 
@@ -2572,14 +2617,15 @@
                 const col = index % gridSize;
                 const height = Math.max(2, (event.count / maxCount) * 20);
 
+                const themeColors = getThemeBlockColors();
                 const geometry = new THREE.BoxGeometry(5, height, 5);
                 const blockColor = getColorForIndex(index);
                 const material = new THREE.MeshPhongMaterial({
-                    color: 0x073642,
+                    color: themeColors.base,
                     emissive: blockColor,
                     emissiveIntensity: 0.15,
                     shininess: 80,
-                    specular: 0xb58900
+                    specular: themeColors.specular
                 });
 
                 const block = new THREE.Mesh(geometry, material);
@@ -2594,7 +2640,7 @@
                 const edges = new THREE.EdgesGeometry(geometry);
                 const line = new THREE.LineSegments(
                     edges,
-                    new THREE.LineBasicMaterial({ color: 0xb58900, opacity: 0.6, transparent: true })
+                    new THREE.LineBasicMaterial({ color: themeColors.specular, opacity: 0.6, transparent: true })
                 );
                 block.add(line);
 
@@ -2607,16 +2653,46 @@
             document.getElementById('fsn-events').textContent = totalEvents;
         }
 
+        // Get theme block colors
+        function getThemeBlockColors() {
+            const t = window.themeThree || {};
+            return {
+                base: t['block-base'] || 0x073642,
+                specular: t['block-specular'] || 0xb58900
+            };
+        }
+
         function getColorForErrorRate(rate) {
-            // Green → Amber → Red based on error rate (Solarized)
-            if (rate < 0.05) return 0x859900;  // Solarized green
-            if (rate < 0.15) return 0x2aa198;  // Solarized cyan
-            if (rate < 0.30) return 0xcb4b16;  // Solarized orange
-            return 0xdc322f;  // Solarized red
+            // Green → Amber → Red based on error rate
+            // Uses CSS variable colors converted to hex for consistency
+            const style = getComputedStyle(document.documentElement);
+            const success = parseInt(style.getPropertyValue('--color-success').trim().replace('#', ''), 16) || 0x859900;
+            const info = parseInt(style.getPropertyValue('--color-info').trim().replace('#', ''), 16) || 0x2aa198;
+            const warning = parseInt(style.getPropertyValue('--color-warning').trim().replace('#', ''), 16) || 0xcb4b16;
+            const error = parseInt(style.getPropertyValue('--color-error').trim().replace('#', ''), 16) || 0xdc322f;
+
+            if (rate < 0.05) return success;
+            if (rate < 0.15) return info;
+            if (rate < 0.30) return warning;
+            return error;
         }
 
         function getColorForIndex(index) {
-            const colors = [0x859900, 0x2aa198, 0xb58900, 0xcb4b16, 0xdc322f, 0x268bd2, 0x6c71c4];
+            // Get colors from CSS variables for theme consistency
+            const style = getComputedStyle(document.documentElement);
+            const parseColor = (name, fallback) => {
+                const val = style.getPropertyValue(name).trim();
+                return val ? parseInt(val.replace('#', ''), 16) : fallback;
+            };
+            const colors = [
+                parseColor('--color-success', 0x859900),
+                parseColor('--color-info', 0x2aa198),
+                parseColor('--color-amber', 0xb58900),
+                parseColor('--color-warning', 0xcb4b16),
+                parseColor('--color-error', 0xdc322f),
+                0x268bd2,  // blue (not in our CSS vars)
+                0x6c71c4   // violet (not in our CSS vars)
+            ];
             return colors[index % colors.length];
         }
 
@@ -2755,14 +2831,15 @@
                 const col = index % gridSize;
                 const height = Math.max(2, (event.count / maxCount) * 20);
 
+                const themeColors = getThemeBlockColors();
                 const geometry = new THREE.BoxGeometry(5, height, 5);
                 const blockColor = getColorForIndex(index);
                 const material = new THREE.MeshPhongMaterial({
-                    color: 0x073642,
+                    color: themeColors.base,
                     emissive: blockColor,
                     emissiveIntensity: 0.2,
                     shininess: 80,
-                    specular: 0xb58900
+                    specular: themeColors.specular
                 });
 
                 const block = new THREE.Mesh(geometry, material);
@@ -2777,7 +2854,7 @@
                 const edges = new THREE.EdgesGeometry(geometry);
                 const line = new THREE.LineSegments(
                     edges,
-                    new THREE.LineBasicMaterial({ color: 0xb58900, opacity: 0.6, transparent: true })
+                    new THREE.LineBasicMaterial({ color: themeColors.specular, opacity: 0.6, transparent: true })
                 );
                 block.add(line);
 

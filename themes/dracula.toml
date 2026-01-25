@@ -1,0 +1,37 @@
+[meta]
+name = "Dracula"
+author = "Zeno Rocha"
+url = "https://draculatheme.com/"
+
+[colors]
+color-amber = "#ffb86c"
+color-gold = "#f1fa8c"
+color-bronze = "#ff79c6"
+color-void = "#282a36"
+color-charcoal = "#21222c"
+color-containment = "#343746"
+color-grid = "#44475a"
+color-success = "#50fa7b"
+color-info = "#8be9fd"
+color-warning = "#ffb86c"
+color-error = "#ff5555"
+text-primary = "#f8f8f2"
+text-secondary = "#bfbfbf"
+text-muted = "#6272a4"
+text-terminal = "#50fa7b"
+
+[effects]
+glow-amber = "0 0 10px rgba(255, 184, 108, 0.3)"
+glow-success = "0 0 10px rgba(80, 250, 123, 0.3)"
+shadow-card = "0 4px 16px rgba(0, 0, 0, 0.4)"
+
+[three]
+fog = 0x282a36
+grid-primary = 0xffb86c
+grid-secondary = 0x44475a
+ambient-light = 0x21222c
+directional-light = 0xffb86c
+point-light-1 = 0x50fa7b
+point-light-2 = 0x8be9fd
+block-base = 0x21222c
+block-specular = 0xffb86c
