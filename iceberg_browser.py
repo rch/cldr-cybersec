@@ -310,22 +310,28 @@ def get_events():
         # Convert to pandas DataFrame
         df = scan.to_pandas()
         
-        # Apply filters
-        if event_name:
+        # Apply filters (check column existence first)
+        if event_name and "event_name" in df.columns:
             df = df[df["event_name"].str.contains(event_name, case=False, na=False)]
-        if user_identity:
+        if user_identity and "user_identity" in df.columns:
             df = df[df["user_identity"].str.contains(user_identity, case=False, na=False)]
-        if source_ip:
+        if source_ip and "source_ip_address" in df.columns:
             df = df[df["source_ip_address"] == source_ip]
-        if region:
+        elif source_ip and "source_ip" in df.columns:
+            df = df[df["source_ip"] == source_ip]
+        if region and "region" in df.columns:
             df = df[df["region"] == region]
+        elif region and "aws_region" in df.columns:
+            df = df[df["aws_region"] == region]
         
         # Get total count before pagination
         total_count = len(df)
         
-        # Sort by timestamp descending
-        if "event_time" in df.columns:
-            df = df.sort_values("event_time", ascending=False)
+        # Sort by timestamp descending (check multiple possible column names)
+        for ts_col in ["event_time", "event_timestamp", "eventTime", "processing_time"]:
+            if ts_col in df.columns:
+                df = df.sort_values(ts_col, ascending=False)
+                break
         
         # Apply pagination
         df = df.iloc[offset:offset + limit]
@@ -417,10 +423,17 @@ def get_event_detail(event_id):
         
         scan = table.scan()
         df = scan.to_pandas()
-        
-        # Find event by ID
-        event_df = df[df["event_id"] == event_id]
-        
+
+        # Find event by ID - check both possible column names
+        event_df = None
+        if "event_id" in df.columns:
+            event_df = df[df["event_id"] == event_id]
+        elif "eventID" in df.columns:
+            event_df = df[df["eventID"] == event_id]
+        else:
+            # List available columns for debugging
+            return jsonify({"error": f"No event_id column found. Available columns: {list(df.columns)}"}), 500
+
         if event_df.empty:
             return jsonify({"error": "Event not found"}), 404
         

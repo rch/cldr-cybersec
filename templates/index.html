@@ -1379,8 +1379,12 @@
             card.className = 'event-card';
 
             // If single event, use its ID. If group, use first event's ID (or handle group click)
-            const eventId = group.event_id || group.id;
-            card.onclick = () => showEventDetail(eventId);
+            // Handle both snake_case (from Iceberg schema) and camelCase (from CloudTrail JSON)
+            const eventId = group.event_id || group.eventID || group.id;
+            if (eventId) {
+                card.onclick = () => showEventDetail(eventId);
+                card.style.cursor = 'pointer';
+            }
 
             // Add color border based on event type
             const eventName = group.event_name || group.name || 'Unknown Event';
@@ -1603,7 +1607,11 @@
             events.forEach(event => {
                 const row = document.createElement('tr');
                 row.className = 'event-row';
-                row.onclick = () => showEventDetail(event.event_id || event.id);
+                const eventId = event.event_id || event.eventID || event.id;
+                if (eventId) {
+                    row.onclick = () => showEventDetail(eventId);
+                    row.style.cursor = 'pointer';
+                }
 
                 const timestamp = event.event_time ? new Date(event.event_time).toLocaleString() : '-';
                 const errorBadge = event.error_code ?
