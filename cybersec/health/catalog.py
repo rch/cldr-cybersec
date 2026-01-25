@@ -377,6 +377,25 @@ PYFLINK_012 = FailureMode(
     solution_level=AutomationLevel.A,
 )
 
+PYFLINK_013 = FailureMode(
+    failure_mode_id="PYFLINK_013",
+    category="pyflink",
+    name="Git Submodules Not Initialized",
+    description="Required git submodules (Flink, Iceberg) not initialized",
+    base_severity=9,   # Critical - can't build required components
+    base_occurrence=6,  # High - common on fresh clone
+    base_detection=1,   # Very easy to detect
+    symptom="Missing gradlew, pom.xml, or other build files in thirdparty/",
+    cause="Repository cloned without --recursive or submodule update not run",
+    detection_method="Check for thirdparty/iceberg/gradlew or thirdparty/flink/pom.xml",
+    remediation_steps=[
+        "Initialize submodules: git submodule update --init --recursive",
+        "Then run bootstrap: devenv tasks run restart:clean",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
 # Infrastructure failure modes
 INFRA_001 = FailureMode(
     failure_mode_id="INFRA_001",
@@ -480,6 +499,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "PYFLINK_010": PYFLINK_010,
     "PYFLINK_011": PYFLINK_011,
     "PYFLINK_012": PYFLINK_012,
+    "PYFLINK_013": PYFLINK_013,
     "INFRA_001": INFRA_001,
     "INFRA_002": INFRA_002,
     "INFRA_003": INFRA_003,
@@ -490,7 +510,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
 CATEGORIES: dict[str, list[str]] = {
     "iceberg": ["ICE_001", "ICE_002", "ICE_003"],
     "flink": ["FLINK_001", "FLINK_002", "FLINK_003"],
-    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_010", "PYFLINK_011", "PYFLINK_012"],
+    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_010", "PYFLINK_011", "PYFLINK_012", "PYFLINK_013"],
     "infra": ["INFRA_001", "INFRA_002", "INFRA_003"],
     "data": ["DATA_001"],
 }
