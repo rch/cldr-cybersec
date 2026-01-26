@@ -36,9 +36,18 @@ from .facts import Fact, FactType
 from .rules import Rule, Condition, Action, when, then
 from .iceberg import IcebergOptimizer, TableStats
 from .health import HealthRuleEngine, HealthCheckPlan
+from .backward import (
+    BackwardChainer,
+    Goal,
+    ProofStatus,
+    ProofNode,
+    GapAnalysis,
+    Explanation,
+)
+from .hybrid import HybridEngine, HybridResult, InferenceMode, create_diagnostic_engine
 
 __all__ = [
-    # Core engine
+    # Core forward-chaining engine
     "ReteEngine",
     "Activation",
     "SolveResult",
@@ -51,6 +60,18 @@ __all__ = [
     "Action",
     "when",
     "then",
+    # Backward chaining
+    "BackwardChainer",
+    "Goal",
+    "ProofStatus",
+    "ProofNode",
+    "GapAnalysis",
+    "Explanation",
+    # Hybrid engine
+    "HybridEngine",
+    "HybridResult",
+    "InferenceMode",
+    "create_diagnostic_engine",
     # Iceberg optimization
     "IcebergOptimizer",
     "TableStats",
