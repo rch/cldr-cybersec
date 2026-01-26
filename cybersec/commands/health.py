@@ -712,6 +712,334 @@ def _format_fix(data: dict, failure_mode_id: str) -> str:
     return "\n".join(lines)
 
 
+# === RETE-based explain and goal commands ===
+
+async def cmd_health_explain(cmd: ParsedCommand) -> CommandResult:
+    """Explain the reasoning behind a health goal's status.
+
+    Uses backward chaining to show WHY a goal is proven, disproven, or unknown.
+    Provides a step-by-step reasoning trace for explainability.
+
+    Args:
+        <goal_id>  Goal to explain (e.g., pyflink_ready, infrastructure_healthy)
+
+    Options:
+        --tree      Show proof tree visualization
+        --gaps      Show gap analysis (what's missing)
+        --what-if   Hypothetical: assume these checks pass (comma-separated)
+        --json, -j  Output as JSON
+    """
+    from ..health.rete_runner import get_rete_runner
+    from ..bootstrap import BootstrapService
+    from ..health.models import HealthContext
+
+    if not cmd.args:
+        # List available goals
+        runner = get_rete_runner()
+        goals = runner.list_goals()
+
+        lines = ["Available diagnostic goals:", ""]
+        for g in goals:
+            status_icon = {"proven": "✓", "disproven": "✗", "unknown": "?"}.get(g["status"], "?")
+            lines.append(f"  {status_icon} {g['goal_id']}")
+            lines.append(f"      {g['description']}")
+            lines.append("")
+
+        lines.append("Usage: /health explain <goal_id>")
+        lines.append("Example: /health explain pyflink_ready")
+
+        return CommandResult(
+            success=True,
+            data={"goals": goals},
+            formatted="\n".join(lines),
+        )
+
+    goal_id = cmd.args[0].lower()
+
+    # Initialize context and runner
+    service = BootstrapService()
+    config = service.get_config()
+
+    ctx = HealthContext(
+        config=config,
+        flink_url=config.flink_url or "http://localhost:8081",
+        minio_endpoint=config.minio_endpoint or "http://localhost:9010",
+        polaris_url=config.polaris_api_url or "http://localhost:8181",
+        postgres_port=config.postgres_port or 5438,
+        browser_port=config.iceberg_browser_port or 5050,
+    )
+
+    runner = get_rete_runner()
+
+    # Check infrastructure first to populate facts
+    await runner._check_infrastructure(ctx)
+
+    # Handle --what-if option
+    what_if_checks = cmd.options.get("what-if", "")
+    if what_if_checks:
+        check_ids = [c.strip().upper() for c in what_if_checks.split(",")]
+        explanation = runner.what_if(goal_id, check_ids)
+        data = {
+            "goal_id": goal_id,
+            "mode": "what_if",
+            "hypothetical_checks": check_ids,
+            "conclusion": explanation.conclusion.value,
+            "summary": explanation.summary,
+            "steps": [{"step": s.step_number, "action": s.action, "description": s.description, "result": s.result} for s in explanation.steps],
+        }
+        formatted = _format_explanation(explanation, what_if=True, check_ids=check_ids)
+        return CommandResult(success=True, data=data, formatted=formatted)
+
+    # Handle --gaps option
+    if cmd.options.get("gaps"):
+        gaps = runner.analyze_gaps(goal_id)
+        data = gaps.to_dict()
+        formatted = _format_gaps(gaps)
+        return CommandResult(success=True, data=data, formatted=formatted)
+
+    # Handle --tree option
+    if cmd.options.get("tree"):
+        tree = runner.get_proof_tree(goal_id)
+        data = tree.to_dict()
+        formatted = _format_proof_tree(tree)
+        return CommandResult(success=True, data=data, formatted=formatted)
+
+    # Default: show explanation
+    explanation = runner.explain_goal(goal_id)
+    data = {
+        "goal_id": goal_id,
+        "conclusion": explanation.conclusion.value,
+        "summary": explanation.summary,
+        "steps": [{"step": s.step_number, "action": s.action, "description": s.description, "result": s.result} for s in explanation.steps],
+    }
+
+    # Also include suggestion for next action
+    suggestion = runner.suggest_next_check(goal_id)
+    if suggestion:
+        data["suggested_next"] = suggestion
+
+    formatted = _format_explanation(explanation, suggestion=suggestion)
+
+    return CommandResult(
+        success=True,
+        data=data,
+        formatted=formatted,
+    )
+
+
+async def cmd_health_objective(cmd: ParsedCommand) -> CommandResult:
+    """Run checks toward a specific diagnostic objective.
+
+    Uses RETE inference to run only the checks needed to prove/disprove the objective.
+    Skips checks whose dependencies aren't met.
+
+    Args:
+        <objective_id>  Objective to work toward (e.g., pyflink_ready, e2e_ready)
+
+    Options:
+        --max-checks <n>  Maximum checks to run (default: 20)
+        --json, -j        Output as JSON
+    """
+    from ..health.rete_runner import get_rete_runner, ReteHealthResult
+    from ..bootstrap import BootstrapService
+    from ..health.models import HealthContext
+
+    if not cmd.args:
+        return CommandResult(
+            success=False,
+            error="Missing required argument: objective_id (e.g., pyflink_ready, e2e_ready)",
+        )
+
+    goal_id = cmd.args[0].lower()  # internally still called goal_id
+    max_checks = int(cmd.options.get("max-checks", cmd.options.get("max_checks", 20)))
+
+    service = BootstrapService()
+    config = service.get_config()
+
+    ctx = HealthContext(
+        config=config,
+        flink_url=config.flink_url or "http://localhost:8081",
+        minio_endpoint=config.minio_endpoint or "http://localhost:9010",
+        polaris_url=config.polaris_api_url or "http://localhost:8181",
+        postgres_port=config.postgres_port or 5438,
+        browser_port=config.iceberg_browser_port or 5050,
+    )
+
+    runner = get_rete_runner()
+    result = await runner.run_for_goal(goal_id, ctx, max_checks=max_checks)
+
+    data = {
+        "goal_id": result.goal_id,
+        "status": result.status.value,
+        "checks_run": result.checks_run,
+        "checks_skipped": result.checks_skipped,
+        "skip_reasons": result.skip_reasons,
+        "issues": result.issues,
+    }
+
+    formatted = _format_goal_result(result)
+
+    return CommandResult(
+        success=result.status.value != "disproven",
+        data=data,
+        formatted=formatted,
+    )
+
+
+def _format_explanation(explanation, what_if=False, check_ids=None, suggestion=None) -> str:
+    """Format explanation for human display."""
+    lines = []
+
+    if what_if:
+        lines.append("What-If Analysis")
+        lines.append("=" * 50)
+        lines.append(f"Hypothetical: Assuming checks pass: {', '.join(check_ids or [])}")
+        lines.append("")
+
+    lines.append(f"Goal: {explanation.goal_id}")
+    lines.append("")
+
+    status_icon = {"proven": "✓", "disproven": "✗", "unknown": "?"}.get(explanation.conclusion.value, "?")
+    lines.append(f"Conclusion: {status_icon} {explanation.conclusion.value.upper()}")
+    lines.append(f"Summary: {explanation.summary}")
+    lines.append("")
+
+    lines.append("Reasoning Trace:")
+    lines.append("-" * 40)
+
+    for step in explanation.steps:
+        action_icon = {
+            "start": "▶",
+            "check": "◆",
+            "conclude": "■",
+            "infer": "→",
+        }.get(step.action, "•")
+
+        if step.result:
+            result_icon = ""
+            if "SATISFIED" in step.result:
+                result_icon = "✓"
+            elif "FAILED" in step.result:
+                result_icon = "✗"
+            elif "UNKNOWN" in step.result:
+                result_icon = "?"
+            lines.append(f"  {step.step_number}. {action_icon} {step.description}")
+            lines.append(f"       {result_icon} {step.result}")
+        else:
+            lines.append(f"  {step.step_number}. {action_icon} {step.description}")
+
+    if suggestion and suggestion.get("check_id"):
+        lines.append("")
+        lines.append("Suggested Next Action:")
+        lines.append(f"  Run check: {suggestion['check_id']}")
+        if suggestion.get("name"):
+            lines.append(f"  ({suggestion['name']})")
+        lines.append(f"  Cost: {suggestion.get('cost', 'N/A')}")
+        lines.append(f"  Remaining unknowns: {suggestion.get('remaining_unknowns', 'N/A')}")
+
+    return "\n".join(lines)
+
+
+def _format_gaps(gaps) -> str:
+    """Format gap analysis for human display."""
+    lines = []
+    lines.append(f"Gap Analysis: {gaps.goal_id}")
+    lines.append("=" * 50)
+    lines.append("")
+
+    status_icon = {"proven": "✓", "disproven": "✗", "unknown": "?"}.get(gaps.status.value, "?")
+    lines.append(f"Status: {status_icon} {gaps.status.value.upper()}")
+    lines.append("")
+
+    if gaps.missing_facts:
+        lines.append(f"Missing Facts ({len(gaps.missing_facts)}):")
+        for mf in gaps.missing_facts:
+            lines.append(f"  • {mf}")
+        lines.append("")
+
+    if gaps.blocking_conditions:
+        lines.append("Blocking Conditions:")
+        for bc in gaps.blocking_conditions:
+            reason = bc.get("reason", "")
+            if bc.get("actual") is not None:
+                lines.append(f"  ✗ {bc['pattern']} expected {bc['expected']}, got {bc['actual']}")
+            else:
+                lines.append(f"  ? {bc['pattern']} - {reason}")
+        lines.append("")
+
+    if gaps.acquisition_plan:
+        lines.append("Acquisition Plan (by cost):")
+        for i, acq in enumerate(gaps.acquisition_plan, 1):
+            lines.append(f"  {i}. {acq['fact_pattern']} (cost: {acq['cost']})")
+            lines.append(f"       {acq['action']}")
+
+    return "\n".join(lines)
+
+
+def _format_proof_tree(tree, indent=0) -> str:
+    """Format proof tree for human display."""
+    lines = []
+
+    if indent == 0:
+        lines.append("Proof Tree")
+        lines.append("=" * 50)
+        lines.append("")
+
+    prefix = "  " * indent
+    status_icon = {"proven": "✓", "disproven": "✗", "unknown": "?"}.get(tree.status.value, "?")
+
+    if tree.node_type == "goal":
+        lines.append(f"{prefix}{status_icon} {tree.node_id} ({tree.status.value})")
+        lines.append(f"{prefix}   {tree.description}")
+    else:
+        actual = f" = {tree.actual_value}" if tree.actual_value is not None else ""
+        lines.append(f"{prefix}├─ {status_icon} {tree.description}{actual}")
+
+    for child in tree.children:
+        lines.append(_format_proof_tree(child, indent + 1))
+
+    return "\n".join(lines)
+
+
+def _format_goal_result(result) -> str:
+    """Format goal-directed health check result."""
+    lines = []
+    lines.append(f"Goal: {result.goal_id}")
+    lines.append("=" * 50)
+    lines.append("")
+
+    status_icon = {"proven": "✓", "disproven": "✗", "unknown": "?"}.get(result.status.value, "?")
+    lines.append(f"Status: {status_icon} {result.status.value.upper()}")
+    lines.append("")
+
+    if result.checks_run:
+        lines.append(f"Checks Run ({len(result.checks_run)}):")
+        for check in result.checks_run:
+            lines.append(f"  ✓ {check}")
+        lines.append("")
+
+    if result.checks_skipped:
+        lines.append(f"Checks Skipped ({len(result.checks_skipped)}):")
+        for check in result.checks_skipped:
+            reason = result.skip_reasons.get(check, "Dependency not met")
+            lines.append(f"  ⏭ {check}: {reason}")
+        lines.append("")
+
+    if result.issues:
+        lines.append("Issues Detected:")
+        for issue in result.issues:
+            lines.append(f"  ✗ [{issue['failure_mode_id']}] {issue.get('name', 'Unknown')}")
+            lines.append(f"      {issue.get('message', '')}")
+            lines.append(f"      RPN: {issue.get('rpn', 'N/A')}")
+        lines.append("")
+
+    if result.explanation:
+        lines.append("Summary:")
+        lines.append(f"  {result.explanation.summary}")
+
+    return "\n".join(lines)
+
+
 # === Register commands ===
 
 def register_health_commands():
@@ -789,5 +1117,44 @@ def register_health_commands():
         examples=[
             "/health fix ICE_001",
             "/health fix FLINK_002 --execute",
+        ],
+    )
+
+    register_command(
+        "health.explain",
+        cmd_health_explain,
+        description="Explain reasoning behind a health objective's status",
+        args=[
+            {"name": "objective_id", "required": False, "description": "Objective to explain (omit to list all)"},
+        ],
+        options=[
+            {"name": "tree", "description": "Show proof tree visualization"},
+            {"name": "gaps", "description": "Show gap analysis (what's missing)"},
+            {"name": "what-if", "description": "Hypothetical: assume these checks pass (comma-separated)"},
+            {"name": "json", "short": "j", "description": "Output as JSON"},
+        ],
+        examples=[
+            "/health explain",
+            "/health explain pyflink_ready",
+            "/health explain e2e_ready --tree",
+            "/health explain pyflink_ready --gaps",
+            "/health explain pyflink_ready --what-if PYFLINK_011,PYFLINK_012",
+        ],
+    )
+
+    register_command(
+        "health.objective",
+        cmd_health_objective,
+        description="Run checks toward a specific diagnostic objective",
+        args=[
+            {"name": "objective_id", "required": True, "description": "Objective to work toward (e.g., pyflink_ready)"},
+        ],
+        options=[
+            {"name": "max-checks", "description": "Maximum checks to run (default: 20)"},
+            {"name": "json", "short": "j", "description": "Output as JSON"},
+        ],
+        examples=[
+            "/health objective pyflink_ready",
+            "/health objective e2e_ready --max-checks 10",
         ],
     )
