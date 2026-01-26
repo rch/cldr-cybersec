@@ -62,7 +62,7 @@ async def check_pyflink_installed(ctx: HealthContext) -> CheckResult:
                 "PyFlink not installed in devenv Python",
                 failure_mode_id="PYFLINK_001",
                 rpn=rpn,
-                remediation="Run: /health fix --apply",
+                remediation="Run: uv sync",
                 python=str(devenv_python),
                 error=result.stderr.strip(),
                 duration_ms=duration,

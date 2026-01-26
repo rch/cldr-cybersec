@@ -271,10 +271,11 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
         browser_port=config.iceberg_browser_port or 5050,
     )
 
-    # Automatable failure modes
+    # Automatable failure modes (can be fixed without user intervention)
+    # Note: PYFLINK_001 (PyFlink not installed) requires manual `uv sync`
     automatable_fixes = {
         "FLINK_004", "FLINK_005",
-        "PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_005",
+        "PYFLINK_002", "PYFLINK_003", "PYFLINK_005",
         "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_011", "PYFLINK_012", "PYFLINK_014",
         "INFRA_004",
     }
@@ -341,10 +342,12 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
             fm_id = issue.get("failure_mode_id", "?")
             name = issue.get("name", issue.get("message", "Unknown"))
             lines.append(f"  - [{fm_id}] {name}")
-            if issue.get("remediation"):
-                steps = issue.get("remediation", [])
-                if isinstance(steps, list) and steps:
-                    lines.append(f"    → {steps[0]}")
+            remediation = issue.get("remediation")
+            if remediation:
+                if isinstance(remediation, list) and remediation:
+                    lines.append(f"    → {remediation[0]}")
+                elif isinstance(remediation, str):
+                    lines.append(f"    → {remediation}")
         return CommandResult(
             success=True,
             data={"mode": mode, "issues": issues, "fixes": []},
