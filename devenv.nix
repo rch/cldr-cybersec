@@ -659,11 +659,10 @@ except Exception as e:
         fi
       '';
       process-compose = {
-        # Disable auto-start - job submission is handled by verify_e2e() in restart:clean
         availability = {
-          restart = "no";
+          restart = "on_failure";
+          max_restarts = 3;
         };
-        disabled = true;
         depends_on = {
           flink-taskmanager = {
             condition = "process_healthy";

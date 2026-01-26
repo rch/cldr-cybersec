@@ -286,75 +286,36 @@ wait_for_flink() {
     return 1
 }
 
-# Start CloudTrail DataGen Flink job
-start_datagen() {
-    log_info "Starting CloudTrail DataGen Flink job..."
-    
+# Wait for CloudTrail DataGen Flink job to be running
+# Job submission is handled by devenv's cloudtrail-datagen process
+wait_for_datagen() {
+    local max_attempts="${1:-24}"
+    local sleep_seconds="${2:-5}"
+
+    log_info "Waiting for CloudTrail DataGen job to start..."
+
     # Check if Flink is ready
     if ! curl -s http://localhost:8081/overview >/dev/null 2>&1; then
         log_error "Flink is not running or not ready"
         return 1
     fi
-    
-    # Check if job is already running
-    # Note: tr -d removes any whitespace/newlines for portable integer comparison
-    local running_jobs=$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | grep -c '"state":"RUNNING"' 2>/dev/null | tr -d '[:space:]' || echo "0")
-    if [ -z "$running_jobs" ]; then running_jobs=0; fi
-    if [ "$running_jobs" -gt 0 ]; then
-        log_success "CloudTrail DataGen job already running"
-        return 0
-    fi
-    
-    # Set up Flink environment
-    export FLINK_HOME="$PWD/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1"
-    
-    if [ ! -f "$FLINK_HOME/bin/flink" ]; then
-        log_error "Flink binary not found at $FLINK_HOME/bin/flink"
-        return 1
-    fi
-    
-    if [ ! -f "flink_jobs/cloudtrail_datagen.py" ]; then
-        log_error "CloudTrail DataGen script not found at flink_jobs/cloudtrail_datagen.py"
-        return 1
-    fi
-    
-    # Submit the job in background
-    # Use uv venv Python which has PyFlink installed
-    local PYCLIENT
-    if [ -f "$PWD/.devenv/state/venv/bin/python3" ]; then
-        PYCLIENT="$PWD/.devenv/state/venv/bin/python3"
-    elif [ -f "$PWD/.devenv/profile/bin/python3" ]; then
-        PYCLIENT="$PWD/.devenv/profile/bin/python3"
-    else
-        PYCLIENT="python3"
-    fi
 
-    log_info "Submitting CloudTrail DataGen job to Flink..."
-    log_info "Using Python: $PYCLIENT"
-    "$FLINK_HOME/bin/flink" run -pyclientexec "$PYCLIENT" -py flink_jobs/cloudtrail_datagen.py > /tmp/cloudtrail.log 2>&1 &
-    local submit_pid=$!
-    echo $submit_pid > /tmp/cloudtrail.pid
-
-    # Wait for job to be submitted and start running (PyFlink takes ~10-15 seconds to initialize)
-    local max_attempts=12
-    local attempt=1
-    while [ $attempt -le $max_attempts ]; do
-        sleep 5
-        running_jobs=$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | jq '[.jobs[] | select(.state == "RUNNING")] | length' 2>/dev/null | tr -d '[:space:]' || echo "0")
+    for ((i=1; i<=max_attempts; i++)); do
+        local running_jobs=$(curl -s http://localhost:8081/jobs/overview 2>/dev/null | jq '[.jobs[] | select(.state == "RUNNING")] | length' 2>/dev/null | tr -d '[:space:]' || echo "0")
         if [ -z "$running_jobs" ]; then running_jobs=0; fi
         if [ "$running_jobs" -gt 0 ]; then
-            log_success "CloudTrail DataGen job started successfully"
+            log_success "CloudTrail DataGen job is running"
             return 0
         fi
-        log_info "Attempt $attempt/$max_attempts - Waiting for job to start..."
-        attempt=$((attempt + 1))
+
+        if [ $i -lt $max_attempts ]; then
+            log_info "Attempt $i/$max_attempts - Waiting for job to start..."
+            sleep $sleep_seconds
+        fi
     done
 
-    log_error "Failed to start CloudTrail DataGen job after $max_attempts attempts"
-    if [ -f /tmp/cloudtrail.log ]; then
-        log_info "Last 10 lines of job log:"
-        tail -10 /tmp/cloudtrail.log | sed 's/^/  /'
-    fi
+    log_error "CloudTrail DataGen job not running after $((max_attempts * sleep_seconds)) seconds"
+    log_info "Check cloudtrail-datagen process in process-compose"
     return 1
 }
 
@@ -446,7 +407,7 @@ verify_e2e() {
     fi
     
     if $all_ok; then
-        if start_datagen; then
+        if wait_for_datagen 24 5; then
             echo
             if verify_events 1 60; then
                 echo
@@ -455,7 +416,7 @@ verify_e2e() {
                 all_ok=false
             fi
         else
-            log_warn "DataGen failed to start - manual start may be required"
+            log_warn "DataGen not running - check cloudtrail-datagen process"
             all_ok=false
         fi
     fi
@@ -497,18 +458,19 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
         verify-e2e)
             verify_e2e
             ;;
-        start-datagen)
-            start_datagen
+        wait-datagen)
+            wait_for_datagen "${2:-24}" "${3:-5}"
             ;;
         trigger-init)
             trigger_catalog_init "${2:-3}" "${3:-./setup_polaris_catalog.sh}"
             ;;
         *)
-            echo "Usage: $0 {wait-postgres|wait-polaris|wait-flink|verify-bootstrap|verify-catalog|verify-events|verify-all|verify-e2e|start-datagen|trigger-init} [args...]"
+            echo "Usage: $0 {wait-postgres|wait-polaris|wait-flink|wait-datagen|verify-bootstrap|verify-catalog|verify-events|verify-all|verify-e2e|trigger-init} [args...]"
             echo
             echo "Commands:"
             echo "  wait-postgres [max_attempts] [sleep_seconds]   - Wait for PostgreSQL with schema"
             echo "  wait-polaris [max_attempts] [sleep_seconds]    - Wait for Polaris health endpoint"
+            echo "  wait-datagen [max_attempts] [sleep_seconds]    - Wait for DataGen job to be running"
             echo "  verify-bootstrap                                 - Verify admin principal exists"
             echo "  verify-catalog [catalog_name]                   - Verify catalog exists via API"
             echo "  verify-all                                       - Run all verifications"
