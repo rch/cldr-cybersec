@@ -235,18 +235,19 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
     For TIER_2/MANUAL issues (RPN > 200), returns instructions only.
 
     Args:
-        <id>  Failure mode ID to fix (e.g., ICE_001)
+        <id>  Failure mode ID to fix (e.g., ICE_001, FLINK_004)
 
     Options:
         --execute   Execute remediation (default: dry-run)
         --json, -j  Output as JSON
     """
     from ..health.catalog import get_failure_mode
+    from ..health.pyflink_fixes import apply_pyflink_fixes
 
     if not cmd.args:
         return CommandResult(
             success=False,
-            error="Missing required argument: failure_mode_id (e.g., FLINK_001)",
+            error="Missing required argument: failure_mode_id (e.g., FLINK_001, FLINK_004)",
         )
 
     failure_mode_id = cmd.args[0].upper()
@@ -262,6 +263,51 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
     rpn = failure_mode.calculate_rpn()
     tier = rpn.tier
 
+    # Check if this failure mode has an automated fix
+    automatable_fixes = {
+        "FLINK_004", "FLINK_005",
+        "PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_005",
+        "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_011", "PYFLINK_012", "PYFLINK_014",
+    }
+
+    if failure_mode_id in automatable_fixes:
+        # Create a mock diagnostics dict with just this issue
+        mock_diagnostics = {
+            "issues": [{
+                "failure_mode_id": failure_mode_id,
+                "name": failure_mode.name,
+                "severity": "warning",
+                "symptom": failure_mode.symptom,
+                "rpn": rpn.rpn,
+                "remediation": failure_mode.remediation_steps,
+            }],
+            "python_environment": {
+                "executable": __import__("sys").executable,
+                "devenv_python": __import__("os").environ.get("DEVENV_ROOT", "") + "/.devenv/profile/bin/python3",
+                "devenv_python_exists": True,
+            },
+        }
+
+        fix_results = await apply_pyflink_fixes(mock_diagnostics, dry_run=dry_run)
+
+        if fix_results:
+            fix_result = fix_results[0]
+            data = {
+                "failure_mode_id": failure_mode_id,
+                "tier": tier.name,
+                "dry_run": dry_run,
+                "fix_result": fix_result,
+            }
+
+            formatted = _format_single_fix(fix_result, failure_mode, dry_run)
+
+            return CommandResult(
+                success=fix_result.get("success", False) or dry_run,
+                data=data,
+                formatted=formatted,
+            )
+
+    # Default behavior for non-automatable fixes
     data = {
         "failure_mode_id": failure_mode_id,
         "tier": tier.name,
@@ -281,6 +327,75 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
         data=data,
         formatted=formatted,
     )
+
+
+def _format_single_fix(fix_result: dict, failure_mode, dry_run: bool) -> str:
+    """Format a single fix result for human display."""
+    lines = []
+    fm_id = fix_result.get("failure_mode_id", "?")
+    action = fix_result.get("action", "unknown")
+    success = fix_result.get("success", False)
+    message = fix_result.get("message", "")
+
+    lines.append(f"Fix: {fm_id} - {failure_mode.name}")
+    lines.append("=" * 50)
+    lines.append("")
+
+    if dry_run:
+        lines.append("DRY RUN - Preview of changes:")
+        lines.append("")
+
+        if action == "update_datagen_source":
+            lines.append(f"  File: {fix_result.get('file', 'unknown')}")
+            changes = fix_result.get("changes", [])
+            for change in changes:
+                lines.append(f"  → {change}")
+
+        elif action == "update_flink_config":
+            lines.append(f"  Config: {fix_result.get('config_file', 'unknown')}")
+            if fix_result.get("lines_to_add"):
+                lines.append("  Add:")
+                for line in fix_result["lines_to_add"]:
+                    lines.append(f"    + {line}")
+
+        elif action == "rebuild_iceberg_jars":
+            lines.append(f"  {message}")
+            if fix_result.get("existing_jars"):
+                lines.append(f"  Existing JARs to remove: {len(fix_result['existing_jars'])}")
+            if fix_result.get("steps"):
+                lines.append("")
+                lines.append("  Steps:")
+                for i, step in enumerate(fix_result["steps"], 1):
+                    lines.append(f"    {i}. {step}")
+
+        else:
+            lines.append(f"  {message}")
+
+        lines.append("")
+        lines.append("To apply this fix:")
+        lines.append(f"  cybersec --cmd '/health fix {fm_id} --execute'")
+
+    else:
+        icon = "✓" if success else "✗"
+        lines.append(f"{icon} {message}")
+
+        if fix_result.get("backup"):
+            lines.append(f"  Backup: {fix_result['backup']}")
+
+        if fix_result.get("removed_lines"):
+            lines.append("  Removed:")
+            for line in fix_result["removed_lines"]:
+                lines.append(f"    - {line}")
+
+        if fix_result.get("restart_required"):
+            lines.append("")
+            lines.append("⚠ Restart required to apply changes:")
+            lines.append(f"  {fix_result.get('restart_command', 'devenv tasks run restart:clean')}")
+
+        if fix_result.get("already_fixed"):
+            lines.append("  (No changes needed - already in correct state)")
+
+    return "\n".join(lines)
 
 
 # === Formatting helpers ===

@@ -396,6 +396,71 @@ PYFLINK_013 = FailureMode(
     solution_level=AutomationLevel.A,
 )
 
+# Flink job runtime failure modes
+FLINK_004 = FailureMode(
+    failure_mode_id="FLINK_004",
+    category="flink",
+    name="DataGen Job Finishes Immediately",
+    description="CloudTrail DataGen job completes immediately instead of running continuously",
+    base_severity=7,   # High - E2E verification fails, no continuous data
+    base_occurrence=5,  # Moderate - happens when datagen has bounded rows
+    base_detection=2,   # Easy - check job status shows FINISHED quickly
+    symptom="DataGen job submitted but immediately shows FINISHED, no RUNNING jobs, E2E verification times out",
+    cause="DataGen source configured with bounded row count (fields.event_id.end), job completes after generating all rows",
+    detection_method="Check Flink jobs API: job submitted but status is FINISHED within seconds, jobs-running=0",
+    remediation_steps=[
+        "Remove bounded row configuration from datagen source (remove fields.event_id.end)",
+        "Or: Increase event_id.end to a very large number for longer runtime",
+        "Or: Use 'number-of-rows' with negative value (-1) for unbounded",
+        "Restart the job: devenv tasks run restart:clean",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.B,
+)
+
+FLINK_005 = FailureMode(
+    failure_mode_id="FLINK_005",
+    category="flink",
+    name="Job Submission Timeout",
+    description="Flink job submitted but never transitions to RUNNING state",
+    base_severity=7,   # High - job not processing data
+    base_occurrence=4,  # Moderate
+    base_detection=3,   # Good - can monitor job state transitions
+    symptom="Job shows in CREATED or INITIALIZING state for >60 seconds, verification times out",
+    cause="Resource constraints, missing JARs, Python environment issues, or cluster overload",
+    detection_method="Monitor job state: CREATED/INITIALIZING for >60s without transitioning to RUNNING",
+    remediation_steps=[
+        "Check TaskManager has available slots: curl http://localhost:8081/overview",
+        "Check JobManager logs for errors: $FLINK_HOME/log/flink-*-standalonesession-*.log",
+        "Verify Iceberg JARs installed: ls $FLINK_HOME/lib/iceberg-*",
+        "Run PyFlink diagnostics: cybersec --cmd '/health pyflink'",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.B,
+)
+
+PYFLINK_014 = FailureMode(
+    failure_mode_id="PYFLINK_014",
+    category="pyflink",
+    name="Iceberg JAR Version Mismatch",
+    description="Multiple Iceberg JAR versions in classpath causing serialization failures",
+    base_severity=9,   # Critical - jobs fail immediately with cryptic errors
+    base_occurrence=5,  # Moderate - happens when JARs built at different times or from different sources
+    base_detection=3,   # Good - can detect from job exception logs
+    symptom="InvalidClassException: org.apache.iceberg.Schema; local class incompatible: stream classdesc serialVersionUID differs",
+    cause="PyFlink client and Flink TaskManager have different Iceberg JAR versions (e.g., client has iceberg from pip, TaskManager has locally-built JARs)",
+    detection_method="Check Flink job exceptions API for InvalidClassException with serialVersionUID mismatch on org.apache.iceberg classes",
+    remediation_steps=[
+        "Remove ALL Iceberg JARs from $FLINK_HOME/lib/: rm $FLINK_HOME/lib/iceberg-*.jar",
+        "Rebuild Iceberg JARs from source: cd thirdparty/iceberg && ./gradlew clean",
+        "Build fresh JARs: ./gradlew -PflinkVersions=1.20 :iceberg-flink:iceberg-flink-runtime-1.20:shadowJar :iceberg-aws-bundle:shadowJar -x test",
+        "Copy new JARs: cp flink/v1.20/flink-runtime/build/libs/iceberg-flink-runtime-*.jar aws-bundle/build/libs/iceberg-aws-bundle-*.jar $FLINK_HOME/lib/",
+        "Restart Flink cluster: devenv tasks run restart:clean",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.B,
+)
+
 # Infrastructure failure modes
 INFRA_001 = FailureMode(
     failure_mode_id="INFRA_001",
@@ -487,6 +552,8 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "FLINK_001": FLINK_001,
     "FLINK_002": FLINK_002,
     "FLINK_003": FLINK_003,
+    "FLINK_004": FLINK_004,
+    "FLINK_005": FLINK_005,
     "PYFLINK_001": PYFLINK_001,
     "PYFLINK_002": PYFLINK_002,
     "PYFLINK_003": PYFLINK_003,
@@ -500,6 +567,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "PYFLINK_011": PYFLINK_011,
     "PYFLINK_012": PYFLINK_012,
     "PYFLINK_013": PYFLINK_013,
+    "PYFLINK_014": PYFLINK_014,
     "INFRA_001": INFRA_001,
     "INFRA_002": INFRA_002,
     "INFRA_003": INFRA_003,
@@ -509,8 +577,8 @@ FAILURE_MODES: dict[str, FailureMode] = {
 # Category groupings
 CATEGORIES: dict[str, list[str]] = {
     "iceberg": ["ICE_001", "ICE_002", "ICE_003"],
-    "flink": ["FLINK_001", "FLINK_002", "FLINK_003"],
-    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_010", "PYFLINK_011", "PYFLINK_012", "PYFLINK_013"],
+    "flink": ["FLINK_001", "FLINK_002", "FLINK_003", "FLINK_004", "FLINK_005"],
+    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_010", "PYFLINK_011", "PYFLINK_012", "PYFLINK_013", "PYFLINK_014"],
     "infra": ["INFRA_001", "INFRA_002", "INFRA_003"],
     "data": ["DATA_001"],
 }

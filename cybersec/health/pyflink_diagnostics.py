@@ -11,9 +11,12 @@ import sys
 import platform
 import subprocess
 import glob
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from .catalog import get_failure_mode, get_category_modes
 
@@ -25,6 +28,164 @@ class DiagnosticCheck:
     detected: bool
     details: str
     severity: str  # "critical", "warning", "info"
+
+
+async def _check_flink_job_status(flink_url: str) -> dict[str, Any]:
+    """Check Flink cluster for job status issues.
+
+    Detects:
+    - FLINK_004: DataGen job finishes immediately (bounded source)
+    - FLINK_005: Job stuck in CREATED/INITIALIZING state
+    - PYFLINK_014: Iceberg JAR version mismatch (serialVersionUID error)
+
+    Returns:
+        Dict with job status analysis and detected issues.
+    """
+    import re
+
+    result: dict[str, Any] = {
+        "flink_url": flink_url,
+        "cluster_reachable": False,
+        "jobs_running": 0,
+        "jobs_finished": 0,
+        "jobs_failed": 0,
+        "datagen_finished_immediately": False,
+        "datagen_has_bounded_source": False,
+        "job_stuck_initializing": False,
+        "iceberg_version_mismatch": False,
+        "details": [],
+    }
+
+    # First, check if the DataGen source file has bounded configuration
+    # This catches the issue even when jobs aren't visible in history
+    devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
+    datagen_file = Path(devenv_root) / "flink_jobs" / "cloudtrail_datagen.py"
+
+    if datagen_file.exists():
+        try:
+            content = datagen_file.read_text()
+            # Check for bounded row configuration
+            if re.search(r"'fields\.event_id\.end'\s*=\s*'[^']+'", content):
+                result["datagen_has_bounded_source"] = True
+                result["details"].append(
+                    "DataGen source has bounded rows (fields.event_id.end) - "
+                    "job will finish after generating all events"
+                )
+        except Exception:
+            pass
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Get cluster overview
+            overview_resp = await client.get(f"{flink_url}/overview")
+            if overview_resp.status_code != 200:
+                result["details"].append(f"Flink cluster returned {overview_resp.status_code}")
+                return result
+
+            result["cluster_reachable"] = True
+            overview = overview_resp.json()
+            result["jobs_running"] = overview.get("jobs-running", 0)
+            result["jobs_finished"] = overview.get("jobs-finished", 0)
+            result["jobs_failed"] = overview.get("jobs-failed", 0)
+            result["slots_total"] = overview.get("slots-total", 0)
+            result["slots_available"] = overview.get("slots-available", 0)
+            result["taskmanagers"] = overview.get("taskmanagers", 0)
+
+            # Get detailed job list
+            jobs_resp = await client.get(f"{flink_url}/jobs/overview")
+            if jobs_resp.status_code == 200:
+                jobs_data = jobs_resp.json()
+                jobs = jobs_data.get("jobs", [])
+                result["jobs"] = jobs
+
+                # Analyze job patterns
+                current_time_ms = int(time.time() * 1000)
+
+                for job in jobs:
+                    job_name = job.get("name", "")
+                    job_state = job.get("state", "")
+                    start_time = job.get("start-time", 0)
+                    end_time = job.get("end-time", -1)
+                    duration = job.get("duration", 0)
+
+                    # Check for DataGen job that finished quickly
+                    is_datagen = "datagen" in job_name.lower() or "cloudtrail" in job_name.lower()
+
+                    if is_datagen and job_state == "FINISHED":
+                        # Job finished - check if it was suspiciously quick
+                        # If duration < 5 minutes and it's a streaming job, something's wrong
+                        if duration > 0 and duration < 300000:  # < 5 minutes in ms
+                            result["datagen_finished_immediately"] = True
+                            result["details"].append(
+                                f"DataGen job '{job_name}' finished in {duration/1000:.1f}s - "
+                                "likely using bounded source (fields.event_id.end)"
+                            )
+
+                    # Check for jobs stuck in CREATED or INITIALIZING
+                    if job_state in ("CREATED", "INITIALIZING"):
+                        time_in_state = current_time_ms - start_time
+                        if time_in_state > 60000:  # > 60 seconds
+                            result["job_stuck_initializing"] = True
+                            result["details"].append(
+                                f"Job '{job_name}' stuck in {job_state} for {time_in_state/1000:.0f}s"
+                            )
+
+                # Check if we have finished jobs but no running jobs (DataGen completed)
+                if result["jobs_running"] == 0 and result["jobs_finished"] > 0:
+                    # Look for recent DataGen completions
+                    for job in jobs:
+                        job_name = job.get("name", "")
+                        is_datagen = "datagen" in job_name.lower() or "cloudtrail" in job_name.lower()
+                        if is_datagen and job.get("state") == "FINISHED":
+                            end_time = job.get("end-time", 0)
+                            # If finished in last 5 minutes, flag it
+                            if end_time > 0 and (current_time_ms - end_time) < 300000:
+                                if not result["datagen_finished_immediately"]:
+                                    result["datagen_finished_immediately"] = True
+                                    result["details"].append(
+                                        f"DataGen job '{job_name}' recently completed - "
+                                        "no running jobs found"
+                                    )
+
+                # Check for FAILED jobs and get their exceptions
+                for job in jobs:
+                    job_id = job.get("jid", "")
+                    job_state = job.get("state", "")
+
+                    if job_state == "FAILED" and job_id:
+                        # Fetch job exceptions
+                        try:
+                            exc_resp = await client.get(f"{flink_url}/jobs/{job_id}/exceptions")
+                            if exc_resp.status_code == 200:
+                                exc_data = exc_resp.json()
+                                root_exception = exc_data.get("root-exception", "")
+
+                                # Check for Iceberg serialVersionUID mismatch
+                                if "InvalidClassException" in root_exception and "serialVersionUID" in root_exception:
+                                    if "org.apache.iceberg" in root_exception:
+                                        result["iceberg_version_mismatch"] = True
+                                        result["details"].append(
+                                            "Iceberg JAR version mismatch detected: "
+                                            "InvalidClassException with serialVersionUID conflict on org.apache.iceberg classes"
+                                        )
+                                        # Extract the class name for more detail
+                                        import re
+                                        class_match = re.search(r"InvalidClassException:\s*([\w.]+);", root_exception)
+                                        if class_match:
+                                            result["details"].append(
+                                                f"Conflicting class: {class_match.group(1)}"
+                                            )
+                        except Exception:
+                            pass  # Non-critical, continue checking other jobs
+
+    except httpx.ConnectError:
+        result["details"].append(f"Cannot connect to Flink at {flink_url}")
+    except httpx.TimeoutException:
+        result["details"].append(f"Timeout connecting to Flink at {flink_url}")
+    except Exception as e:
+        result["details"].append(f"Error checking Flink: {e}")
+
+    return result
 
 
 async def gather_pyflink_diagnostics() -> dict[str, Any]:
@@ -526,6 +687,63 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
             # Don't duplicate if PYFLINK_011 already added bootstrap recommendation
             if iceberg_aws_bundle_exists:
                 recommendations.insert(0, "Run: cybersec bootstrap run (to build and install Iceberg JARs)")
+
+    # === Flink Job Status Checks ===
+
+    # Check Flink cluster and job status
+    flink_url = config.flink_url or "http://localhost:8081"
+    flink_job_status = await _check_flink_job_status(flink_url)
+    diagnostics["flink_jobs"] = flink_job_status
+
+    # FLINK_004: DataGen Job Finishes Immediately
+    if flink_job_status.get("datagen_finished_immediately"):
+        fm = get_failure_mode("FLINK_004")
+        if fm:
+            rpn = fm.calculate_rpn()
+            detected_issues.append({
+                "failure_mode_id": "FLINK_004",
+                "name": fm.name,
+                "severity": "warning",
+                "symptom": fm.symptom,
+                "rpn": rpn.rpn,
+                "remediation": fm.remediation_steps,
+                "details": flink_job_status.get("details", []),
+            })
+            recommendations.insert(0, "Fix DataGen source: remove bounded row limit or use unbounded mode")
+            recommendations.insert(1, "Run: cybersec --cmd '/health fix FLINK_004'")
+
+    # FLINK_005: Job Submission Timeout
+    if flink_job_status.get("job_stuck_initializing"):
+        fm = get_failure_mode("FLINK_005")
+        if fm:
+            rpn = fm.calculate_rpn()
+            detected_issues.append({
+                "failure_mode_id": "FLINK_005",
+                "name": fm.name,
+                "severity": "critical",
+                "symptom": fm.symptom,
+                "rpn": rpn.rpn,
+                "remediation": fm.remediation_steps,
+                "details": flink_job_status.get("details", []),
+            })
+            recommendations.insert(0, "Check Flink cluster resources and logs")
+
+    # PYFLINK_014: Iceberg JAR Version Mismatch
+    if flink_job_status.get("iceberg_version_mismatch"):
+        fm = get_failure_mode("PYFLINK_014")
+        if fm:
+            rpn = fm.calculate_rpn()
+            detected_issues.append({
+                "failure_mode_id": "PYFLINK_014",
+                "name": fm.name,
+                "severity": "critical",
+                "symptom": fm.symptom,
+                "rpn": rpn.rpn,
+                "remediation": fm.remediation_steps,
+                "details": flink_job_status.get("details", []),
+            })
+            recommendations.insert(0, "CRITICAL: Iceberg JAR version mismatch - rebuild JARs from source")
+            recommendations.insert(1, "Run: cybersec --cmd '/health fix PYFLINK_014'")
 
     # === Summary ===
 
