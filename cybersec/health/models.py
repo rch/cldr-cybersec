@@ -334,6 +334,8 @@ class HealthContext:
     polaris_url: str = "http://localhost:8181"
     postgres_port: int = 5438
     browser_port: int = 5050
+    nifi_url: str = "http://localhost:8450"
+    nifi_otlp_port: int = 4319
 
 
 @dataclass

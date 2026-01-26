@@ -40,6 +40,8 @@ async def cmd_health(cmd: ParsedCommand) -> CommandResult:
         polaris_url=config.polaris_api_url or "http://localhost:8181",
         postgres_port=config.postgres_port or 5438,
         browser_port=config.iceberg_browser_port or 5050,
+        nifi_url=config.nifi_url or "http://localhost:8450",
+        nifi_otlp_port=config.nifi_otlp_port or 4319,
     )
 
     # Category can be argument or option (argument takes precedence)
@@ -226,6 +228,8 @@ async def cmd_health_diagnose(cmd: ParsedCommand) -> CommandResult:
         polaris_url=config.polaris_api_url or "http://localhost:8181",
         postgres_port=config.postgres_port or 5438,
         browser_port=config.iceberg_browser_port or 5050,
+        nifi_url=config.nifi_url or "http://localhost:8450",
+        nifi_otlp_port=config.nifi_otlp_port or 4319,
     )
 
     runner = get_runner()
@@ -283,6 +287,8 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
         polaris_url=config.polaris_api_url or "http://localhost:8181",
         postgres_port=config.postgres_port or 5438,
         browser_port=config.iceberg_browser_port or 5050,
+        nifi_url=config.nifi_url or "http://localhost:8450",
+        nifi_otlp_port=config.nifi_otlp_port or 4319,
     )
 
     # Automatable failure modes (can be fixed without user intervention)
@@ -300,6 +306,7 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
         "PYFLINK_007", "PYFLINK_008",  # Cluster restart
         "PYFLINK_011", "PYFLINK_012", "PYFLINK_014",  # Iceberg JARs
         "INFRA_004",  # Shared memory cleanup
+        "NIFI_001",   # NiFi download/install
     }
 
     # Determine what to fix
@@ -1044,6 +1051,8 @@ async def cmd_health_explain(cmd: ParsedCommand) -> CommandResult:
         polaris_url=config.polaris_api_url or "http://localhost:8181",
         postgres_port=config.postgres_port or 5438,
         browser_port=config.iceberg_browser_port or 5050,
+        nifi_url=config.nifi_url or "http://localhost:8450",
+        nifi_otlp_port=config.nifi_otlp_port or 4319,
     )
 
     runner = get_rete_runner()
@@ -1140,6 +1149,8 @@ async def cmd_health_objective(cmd: ParsedCommand) -> CommandResult:
         polaris_url=config.polaris_api_url or "http://localhost:8181",
         postgres_port=config.postgres_port or 5438,
         browser_port=config.iceberg_browser_port or 5050,
+        nifi_url=config.nifi_url or "http://localhost:8450",
+        nifi_otlp_port=config.nifi_otlp_port or 4319,
     )
 
     runner = get_rete_runner()

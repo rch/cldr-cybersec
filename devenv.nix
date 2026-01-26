@@ -867,11 +867,13 @@ except Exception as e:
           echo "To install NiFi, run:"
           echo "  ./scripts/setup_nifi_bin.sh 2.0.0"
           echo ""
-          echo "Or use bootstrap:"
-          echo "  cybersec bootstrap run"
+          echo "Or use the health system:"
+          echo "  cybersec \"/health fix --apply\""
           echo ""
-          # Exit gracefully - NiFi is optional
-          exit 0
+          echo "To disable NiFi (not recommended), set DISABLE_NIFI=true"
+          echo ""
+          # NiFi is required - fail if not available
+          exit 1
         fi
 
         # NiFi 2.0 requires running from the package directory for proper JAR loading.
@@ -993,7 +995,7 @@ except Exception as e:
           period_seconds = 5;
           failure_threshold = 24;
         };
-        # Enabled by default - disable with DISABLE_NIFI=true
+        # Required by default - disable with DISABLE_NIFI=true (not recommended)
       };
     };
   };

@@ -173,6 +173,11 @@ async def apply_fixes(diagnostics: dict, dry_run: bool = True) -> list[dict[str,
             result = await _fix_shared_memory_exhaustion(dry_run)
             results.append(result)
 
+        elif failure_mode_id == "NIFI_001":
+            # NiFi not installed - download and install
+            result = await _fix_nifi_not_installed(dry_run)
+            results.append(result)
+
     return results
 
 
@@ -803,5 +808,68 @@ async def _fix_shared_memory_exhaustion(dry_run: bool) -> dict[str, Any]:
     except Exception as e:
         result["success"] = False
         result["message"] = f"Error cleaning up shared memory: {e}"
+
+    return result
+
+
+async def _fix_nifi_not_installed(dry_run: bool) -> dict[str, Any]:
+    """Fix: Download and install NiFi binary.
+
+    On macOS (Apple Silicon), NiFi must be downloaded manually since nixpkgs
+    doesn't provide a native binary. This runs the setup script.
+    """
+    import subprocess
+
+    result = {
+        "failure_mode_id": "NIFI_001",
+        "action": "install_nifi",
+    }
+
+    devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
+    setup_script = Path(devenv_root) / "scripts" / "setup_nifi_bin.sh"
+    nifi_version = "2.0.0"
+
+    if not setup_script.exists():
+        result["success"] = False
+        result["message"] = f"Setup script not found: {setup_script}"
+        return result
+
+    result["script"] = str(setup_script)
+    result["version"] = nifi_version
+
+    if dry_run:
+        result["success"] = True
+        result["dry_run"] = True
+        result["message"] = f"Would download and install NiFi {nifi_version}"
+        result["command"] = f"./scripts/setup_nifi_bin.sh {nifi_version}"
+        return result
+
+    # Execute the setup script
+    try:
+        proc = subprocess.run(
+            [str(setup_script), nifi_version],
+            capture_output=True,
+            text=True,
+            timeout=600,  # 10 minute timeout for download
+            cwd=devenv_root,
+        )
+
+        if proc.returncode == 0:
+            result["success"] = True
+            result["message"] = f"Installed NiFi {nifi_version}"
+            result["output"] = proc.stdout[-1000:] if len(proc.stdout) > 1000 else proc.stdout
+            result["restart_required"] = True
+            result["restart_command"] = "devenv up nifi"
+        else:
+            result["success"] = False
+            result["message"] = f"NiFi setup failed with exit code {proc.returncode}"
+            result["error"] = proc.stderr[-1000:] if len(proc.stderr) > 1000 else proc.stderr
+
+    except subprocess.TimeoutExpired:
+        result["success"] = False
+        result["message"] = "NiFi download timed out after 10 minutes"
+    except Exception as e:
+        result["success"] = False
+        result["message"] = f"Error installing NiFi: {e}"
 
     return result

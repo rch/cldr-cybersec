@@ -3,6 +3,7 @@
 Defines failure modes with base FMEA scores for:
 - Iceberg/PyIceberg issues (ICE_*)
 - Flink issues (FLINK_*)
+- NiFi issues (NIFI_*)
 - Infrastructure issues (INFRA_*)
 - Data quality issues (DATA_*)
 """
@@ -542,6 +543,67 @@ INFRA_004 = FailureMode(
     solution_level=AutomationLevel.A,
 )
 
+# NiFi failure modes
+NIFI_001 = FailureMode(
+    failure_mode_id="NIFI_001",
+    category="nifi",
+    name="NiFi Not Installed",
+    description="NiFi binary not found in expected location",
+    base_severity=8,   # High - observability pipeline broken
+    base_occurrence=5,  # Moderate - common on macOS fresh setup
+    base_detection=1,   # Very easy - check directory exists
+    symptom="NiFi process not starting, 'binary not found' errors in devenv",
+    cause="NiFi not downloaded or NIFI_HOME not set correctly",
+    detection_method="Check thirdparty/nifi/nifi-*/bin/nifi.sh exists",
+    remediation_steps=[
+        "Run: ./scripts/setup_nifi_bin.sh 2.0.0",
+        "Or: cybersec bootstrap run",
+        "Verify: ls thirdparty/nifi/nifi-*/bin/nifi.sh",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
+NIFI_002 = FailureMode(
+    failure_mode_id="NIFI_002",
+    category="nifi",
+    name="NiFi Not Running",
+    description="NiFi web API not responding",
+    base_severity=7,   # High - can't receive traces
+    base_occurrence=3,  # Low-moderate
+    base_detection=2,   # Easy - HTTP check
+    symptom="Port 8450 not responding, traces not flowing to NiFi",
+    cause="NiFi process crashed or not started",
+    detection_method="HTTP GET to http://localhost:8450/nifi-api/system-diagnostics",
+    remediation_steps=[
+        "Check NiFi process: pgrep -f nifi",
+        "Restart: devenv up nifi",
+        "Check logs: $NIFI_HOME/logs/nifi-app.log",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.B,
+)
+
+NIFI_003 = FailureMode(
+    failure_mode_id="NIFI_003",
+    category="nifi",
+    name="NiFi OTLP Receiver Not Ready",
+    description="OTLP receiver port not accepting connections",
+    base_severity=6,   # Moderate - traces lost but system runs
+    base_occurrence=4,  # Moderate
+    base_detection=2,   # Easy - TCP check
+    symptom="OTEL traces not appearing in NiFi, port 4319 not open",
+    cause="OTLP receiver processor not configured or stopped",
+    detection_method="TCP connection test to localhost:4319",
+    remediation_steps=[
+        "Check OTLP port: nc -z localhost 4319",
+        "Verify NiFi flow has OTLP receiver configured",
+        "Check NiFi logs for processor errors",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.C,
+)
+
 # Data quality failure modes
 DATA_001 = FailureMode(
     failure_mode_id="DATA_001",
@@ -592,10 +654,15 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "INFRA_002": INFRA_002,
     "INFRA_003": INFRA_003,
     "INFRA_004": INFRA_004,
+    "NIFI_001": NIFI_001,
+    "NIFI_002": NIFI_002,
+    "NIFI_003": NIFI_003,
     "DATA_001": DATA_001,
 }
 
 # Category groupings - organized by type
+# Note: Only include categories with actual checks. Future categories
+# (kafka, aws-s3, infra) can be added when checks are implemented.
 CATEGORIES: dict[str, list[str]] = {
     # Cloudera OSS components (named directly)
     "flink": [
@@ -606,18 +673,15 @@ CATEGORIES: dict[str, list[str]] = {
         "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_010",
         "PYFLINK_011", "PYFLINK_012", "PYFLINK_013", "PYFLINK_014",
     ],
-    "nifi": [],     # Future
-    "kafka": [],    # Future
+    "nifi": ["NIFI_001", "NIFI_002", "NIFI_003"],
 
     # Provider-agnostic (swappable components)
     "rest-catalog": ["ICE_001", "ICE_002", "ICE_003", "INFRA_003"],  # Iceberg + Polaris
     "local-s3": ["INFRA_002"],   # MinIO locally
-    "aws-s3": [],   # Future AWS S3
 
     # Infrastructure
     "postgres": ["INFRA_001"],
     "system": ["INFRA_004"],     # OS-level: shm, eBPF, nvidia-smi
-    "infra": [],    # terraform/ansible: VPC, selinux (future)
     "data": ["DATA_001"],
 }
 
@@ -633,6 +697,7 @@ QUICK_CHECKS: list[str] = [
     "INFRA_002",  # MinIO
     "FLINK_001",  # TaskManager
     "ICE_002",    # Catalog connection
+    "NIFI_002",   # NiFi running
 ]
 
 
