@@ -648,6 +648,37 @@
                         </div>
 
                         <div class="config-section">
+                            <h3>FSN Visualization</h3>
+                            <div class="config-grid">
+                                <div class="config-field">
+                                    <label for="fsn_default_mode">Default Mode</label>
+                                    <select id="fsn_default_mode">
+                                        <option value="cloudtrail">CloudTrail Events</option>
+                                        <option value="iceberg">Iceberg Optimization</option>
+                                    </select>
+                                    <span class="hint">Mode shown when FSN is first expanded</span>
+                                </div>
+                                <div class="config-field">
+                                    <label>
+                                        <input type="checkbox" id="fsn_remember_mode" checked> Remember Mode
+                                    </label>
+                                    <span class="hint">Remember selected mode between sessions</span>
+                                </div>
+                                <div class="config-field">
+                                    <label>
+                                        <input type="checkbox" id="fsn_iceberg_auto_refresh"> Auto-Refresh (Iceberg mode)
+                                    </label>
+                                    <span class="hint">Automatically refresh optimization data</span>
+                                </div>
+                                <div class="config-field">
+                                    <label for="fsn_iceberg_refresh_interval">Refresh Interval (seconds)</label>
+                                    <input type="number" id="fsn_iceberg_refresh_interval" value="60" min="10" max="300">
+                                    <span class="hint">Only applies when auto-refresh is enabled</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="config-section">
                             <h3>Paths</h3>
                             <div class="config-grid">
                                 <div class="config-field">
@@ -954,6 +985,9 @@
                     document.getElementById('catalog_warehouse').value = data.config.catalog_warehouse || '';
                 }
 
+                // Load FSN settings
+                await loadFSNSettings();
+
                 // Load theme options
                 await loadThemeOptions();
 
@@ -961,6 +995,21 @@
                 form.style.display = 'block';
             } catch (error) {
                 loading.innerHTML = `<span style="color: var(--color-error);">Error loading settings: ${error.message}</span>`;
+            }
+        }
+
+        // Load FSN settings
+        async function loadFSNSettings() {
+            try {
+                const response = await fetch('/api/fsn/settings');
+                const settings = await response.json();
+
+                document.getElementById('fsn_default_mode').value = settings.default_mode || 'cloudtrail';
+                document.getElementById('fsn_remember_mode').checked = settings.remember_mode !== false;
+                document.getElementById('fsn_iceberg_auto_refresh').checked = settings.iceberg_auto_refresh || false;
+                document.getElementById('fsn_iceberg_refresh_interval').value = settings.iceberg_refresh_interval || 60;
+            } catch (error) {
+                console.error('Error loading FSN settings:', error);
             }
         }
 
@@ -974,13 +1023,30 @@
                 catalog_name: document.getElementById('catalog_name').value,
                 catalog_warehouse: document.getElementById('catalog_warehouse').value,
                 ui_theme: document.getElementById('ui_theme').value,
+                fsn_default_mode: document.getElementById('fsn_default_mode').value,
+                fsn_remember_mode: document.getElementById('fsn_remember_mode').checked,
+                fsn_iceberg_auto_refresh: document.getElementById('fsn_iceberg_auto_refresh').checked,
+                fsn_iceberg_refresh_interval: parseInt(document.getElementById('fsn_iceberg_refresh_interval').value),
             };
 
             try {
+                // Save main settings
                 const response = await fetch('/api/bootstrap/settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ updates })
+                });
+
+                // Also save FSN settings
+                await fetch('/api/fsn/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        default_mode: updates.fsn_default_mode,
+                        remember_mode: updates.fsn_remember_mode,
+                        iceberg_auto_refresh: updates.fsn_iceberg_auto_refresh,
+                        iceberg_refresh_interval: updates.fsn_iceberg_refresh_interval,
+                    })
                 });
 
                 const data = await response.json();

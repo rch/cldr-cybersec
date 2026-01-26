@@ -774,8 +774,8 @@ async def cmd_health_explain(cmd: ParsedCommand) -> CommandResult:
     # Check infrastructure first to populate facts
     await runner._check_infrastructure(ctx)
 
-    # Handle --what-if option
-    what_if_checks = cmd.options.get("what-if", "")
+    # Handle --what-if option (parser normalizes to what_if)
+    what_if_checks = cmd.options.get("what_if") or cmd.options.get("what-if", "")
     if what_if_checks:
         check_ids = [c.strip().upper() for c in what_if_checks.split(",")]
         explanation = runner.what_if(goal_id, check_ids)

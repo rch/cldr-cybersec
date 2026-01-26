@@ -1125,6 +1125,54 @@ def api_ui_theme():
         return jsonify({"error": str(e), "theme": "solarized-dark"}), 500
 
 
+@app.route("/api/fsn/settings", methods=["GET", "POST"])
+def api_fsn_settings():
+    """Get or set FSN visualization settings."""
+    try:
+        from cybersec.bootstrap import BootstrapService
+        service = BootstrapService()
+
+        if request.method == "POST":
+            data = request.json or {}
+            updates = {}
+
+            if "default_mode" in data:
+                updates["fsn_default_mode"] = data["default_mode"]
+            if "remember_mode" in data:
+                updates["fsn_remember_mode"] = data["remember_mode"]
+            if "iceberg_auto_refresh" in data:
+                updates["fsn_iceberg_auto_refresh"] = data["iceberg_auto_refresh"]
+            if "iceberg_refresh_interval" in data:
+                updates["fsn_iceberg_refresh_interval"] = data["iceberg_refresh_interval"]
+
+            if updates:
+                service.update_config(**updates)
+
+            config = service.get_config()
+            return jsonify({
+                "default_mode": config.fsn_default_mode,
+                "remember_mode": config.fsn_remember_mode,
+                "iceberg_auto_refresh": config.fsn_iceberg_auto_refresh,
+                "iceberg_refresh_interval": config.fsn_iceberg_refresh_interval,
+            })
+
+        config = service.get_config()
+        return jsonify({
+            "default_mode": config.fsn_default_mode,
+            "remember_mode": config.fsn_remember_mode,
+            "iceberg_auto_refresh": config.fsn_iceberg_auto_refresh,
+            "iceberg_refresh_interval": config.fsn_iceberg_refresh_interval,
+        })
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "default_mode": "cloudtrail",
+            "remember_mode": True,
+            "iceberg_auto_refresh": False,
+            "iceberg_refresh_interval": 60,
+        }), 500
+
+
 @app.route("/api/bootstrap/info")
 def bootstrap_info():
     """Get bootstrap configuration and status"""
@@ -1400,6 +1448,562 @@ def get_namespace_details(namespace):
         return jsonify({"namespace": namespace, "properties": props})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
+# FSN Iceberg Optimization Mode APIs
+# ============================================================================
+# These endpoints support the "Iceberg Optimization" FSN mode which visualizes
+# table health, partition distribution, file fragmentation, and RETE recommendations.
+
+
+@app.route("/api/fsn/iceberg/tables")
+def fsn_iceberg_tables():
+    """Get all tables with optimization metrics for FSN visualization.
+
+    Returns table-level health scores for catalog overview (Level 0).
+    """
+    try:
+        catalog = get_catalog()
+        namespaces = catalog.list_namespaces()
+
+        tables = []
+        summary = {"critical": 0, "warnings": 0, "healthy": 0}
+
+        for namespace in namespaces:
+            namespace_str = ".".join(namespace)
+            table_list = catalog.list_tables(namespace_str)
+
+            for table_id in table_list:
+                table_name = table_id[1] if isinstance(table_id, tuple) else str(table_id)
+                full_name = f"{namespace_str}.{table_name}"
+
+                try:
+                    table = catalog.load_table(full_name)
+                    metrics = _gather_table_optimization_metrics(table, full_name)
+                    tables.append(metrics)
+
+                    # Update summary counts
+                    if metrics["health_score"] < 0.4:
+                        summary["critical"] += 1
+                    elif metrics["health_score"] < 0.7:
+                        summary["warnings"] += 1
+                    else:
+                        summary["healthy"] += 1
+                except Exception as e:
+                    print(f"Error loading table {full_name}: {e}")
+                    continue
+
+        return jsonify({
+            "tables": tables,
+            "summary": summary,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/fsn/iceberg/partitions/<path:table_name>")
+def fsn_iceberg_partitions(table_name):
+    """Get per-partition metrics for drill-down visualization (Level 1).
+
+    X-axis = partition values (dates/hours)
+    Y-axis = file count per partition
+    Color = health score
+    """
+    try:
+        catalog = get_catalog()
+        table = catalog.load_table(table_name)
+
+        # Get partition information
+        spec = table.spec()
+        is_partitioned = not spec.is_unpartitioned()
+
+        # Get file information from current snapshot
+        current = table.current_snapshot()
+        if not current:
+            return jsonify({
+                "table": table_name,
+                "is_partitioned": is_partitioned,
+                "partitions": [],
+                "message": "No current snapshot"
+            })
+
+        # Gather partition-level metrics
+        scan = table.scan()
+        files = list(scan.plan_files())
+
+        # Group files by partition
+        partition_stats = {}
+
+        for file_task in files:
+            # Get partition value from file path or partition data
+            data_file = file_task.file
+            file_size = data_file.file_size_in_bytes
+
+            # Extract partition value from file path
+            # Format: s3://bucket/warehouse/table/partition=value/datafile.parquet
+            path = data_file.file_path
+            partition_value = _extract_partition_value(path)
+
+            if partition_value not in partition_stats:
+                partition_stats[partition_value] = {
+                    "partition_value": partition_value,
+                    "file_count": 0,
+                    "total_size_bytes": 0,
+                    "file_sizes": [],
+                }
+
+            partition_stats[partition_value]["file_count"] += 1
+            partition_stats[partition_value]["total_size_bytes"] += file_size
+            partition_stats[partition_value]["file_sizes"].append(file_size)
+
+        # Calculate health scores for each partition
+        partitions = []
+        for pv, stats in partition_stats.items():
+            avg_file_size_mb = (stats["total_size_bytes"] / max(1, stats["file_count"])) / (1024 * 1024)
+
+            # Health score based on file count and size
+            file_count_score = min(1.0, 20 / max(1, stats["file_count"]))  # Fewer files = better
+            file_size_score = min(1.0, avg_file_size_mb / 128)  # Closer to 128MB = better
+            health_score = (file_count_score * 0.6 + file_size_score * 0.4)
+
+            partitions.append({
+                "partition_value": pv,
+                "file_count": stats["file_count"],
+                "total_size_mb": round(stats["total_size_bytes"] / (1024 * 1024), 2),
+                "avg_file_size_mb": round(avg_file_size_mb, 2),
+                "health_score": round(health_score, 2),
+                "needs_compaction": stats["file_count"] > 20 or avg_file_size_mb < 32,
+            })
+
+        # Sort by partition value
+        partitions.sort(key=lambda p: p["partition_value"])
+
+        return jsonify({
+            "table": table_name,
+            "is_partitioned": is_partitioned,
+            "partitions": partitions,
+            "total_files": len(files),
+            "total_partitions": len(partitions),
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/fsn/iceberg/recommendations")
+def fsn_iceberg_recommendations():
+    """Get RETE recommendations for all tables.
+
+    Returns actionable recommendations with priorities for the overlay panel.
+    """
+    try:
+        catalog = get_catalog()
+        namespaces = catalog.list_namespaces()
+
+        all_recommendations = []
+
+        for namespace in namespaces:
+            namespace_str = ".".join(namespace)
+            table_list = catalog.list_tables(namespace_str)
+
+            for table_id in table_list:
+                table_name = table_id[1] if isinstance(table_id, tuple) else str(table_id)
+                full_name = f"{namespace_str}.{table_name}"
+
+                try:
+                    table = catalog.load_table(full_name)
+                    recs = _get_table_recommendations(table, full_name)
+                    all_recommendations.extend(recs)
+                except Exception as e:
+                    print(f"Error analyzing {full_name}: {e}")
+                    continue
+
+        # Sort by priority descending
+        all_recommendations.sort(key=lambda r: -r["priority"])
+
+        return jsonify({
+            "recommendations": all_recommendations,
+            "count": len(all_recommendations),
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/fsn/iceberg/apply", methods=["POST"])
+def fsn_iceberg_apply():
+    """Execute an optimization fix.
+
+    Accepts: table, action (compact, expire, rewrite_manifests)
+    """
+    try:
+        data = request.get_json() or {}
+        table_name = data.get("table")
+        action = data.get("action")
+        dry_run = data.get("dry_run", False)
+
+        if not table_name or not action:
+            return jsonify({"error": "Missing required fields: table, action"}), 400
+
+        catalog = get_catalog()
+        table = catalog.load_table(table_name)
+
+        if dry_run:
+            # Return preview of what would happen
+            preview = _preview_optimization(table, table_name, action)
+            return jsonify({
+                "dry_run": True,
+                "table": table_name,
+                "action": action,
+                "preview": preview,
+            })
+
+        # Execute the action
+        result = _execute_optimization(table, table_name, action)
+
+        return jsonify({
+            "dry_run": False,
+            "table": table_name,
+            "action": action,
+            "success": result.get("success", False),
+            "message": result.get("message", ""),
+            "error": result.get("error"),
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/fsn/iceberg/what-if", methods=["POST"])
+def fsn_iceberg_what_if():
+    """Preview fix outcome without applying.
+
+    Uses RETE what-if analysis to predict the result of schema changes.
+    """
+    try:
+        data = request.get_json() or {}
+        table_name = data.get("table")
+        changes = data.get("changes", {})
+        goal = data.get("goal", "production_ready")
+
+        if not table_name:
+            return jsonify({"error": "Missing required field: table"}), 400
+
+        catalog = get_catalog()
+        table = catalog.load_table(table_name)
+
+        # Gather current stats
+        metrics = _gather_table_optimization_metrics(table, table_name)
+
+        # Build hypothetical changes list
+        change_list = []
+        for key, value in changes.items():
+            # Map friendly keys to fact patterns
+            fact_pattern = f"cloudtrail_table.{table_name.split('.')[-1]}.{key}"
+            change_list.append((fact_pattern, value))
+
+        # Run what-if analysis using CloudTrailOptimizer
+        try:
+            from cybersec.rete.cloudtrail import CloudTrailOptimizer, CloudTrailTableStats
+
+            # Create stats object
+            ct_stats = CloudTrailTableStats(
+                table_name=table_name.split(".")[-1],
+                namespace=table_name.split(".")[0] if "." in table_name else "default",
+                events_per_day=metrics.get("row_count", 0),
+                total_events=metrics.get("row_count", 0),
+                total_size_gb=metrics.get("total_size_mb", 0) / 1024,
+                days_of_data=1,
+                is_partitioned=bool(metrics.get("partition_spec")),
+                has_time_partition=False,  # Will be updated by what-if
+                partition_granularity="",
+                denormalized_fields=[],
+                has_json_blob=True,
+                sort_columns=[],
+                file_count=metrics.get("file_count", 0),
+                avg_file_size_mb=metrics.get("avg_file_size_mb", 0),
+                snapshot_count=metrics.get("snapshot_count", 0),
+                unique_users=0,
+                unique_ips=0,
+                unique_event_sources=0,
+                error_rate=0,
+            )
+
+            optimizer = CloudTrailOptimizer()
+            optimizer.analyze(ct_stats)
+
+            if change_list:
+                explanation = optimizer.what_if(goal, change_list)
+                result = {
+                    "conclusion": explanation.conclusion.value,
+                    "summary": explanation.summary,
+                    "steps": [
+                        {"step": s.step_number, "action": s.action, "description": s.description, "result": s.result}
+                        for s in explanation.steps
+                    ],
+                }
+            else:
+                # No changes specified - analyze current state
+                gaps = optimizer.analyze_gaps(goal)
+                result = {
+                    "conclusion": gaps.status.value,
+                    "summary": f"Current status for goal '{goal}'",
+                    "blocking_conditions": gaps.blocking_conditions,
+                    "acquisition_plan": gaps.acquisition_plan,
+                }
+        except ImportError:
+            # Fallback if RETE module not available
+            result = {
+                "conclusion": "unknown",
+                "summary": "RETE analysis not available",
+                "steps": [],
+            }
+
+        return jsonify({
+            "table": table_name,
+            "goal": goal,
+            "changes": changes,
+            "current_health_score": metrics.get("health_score", 0),
+            "analysis": result,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# --- FSN Iceberg Helper Functions ---
+
+def _gather_table_optimization_metrics(table, full_table_name: str) -> dict:
+    """Gather optimization metrics for FSN visualization."""
+    parts = full_table_name.split(".")
+    namespace = parts[0] if len(parts) > 1 else "default"
+    table_name = parts[-1]
+
+    # Get snapshots
+    snapshots = list(table.snapshots())
+    snapshot_count = len(snapshots)
+
+    # Get files
+    current = table.current_snapshot()
+    file_count = 0
+    total_size = 0
+    row_count = 0
+
+    if current:
+        scan = table.scan()
+        files = list(scan.plan_files())
+        file_count = len(files)
+        total_size = sum(f.file.file_size_in_bytes for f in files)
+
+        # Get row count from snapshot summary if available
+        if current.summary:
+            props = current.summary.additional_properties if hasattr(current.summary, 'additional_properties') else {}
+            row_count = int(props.get('total-records', 0))
+
+    total_size_mb = total_size // (1024 * 1024)
+    avg_file_size_mb = total_size_mb // max(1, file_count)
+
+    # Get partition spec
+    spec = table.spec()
+    partition_spec = "" if spec.is_unpartitioned() else str(spec)
+
+    # Calculate health score (0.0 to 1.0)
+    # Components: file size, file count, snapshot count, partitioning
+    file_size_score = min(1.0, avg_file_size_mb / 128) if avg_file_size_mb > 0 else 0.5
+    file_count_score = min(1.0, 100 / max(1, file_count))  # Fewer files relative to content
+    snapshot_score = min(1.0, 50 / max(1, snapshot_count))
+    partition_score = 0.8 if partition_spec else 0.3  # Partitioned tables score higher
+
+    health_score = (
+        file_size_score * 0.3 +
+        file_count_score * 0.3 +
+        snapshot_score * 0.2 +
+        partition_score * 0.2
+    )
+
+    # Detect specific issues
+    recommendations = []
+    if avg_file_size_mb < 32 and file_count > 10:
+        recommendations.append("compact_small_files")
+    if snapshot_count > 50:
+        recommendations.append("expire_snapshots")
+    if file_count > 500:
+        recommendations.append("alert_extreme_fragmentation")
+    if not partition_spec and row_count > 100000:
+        recommendations.append("add_partitioning")
+
+    return {
+        "name": table_name,
+        "full_name": full_table_name,
+        "namespace": namespace,
+        "row_count": row_count,
+        "file_count": file_count,
+        "total_size_mb": total_size_mb,
+        "avg_file_size_mb": avg_file_size_mb,
+        "partition_spec": partition_spec or "unpartitioned",
+        "partition_count": 1,  # Simplified
+        "snapshot_count": snapshot_count,
+        "health_score": round(health_score, 2),
+        "recommendations": recommendations,
+    }
+
+
+def _extract_partition_value(file_path: str) -> str:
+    """Extract partition value from file path."""
+    # Handle various partition formats:
+    # s3://bucket/warehouse/table/partition=value/file.parquet
+    # s3://bucket/warehouse/table/year=2024/month=01/file.parquet
+
+    parts = file_path.split("/")
+    partition_parts = []
+
+    for part in parts:
+        if "=" in part:
+            partition_parts.append(part)
+
+    if partition_parts:
+        return "/".join(partition_parts)
+    return "unpartitioned"
+
+
+def _get_table_recommendations(table, full_table_name: str) -> list:
+    """Get RETE-based recommendations for a table."""
+    metrics = _gather_table_optimization_metrics(table, full_table_name)
+
+    recommendations = []
+
+    # Check for small files
+    if metrics["avg_file_size_mb"] < 32 and metrics["file_count"] > 10:
+        recommendations.append({
+            "table": full_table_name,
+            "rule_id": "compact_small_files",
+            "priority": 800,
+            "severity": "critical" if metrics["avg_file_size_mb"] < 16 else "warning",
+            "action_type": "compaction",
+            "description": f"Compact {metrics['file_count']} small files (avg {metrics['avg_file_size_mb']}MB)",
+            "impact": f"Reduce from {metrics['file_count']} files to ~{max(1, metrics['total_size_mb'] // 128)} files",
+        })
+
+    # Check for snapshot explosion
+    if metrics["snapshot_count"] > 50:
+        recommendations.append({
+            "table": full_table_name,
+            "rule_id": "expire_old_snapshots",
+            "priority": 400 if metrics["snapshot_count"] < 100 else 700,
+            "severity": "critical" if metrics["snapshot_count"] > 100 else "warning",
+            "action_type": "expire_snapshots",
+            "description": f"Expire old snapshots ({metrics['snapshot_count']} accumulated)",
+            "impact": f"Reduce to ~10 snapshots, reclaim metadata storage",
+        })
+
+    # Check for extreme fragmentation
+    if metrics["file_count"] > 500:
+        recommendations.append({
+            "table": full_table_name,
+            "rule_id": "alert_extreme_fragmentation",
+            "priority": 950,
+            "severity": "critical",
+            "action_type": "alert",
+            "description": f"Extreme fragmentation: {metrics['file_count']} files",
+            "impact": "Query performance severely degraded",
+        })
+
+    # Check for missing partitioning
+    if metrics["partition_spec"] == "unpartitioned" and metrics["row_count"] > 100000:
+        recommendations.append({
+            "table": full_table_name,
+            "rule_id": "suggest_partitioning",
+            "priority": 600,
+            "severity": "warning",
+            "action_type": "partition",
+            "description": f"Consider partitioning ({metrics['row_count']:,} rows unpartitioned)",
+            "impact": "Enable partition pruning for time-based queries",
+        })
+
+    return recommendations
+
+
+def _preview_optimization(table, table_name: str, action: str) -> dict:
+    """Preview the result of an optimization action."""
+    metrics = _gather_table_optimization_metrics(table, table_name)
+
+    if action == "compact":
+        current_files = metrics["file_count"]
+        target_size_mb = 128
+        expected_files = max(1, metrics["total_size_mb"] // target_size_mb)
+
+        return {
+            "current_files": current_files,
+            "expected_files": expected_files,
+            "reduction_percent": round((1 - expected_files / max(1, current_files)) * 100, 1),
+            "target_file_size_mb": target_size_mb,
+        }
+
+    elif action == "expire":
+        current_snapshots = metrics["snapshot_count"]
+        keep_count = 10
+        to_expire = max(0, current_snapshots - keep_count)
+
+        return {
+            "current_snapshots": current_snapshots,
+            "to_expire": to_expire,
+            "to_keep": min(current_snapshots, keep_count),
+        }
+
+    elif action == "rewrite_manifests":
+        return {
+            "description": "Rewrite manifest files to optimize metadata",
+        }
+
+    return {"error": f"Unknown action: {action}"}
+
+
+def _execute_optimization(table, table_name: str, action: str) -> dict:
+    """Execute an optimization action."""
+    try:
+        if action == "compact":
+            # PyIceberg compaction
+            if hasattr(table, 'rewrite_data_files'):
+                table.rewrite_data_files(target_file_size_bytes=128 * 1024 * 1024)
+                return {"success": True, "message": "Compaction completed"}
+            else:
+                return {
+                    "success": False,
+                    "error": "Compaction not available in this PyIceberg version",
+                    "manual_command": f"CALL catalog.system.rewrite_data_files(table => '{table_name}')",
+                }
+
+        elif action == "expire":
+            if hasattr(table, 'expire_snapshots'):
+                from datetime import datetime, timedelta
+                cutoff = datetime.now() - timedelta(hours=24)
+                table.expire_snapshots().older_than(cutoff).retain_last(10).commit()
+                return {"success": True, "message": "Snapshots expired"}
+            else:
+                return {
+                    "success": False,
+                    "error": "Snapshot expiration not available",
+                }
+
+        elif action == "rewrite_manifests":
+            if hasattr(table, 'rewrite_manifests'):
+                table.rewrite_manifests().commit()
+                return {"success": True, "message": "Manifests rewritten"}
+            else:
+                return {"success": False, "error": "Manifest rewriting not available"}
+
+        else:
+            return {"success": False, "error": f"Unknown action: {action}"}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 @app.route("/api/catalog/table/<path:table_name>")

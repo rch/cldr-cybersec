@@ -102,6 +102,31 @@ SNAPSHOT_EXPIRE_DAYS = 7
 MAX_FILES_PER_PARTITION = 20
 MIN_ROWS_FOR_PARTITIONING = 100_000
 
+# Streaming detection thresholds
+STREAMING_SNAPSHOT_RATIO = 100  # snapshot_count / rows * 100000 - if >100, likely streaming
+
+# Heuristics captured from analysis
+OPTIMIZATION_HEURISTICS = {
+    # File size thresholds
+    "min_file_size_mb": MIN_OPTIMAL_FILE_SIZE,
+    "target_file_size_mb": TARGET_FILE_SIZE,
+    "max_file_size_mb": MAX_OPTIMAL_FILE_SIZE,
+    # File count thresholds
+    "files_per_partition_max": MAX_FILES_PER_PARTITION,
+    "files_per_partition_target": 5,
+    # Snapshot thresholds
+    "max_snapshots": MAX_SNAPSHOTS_BEFORE_EXPIRE,
+    "snapshot_retention_hours": 24,  # For streaming tables
+    "snapshot_retention_days": SNAPSHOT_EXPIRE_DAYS,
+    # Partition heuristics
+    "partition_row_count_min": 10_000,
+    "partition_row_count_target": 100_000,
+    "partition_row_count_max": 1_000_000,
+    # Query pattern thresholds
+    "full_scan_row_threshold": 100_000,
+    "scan_efficiency_threshold": 0.1,
+}
+
 
 ICEBERG_RULES = [
     # --- Compaction Rules ---
@@ -236,6 +261,76 @@ ICEBERG_RULES = [
         priority=200,
         category="optimization",
         description="Suggest sort order for tables with timestamp-based queries",
+    ),
+    # --- Streaming Pattern Detection ---
+    Rule(
+        "detect_streaming_write_pattern",
+        conditions=when(
+            ("table.*.snapshot_count", ">", 100),
+            ("table.*.file_count", ">", 100),
+            # High snapshot-to-row ratio indicates streaming
+        ),
+        actions=then(
+            Action.alert(
+                "Streaming write pattern detected on {table}. Consider batch commits or snapshot coalescing.",
+                severity="warning",
+            )
+        ),
+        priority=700,
+        category="maintenance",
+        description="Detect streaming write pattern causing snapshot/file explosion",
+    ),
+    # --- Small Table Partitioning (lower threshold) ---
+    Rule(
+        "suggest_partitioning_small_table",
+        conditions=when(
+            ("table.*.row_count", ">", 100_000),  # Lower threshold: 100K
+            ("table.*.row_count", "<=", 1_000_000),
+            ("query.*.uses_time_range", "==", True),
+            ("table.*.partition_spec", "==", ""),
+        ),
+        actions=then(
+            Action.alert(
+                "Consider adding time partitioning to {table} for better query performance on time-range filters.",
+                severity="info",
+            )
+        ),
+        priority=280,
+        category="partitioning",
+        description="Suggest partitioning for smaller tables with time-range queries",
+    ),
+    # --- Extreme File Fragmentation ---
+    Rule(
+        "alert_extreme_fragmentation",
+        conditions=when(
+            ("table.*.file_count", ">", 1000),
+            ("table.*.avg_file_size_mb", "==", 0),  # Files < 1MB avg
+        ),
+        actions=then(
+            Action.alert(
+                "CRITICAL: Extreme file fragmentation on {table}. Files averaging < 1MB. Immediate compaction required.",
+                severity="critical",
+            )
+        ),
+        priority=950,
+        category="compaction",
+        description="Alert on extreme file fragmentation (thousands of tiny files)",
+    ),
+    # --- Snapshot Explosion (critical) ---
+    Rule(
+        "alert_snapshot_explosion",
+        conditions=when(
+            ("table.*.snapshot_count", ">", 1000),
+        ),
+        actions=then(
+            Action.alert(
+                "CRITICAL: Snapshot explosion on {table}. {snapshot_count} snapshots causing metadata bloat. Expire immediately.",
+                severity="critical",
+            )
+        ),
+        priority=920,
+        category="maintenance",
+        description="Alert on excessive snapshot accumulation",
     ),
 ]
 

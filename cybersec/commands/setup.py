@@ -18,9 +18,11 @@ def init_commands():
     from .health import register_health_commands
     from .bootstrap import register_bootstrap_commands
     from .policy import register_policy_commands
+    from .schema import register_schema_commands
 
     register_health_commands()
     register_bootstrap_commands()
     register_policy_commands()
+    register_schema_commands()
 
     _initialized = True

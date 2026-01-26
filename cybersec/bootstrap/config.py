@@ -90,6 +90,12 @@ class BootstrapConfig:
     # UI configuration
     ui_theme: str = "solarized-dark"
 
+    # FSN visualization settings
+    fsn_default_mode: str = "cloudtrail"  # "cloudtrail" | "iceberg"
+    fsn_remember_mode: bool = True
+    fsn_iceberg_auto_refresh: bool = False
+    fsn_iceberg_refresh_interval: int = 60  # seconds
+
     def get_minio_data_dir(self) -> Path:
         """Get MinIO data directory, using default if not set."""
         if self.minio_data_dir:
@@ -258,6 +264,13 @@ class SettingsManager:
         if "ui" in data:
             flat["ui_theme"] = data["ui"].get("theme", "solarized-dark")
 
+        # FSN section
+        if "fsn" in data:
+            flat["fsn_default_mode"] = data["fsn"].get("default_mode", "cloudtrail")
+            flat["fsn_remember_mode"] = data["fsn"].get("remember_mode", True)
+            flat["fsn_iceberg_auto_refresh"] = data["fsn"].get("iceberg_auto_refresh", False)
+            flat["fsn_iceberg_refresh_interval"] = data["fsn"].get("iceberg_refresh_interval", 60)
+
         return BootstrapConfig.from_dict(flat)
 
     def _apply_env_overrides(self):
@@ -366,6 +379,12 @@ class SettingsManager:
             },
             "ui": {
                 "theme": self._config.ui_theme,
+            },
+            "fsn": {
+                "default_mode": self._config.fsn_default_mode,
+                "remember_mode": self._config.fsn_remember_mode,
+                "iceberg_auto_refresh": self._config.fsn_iceberg_auto_refresh,
+                "iceberg_refresh_interval": self._config.fsn_iceberg_refresh_interval,
             },
         }
 

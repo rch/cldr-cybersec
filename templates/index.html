@@ -748,6 +748,119 @@
             font-family: var(--font-mono);
         }
 
+        /* FSN Mode Toggle */
+        .fsn-mode-toggle {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: 20px;
+        }
+
+        .fsn-mode-select {
+            background: var(--color-void);
+            color: var(--text-primary);
+            border: 1px solid var(--color-grid);
+            padding: 4px 8px;
+            border-radius: 2px;
+            font-family: var(--font-mono);
+            font-size: 0.85em;
+            cursor: pointer;
+        }
+
+        .fsn-mode-select:hover {
+            border-color: var(--color-amber);
+        }
+
+        .fsn-mode-select:focus {
+            outline: none;
+            border-color: var(--color-amber);
+        }
+
+        /* Iceberg Mode specific styles */
+        .fsn-iceberg-stats {
+            display: none;
+        }
+
+        .fsn-iceberg-stats.active {
+            display: block;
+        }
+
+        .fsn-cloudtrail-stats.hidden {
+            display: none;
+        }
+
+        .fsn-health-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+
+        .fsn-health-critical { background: var(--color-error); }
+        .fsn-health-warning { background: var(--color-warning); }
+        .fsn-health-healthy { background: var(--color-success); }
+
+        /* Recommendation panel */
+        .fsn-recommendations {
+            display: none;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--color-grid);
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .fsn-recommendations.active {
+            display: block;
+        }
+
+        .fsn-rec-item {
+            padding: 6px 8px;
+            margin-bottom: 4px;
+            background: rgba(0, 0, 0, 0.3);
+            border-left: 3px solid var(--color-warning);
+            font-size: 11px;
+        }
+
+        .fsn-rec-item.critical {
+            border-left-color: var(--color-error);
+        }
+
+        .fsn-rec-item.info {
+            border-left-color: var(--color-info);
+        }
+
+        .fsn-rec-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: 4px;
+        }
+
+        .fsn-rec-btn {
+            padding: 2px 8px;
+            font-size: 10px;
+            border: 1px solid var(--color-grid);
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            border-radius: 2px;
+        }
+
+        .fsn-rec-btn:hover {
+            border-color: var(--color-amber);
+            color: var(--color-amber);
+        }
+
+        .fsn-rec-btn.apply {
+            border-color: var(--color-success);
+            color: var(--color-success);
+        }
+
+        .fsn-rec-btn.apply:hover {
+            background: rgba(133, 153, 0, 0.2);
+        }
+
         .fsn-container {
             width: 100%;
             height: 600px;
@@ -1037,23 +1150,50 @@
 
         <!-- 3D File System Navigator - Collapsible for reduced cognitive load -->
         <div class="fsn-row">
-            <div class="fsn-row-header" onclick="toggleFSN()">
-                <span class="fsn-arrow" id="fsn-arrow">&#9654;</span>
-                <span class="fsn-row-title">FSN NAVIGATOR</span>
-                <span class="fsn-row-summary" id="fsn-row-summary">0 regions &middot; 0 services</span>
+            <div class="fsn-row-header">
+                <span class="fsn-arrow" id="fsn-arrow" onclick="toggleFSN()">&#9654;</span>
+                <span class="fsn-row-title" onclick="toggleFSN()">FSN NAVIGATOR</span>
+                <div class="fsn-mode-toggle" onclick="event.stopPropagation()">
+                    <select id="fsn-mode-select" class="fsn-mode-select" onchange="switchFSNMode(this.value)">
+                        <option value="cloudtrail">CloudTrail Events</option>
+                        <option value="iceberg">Iceberg Optimization</option>
+                    </select>
+                </div>
+                <span class="fsn-row-summary" id="fsn-row-summary" onclick="toggleFSN()">0 regions &middot; 0 services</span>
             </div>
             <div class="fsn-container" id="fsn-container" style="display: none;">
                 <canvas id="fsn-canvas"></canvas>
                 <div class="fsn-overlay" id="fsn-overlay">
-                    <h3>ICEBERG FSN</h3>
-                <div class="fsn-stats">
-                    <span class="fsn-label">REGIONS:</span>
-                    <span class="fsn-value" id="fsn-regions">0</span>
-                    <span class="fsn-label">SERVICES:</span>
-                    <span class="fsn-value" id="fsn-services">0</span>
-                    <span class="fsn-label">EVENTS:</span>
-                    <span class="fsn-value" id="fsn-events">0</span>
-                </div>
+                    <h3 id="fsn-overlay-title">CLOUDTRAIL FSN</h3>
+                    <!-- CloudTrail mode stats -->
+                    <div class="fsn-stats fsn-cloudtrail-stats" id="fsn-cloudtrail-stats">
+                        <span class="fsn-label">REGIONS:</span>
+                        <span class="fsn-value" id="fsn-regions">0</span>
+                        <span class="fsn-label">SERVICES:</span>
+                        <span class="fsn-value" id="fsn-services">0</span>
+                        <span class="fsn-label">EVENTS:</span>
+                        <span class="fsn-value" id="fsn-events">0</span>
+                    </div>
+                    <!-- Iceberg mode stats -->
+                    <div class="fsn-stats fsn-iceberg-stats" id="fsn-iceberg-stats">
+                        <div style="margin-bottom: 8px;">
+                            <span class="fsn-label">TABLES:</span>
+                            <span class="fsn-value" id="fsn-table-count">0</span>
+                        </div>
+                        <div style="margin-bottom: 8px;">
+                            <span class="fsn-health-indicator fsn-health-critical"></span>
+                            <span class="fsn-value" id="fsn-critical-count">0</span>
+                            <span class="fsn-health-indicator fsn-health-warning" style="margin-left: 10px;"></span>
+                            <span class="fsn-value" id="fsn-warning-count">0</span>
+                            <span class="fsn-health-indicator fsn-health-healthy" style="margin-left: 10px;"></span>
+                            <span class="fsn-value" id="fsn-healthy-count">0</span>
+                        </div>
+                    </div>
+                    <!-- Recommendations panel (Iceberg mode) -->
+                    <div class="fsn-recommendations" id="fsn-recommendations">
+                        <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 6px;">RECOMMENDATIONS</div>
+                        <div id="fsn-rec-list"></div>
+                    </div>
                 <!-- Selection panel - shown when a block is selected -->
                 <div class="fsn-selection" id="fsn-selection" style="display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--color-amber);">
                     <div style="margin-bottom: 8px;">
@@ -2269,25 +2409,34 @@
 
             // Lazy init on first expand
             if (isHidden && !scene) {
-                // Check if we have useful pending data (with actual events)
-                const hasPendingData = window.pendingFSNData &&
-                    window.pendingFSNData.data &&
-                    window.pendingFSNData.data.length > 0;
+                // Initialize scene first
+                fsnProgress.start();
+                fsnProgress.setStep(0);
+                initFSNScene();
 
-                if (hasPendingData) {
-                    // Skip the fetch, use cached data directly
-                    (async () => {
-                        fsnProgress.start();
-                        fsnProgress.setStep(0);
-                        initFSNScene();
-                        fsnProgress.setStep(2);
-                        await createFSNBlocks(window.pendingFSNData);
-                        fsnProgress.complete();
-                        window.pendingFSNData = null;
-                    })();
+                // Load data based on current mode
+                if (fsnMode.current === 'iceberg') {
+                    fsnMode.updateUI();
+                    fsnMode.loadIcebergData();
                 } else {
-                    // No useful pending data, do full init with fetch
-                    initFSN();
+                    // CloudTrail mode - check for pending data
+                    const hasPendingData = window.pendingFSNData &&
+                        window.pendingFSNData.data &&
+                        window.pendingFSNData.data.length > 0;
+
+                    if (hasPendingData) {
+                        // Skip the fetch, use cached data directly
+                        (async () => {
+                            fsnProgress.setStep(2);
+                            await createFSNBlocks(window.pendingFSNData);
+                            fsnProgress.complete();
+                            window.pendingFSNData = null;
+                        })();
+                    } else {
+                        // No useful pending data, do full init with fetch
+                        fsnProgress.setStep(1);
+                        loadFSNData();
+                    }
                 }
             }
         }
@@ -2614,7 +2763,26 @@
                 tooltip.style.left = (e.clientX + 10) + 'px';
                 tooltip.style.top = (e.clientY + 10) + 'px';
 
-                if (fsnState.currentLevel === 'root') {
+                // Handle Iceberg mode blocks
+                if (data.type === 'iceberg_table') {
+                    const healthLabel = data.health_score >= 0.7 ? 'Healthy' :
+                                       data.health_score >= 0.4 ? 'Warning' : 'Critical';
+                    tooltip.innerHTML = `
+                        <strong>${data.name}</strong><br>
+                        Files: ${data.file_count} | Snapshots: ${data.snapshot_count}<br>
+                        Health: ${(data.health_score * 100).toFixed(0)}% (${healthLabel})<br>
+                        ${data.recommendations && data.recommendations.length > 0 ?
+                            `<em style="color: var(--color-warning);">${data.recommendations.length} recommendation(s)</em>` :
+                            '<em style="color: var(--color-success);">No issues</em>'}
+                    `;
+                } else if (data.type === 'iceberg_partition') {
+                    tooltip.innerHTML = `
+                        <strong>${data.partition_value}</strong><br>
+                        Files: ${data.file_count}<br>
+                        Avg size: ${data.avg_file_size_mb} MB<br>
+                        ${data.needs_compaction ? '<em style="color: var(--color-warning);">Needs compaction</em>' : ''}
+                    `;
+                } else if (fsnState.currentLevel === 'root') {
                     tooltip.innerHTML = `
                         <strong>${data.region} / ${data.service}</strong><br>
                         Events: ${data.count}<br>
@@ -2934,6 +3102,27 @@
             // Show selection panel
             document.getElementById('fsn-selection').style.display = 'block';
 
+            // Handle Iceberg mode blocks
+            if (data.type === 'iceberg_table') {
+                const healthLabel = data.health_score >= 0.7 ? 'Healthy' :
+                                   data.health_score >= 0.4 ? 'Warning' : 'Critical';
+                document.getElementById('fsn-selected-region').textContent = data.name;
+                document.getElementById('fsn-selected-service').textContent = healthLabel;
+                document.getElementById('fsn-selected-count').textContent =
+                    `${data.file_count} files / ${data.snapshot_count} snapshots`;
+
+                // Don't filter CloudTrail events for Iceberg blocks
+                return;
+            }
+
+            if (data.type === 'iceberg_partition') {
+                document.getElementById('fsn-selected-region').textContent = data.partition_value;
+                document.getElementById('fsn-selected-service').textContent = data.needs_compaction ? 'Needs compaction' : 'OK';
+                document.getElementById('fsn-selected-count').textContent = `${data.file_count} files`;
+                return;
+            }
+
+            // CloudTrail mode
             if (fsnState.currentLevel === 'root') {
                 document.getElementById('fsn-selected-region').textContent = data.region;
                 document.getElementById('fsn-selected-service').textContent = data.service;
@@ -3144,6 +3333,313 @@
             camera.updateProjectionMatrix();
             renderer.setSize(width, height);
         }
+
+        // ========================================
+        // FSN Mode System
+        // ========================================
+        const fsnMode = {
+            current: 'cloudtrail',
+            icebergData: null,
+            icebergRecommendations: null,
+            autoRefreshInterval: null,
+
+            async init() {
+                // Load saved mode from settings
+                try {
+                    const response = await fetch('/api/fsn/settings');
+                    const settings = await response.json();
+                    if (settings.default_mode) {
+                        const select = document.getElementById('fsn-mode-select');
+                        if (select) {
+                            select.value = settings.default_mode;
+                            if (settings.default_mode !== 'cloudtrail') {
+                                this.current = settings.default_mode;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.log('Using default FSN mode');
+                }
+            },
+
+            switchTo(mode) {
+                this.current = mode;
+                this.updateUI();
+
+                // Reload visualization if scene exists
+                if (scene) {
+                    if (mode === 'iceberg') {
+                        this.loadIcebergData();
+                    } else {
+                        loadFSNData();  // Original CloudTrail loader
+                    }
+                }
+
+                // Save preference
+                this.savePreference(mode);
+            },
+
+            updateUI() {
+                const title = document.getElementById('fsn-overlay-title');
+                const cloudtrailStats = document.getElementById('fsn-cloudtrail-stats');
+                const icebergStats = document.getElementById('fsn-iceberg-stats');
+                const recommendations = document.getElementById('fsn-recommendations');
+
+                if (this.current === 'iceberg') {
+                    if (title) title.textContent = 'ICEBERG OPTIMIZATION';
+                    if (cloudtrailStats) cloudtrailStats.classList.add('hidden');
+                    if (icebergStats) icebergStats.classList.add('active');
+                    if (recommendations) recommendations.classList.add('active');
+                } else {
+                    if (title) title.textContent = 'CLOUDTRAIL FSN';
+                    if (cloudtrailStats) cloudtrailStats.classList.remove('hidden');
+                    if (icebergStats) icebergStats.classList.remove('active');
+                    if (recommendations) recommendations.classList.remove('active');
+                }
+            },
+
+            async loadIcebergData() {
+                fsnProgress.start();
+                fsnProgress.setStep(0);
+
+                try {
+                    fsnProgress.setStep(1, 'Fetching Iceberg tables...');
+                    const tablesResponse = await fetch('/api/fsn/iceberg/tables');
+                    this.icebergData = await tablesResponse.json();
+
+                    if (this.icebergData.error) {
+                        fsnProgress.error('Error: ' + this.icebergData.error);
+                        return;
+                    }
+
+                    // Update stats
+                    document.getElementById('fsn-table-count').textContent = this.icebergData.tables.length;
+                    document.getElementById('fsn-critical-count').textContent = this.icebergData.summary.critical || 0;
+                    document.getElementById('fsn-warning-count').textContent = this.icebergData.summary.warnings || 0;
+                    document.getElementById('fsn-healthy-count').textContent = this.icebergData.summary.healthy || 0;
+
+                    // Update row summary
+                    const critical = this.icebergData.summary.critical || 0;
+                    const warnings = this.icebergData.summary.warnings || 0;
+                    document.getElementById('fsn-row-summary').textContent =
+                        `${this.icebergData.tables.length} tables \u00b7 ${critical} critical \u00b7 ${warnings} warnings`;
+
+                    // Load recommendations
+                    fsnProgress.setStep(1, 'Loading recommendations...');
+                    const recsResponse = await fetch('/api/fsn/iceberg/recommendations');
+                    this.icebergRecommendations = await recsResponse.json();
+                    this.renderRecommendations();
+
+                    // Create visualization
+                    fsnProgress.setStep(2, 'Creating visualization...');
+                    await this.createIcebergBlocks();
+
+                    fsnProgress.complete();
+                } catch (error) {
+                    console.error('Error loading Iceberg data:', error);
+                    fsnProgress.error('Error loading data');
+                }
+            },
+
+            async createIcebergBlocks() {
+                // Clear existing blocks
+                fsnObjects.forEach(obj => scene.remove(obj));
+                fsnObjects = [];
+                fsnLabels.forEach(label => scene.remove(label));
+                fsnLabels = [];
+
+                if (!this.icebergData || !this.icebergData.tables || this.icebergData.tables.length === 0) {
+                    fsnProgress.empty();
+                    return;
+                }
+
+                const tables = this.icebergData.tables;
+                const maxFiles = Math.max(...tables.map(t => t.file_count || 1));
+                const gridSize = Math.ceil(Math.sqrt(tables.length));
+                const spacing = 12;
+                const startX = -(gridSize * spacing) / 2 + spacing / 2;
+                const startZ = -(gridSize * spacing) / 2 + spacing / 2;
+
+                const blocksToAnimate = [];
+
+                fsnProgress.setStep(3, 'Rendering blocks...');
+
+                tables.forEach((table, index) => {
+                    const row = Math.floor(index / gridSize);
+                    const col = index % gridSize;
+
+                    // Height based on file count (more files = taller = more fragmentation)
+                    const targetHeight = Math.max(3, (table.file_count / maxFiles) * 25);
+                    const initialHeight = 0.5;
+
+                    // Color based on health score
+                    const blockColor = this.getHealthColor(table.health_score);
+
+                    const themeColors = getThemeBlockColors();
+                    const geometry = new THREE.BoxGeometry(8, initialHeight, 8);
+                    const material = new THREE.MeshPhongMaterial({
+                        color: themeColors.base,
+                        emissive: blockColor,
+                        emissiveIntensity: 0.3,
+                        shininess: 80,
+                        specular: themeColors.specular,
+                        transparent: true,
+                        opacity: 0.9,
+                    });
+
+                    const block = new THREE.Mesh(geometry, material);
+                    block.position.set(
+                        startX + col * spacing,
+                        initialHeight / 2,
+                        startZ + row * spacing
+                    );
+
+                    block.userData = {
+                        type: 'iceberg_table',
+                        table: table.full_name,
+                        name: table.name,
+                        file_count: table.file_count,
+                        snapshot_count: table.snapshot_count,
+                        health_score: table.health_score,
+                        recommendations: table.recommendations,
+                        originalEmissive: blockColor,
+                        targetHeight: targetHeight,
+                    };
+
+                    blocksToAnimate.push(block);
+                    scene.add(block);
+                    fsnObjects.push(block);
+
+                    // Add wireframe for snapshot warning
+                    if (table.snapshot_count > 50) {
+                        const edges = new THREE.EdgesGeometry(geometry);
+                        const lineMaterial = new THREE.LineBasicMaterial({
+                            color: 0xcb4b16,  // Amber/warning
+                            opacity: 0.8,
+                            transparent: true,
+                        });
+                        const wireframe = new THREE.LineSegments(edges, lineMaterial);
+                        block.add(wireframe);
+                    }
+                });
+
+                // Animate blocks rising
+                await animateBlocksToHeight(blocksToAnimate, 8);
+            },
+
+            getHealthColor(score) {
+                // Green -> Yellow -> Red based on health score
+                if (score >= 0.7) return 0x859900;  // Solarized green (healthy)
+                if (score >= 0.4) return 0xcb4b16;  // Solarized orange (warning)
+                return 0xdc322f;  // Solarized red (critical)
+            },
+
+            renderRecommendations() {
+                const list = document.getElementById('fsn-rec-list');
+                if (!list || !this.icebergRecommendations) return;
+
+                list.innerHTML = '';
+
+                // Show top 5 recommendations
+                const recs = this.icebergRecommendations.recommendations.slice(0, 5);
+
+                recs.forEach(rec => {
+                    const severity = rec.severity || 'warning';
+                    const div = document.createElement('div');
+                    div.className = `fsn-rec-item ${severity}`;
+                    div.innerHTML = `
+                        <div><strong>${rec.rule_id}</strong>: ${rec.table.split('.').pop()}</div>
+                        <div style="color: var(--text-muted); font-size: 10px;">${rec.description}</div>
+                        <div class="fsn-rec-actions">
+                            <button class="fsn-rec-btn" onclick="fsnMode.previewFix('${rec.table}', '${rec.action_type}')">Preview</button>
+                            <button class="fsn-rec-btn apply" onclick="fsnMode.applyFix('${rec.table}', '${rec.action_type}')">Apply</button>
+                        </div>
+                    `;
+                    list.appendChild(div);
+                });
+
+                if (recs.length === 0) {
+                    list.innerHTML = '<div style="color: var(--text-muted);">No recommendations</div>';
+                }
+            },
+
+            async previewFix(table, action) {
+                try {
+                    const response = await fetch('/api/fsn/iceberg/apply', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ table, action, dry_run: true }),
+                    });
+                    const result = await response.json();
+
+                    // Show preview in selection panel
+                    const selection = document.getElementById('fsn-selection');
+                    selection.style.display = 'block';
+                    document.getElementById('fsn-selected-region').textContent = action.toUpperCase();
+                    document.getElementById('fsn-selected-service').textContent = table.split('.').pop();
+
+                    if (result.preview) {
+                        const preview = result.preview;
+                        let countText = '';
+                        if (action === 'compact') {
+                            countText = `${preview.current_files} → ${preview.expected_files} files (${preview.reduction_percent}% reduction)`;
+                        } else if (action === 'expire') {
+                            countText = `${preview.to_expire} snapshots to remove`;
+                        } else {
+                            countText = JSON.stringify(preview);
+                        }
+                        document.getElementById('fsn-selected-count').textContent = countText;
+                    }
+                } catch (error) {
+                    console.error('Preview error:', error);
+                    alert('Preview failed: ' + error.message);
+                }
+            },
+
+            async applyFix(table, action) {
+                if (!confirm(`Apply ${action} to ${table}?`)) return;
+
+                try {
+                    const response = await fetch('/api/fsn/iceberg/apply', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ table, action, dry_run: false }),
+                    });
+                    const result = await response.json();
+
+                    if (result.success) {
+                        alert(`Success: ${result.message}`);
+                        // Reload Iceberg data to show updated state
+                        this.loadIcebergData();
+                    } else {
+                        alert(`Failed: ${result.error || 'Unknown error'}`);
+                    }
+                } catch (error) {
+                    console.error('Apply error:', error);
+                    alert('Apply failed: ' + error.message);
+                }
+            },
+
+            async savePreference(mode) {
+                try {
+                    await fetch('/api/fsn/settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ default_mode: mode }),
+                    });
+                } catch (e) {
+                    console.log('Could not save FSN preference');
+                }
+            },
+        };
+
+        // Global function for mode switching (called from dropdown)
+        function switchFSNMode(mode) {
+            fsnMode.switchTo(mode);
+        }
+
+        // Initialize FSN mode system
+        fsnMode.init();
 
         // FSN is lazy-initialized on first expand (not on page load)
         // This reduces initial page load time and cognitive load

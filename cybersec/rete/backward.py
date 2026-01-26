@@ -221,8 +221,18 @@ class BackwardChainer:
         self.goals[goal.goal_id] = goal
 
     def assert_fact(self, fact: Fact) -> None:
-        """Add a fact to working memory."""
-        self.facts[fact.key] = fact
+        """Add or update a fact in working memory.
+
+        If a fact with the same key exists, merges the new attributes
+        with existing ones (new values override existing).
+        """
+        existing = self.facts.get(fact.key)
+        if existing:
+            # Merge attributes - new values override existing
+            merged_attrs = {**existing.attributes, **fact.attributes}
+            self.facts[fact.key] = Fact(fact.fact_type, fact.fact_id, **merged_attrs)
+        else:
+            self.facts[fact.key] = fact
 
     def retract_fact(self, fact_key: str) -> None:
         """Remove a fact from working memory."""
@@ -237,6 +247,9 @@ class BackwardChainer:
         """
         Get the value of a fact attribute from working memory.
 
+        Supports wildcard patterns like "fact_type.*.attribute" which
+        matches any fact of the given type.
+
         Returns (exists, value) tuple.
         """
         parts = pattern.split(".")
@@ -244,8 +257,17 @@ class BackwardChainer:
             return False, None
 
         fact_type, fact_id, attr = parts[0], parts[1], ".".join(parts[2:])
-        fact_key = f"{fact_type}.{fact_id}"
 
+        # Handle wildcard: find any matching fact of this type
+        if fact_id == "*":
+            for fact_key, fact in self.facts.items():
+                if fact_key.startswith(f"{fact_type}."):
+                    if attr in fact.attributes:
+                        return True, fact.attributes[attr]
+            return False, None
+
+        # Exact match
+        fact_key = f"{fact_type}.{fact_id}"
         fact = self.facts.get(fact_key)
         if fact is None:
             return False, None
