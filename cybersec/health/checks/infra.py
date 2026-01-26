@@ -172,50 +172,76 @@ async def check_polaris(ctx: HealthContext) -> CheckResult:
 
 
 async def check_shared_memory(ctx: HealthContext) -> CheckResult:
-    """INFRA_004: Check for shared memory exhaustion in process-compose logs.
+    """INFRA_004: Check for orphaned shared memory segments.
 
     On macOS, orphaned IPC shared memory segments from previous devenv crashes
     can accumulate and exhaust system limits, preventing PostgreSQL from starting.
+
+    Proactively checks for orphaned segments owned by current user via ipcs -m.
     """
+    import platform
+    import subprocess
+
     start = time.monotonic()
 
-    # Locate process-compose log
-    devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
-    log_path = Path(devenv_root) / ".devenv" / "state" / "process-compose" / "process-compose.log"
-
-    if not log_path.exists():
-        return CheckResult.skipped("process-compose log not found")
+    # Only relevant on macOS (Linux handles this differently)
+    if platform.system() != "Darwin":
+        return CheckResult.skipped("Shared memory check only applies to macOS")
 
     try:
-        # Read last portion of log file for efficiency
-        content = log_path.read_text(errors='ignore')
-        lines = content.split('\n')[-1000:]
-
-        # Search for shared memory error pattern
-        shm_error = any(
-            "No space left on device" in line and "shared memory" in line.lower()
-            for line in lines
+        # Check for orphaned shared memory segments
+        result = subprocess.run(
+            ["ipcs", "-m"],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
+
+        if result.returncode != 0:
+            duration = int((time.monotonic() - start) * 1000)
+            return CheckResult.error(f"ipcs command failed: {result.stderr}", duration_ms=duration)
+
+        # Parse ipcs output - count segments owned by current user
+        # Format: T ID KEY MODE OWNER GROUP (header + data lines)
+        lines = result.stdout.strip().split('\n')
+        current_user = os.environ.get("USER", "")
+
+        orphan_count = 0
+        for line in lines:
+            parts = line.split()
+            # Skip header lines and empty lines
+            if len(parts) >= 5 and parts[0] == 'm':
+                owner = parts[4] if len(parts) > 4 else ""
+                if owner == current_user:
+                    orphan_count += 1
 
         duration = int((time.monotonic() - start) * 1000)
 
-        if shm_error:
+        # Any segments from current user are likely orphaned (PostgreSQL cleans up on normal exit)
+        if orphan_count > 0:
             rpn = INFRA_004.calculate_rpn()
-            return CheckResult.critical(
-                "Shared memory exhaustion detected - orphaned IPC segments",
+            return CheckResult.warning(
+                f"Found {orphan_count} orphaned shared memory segment(s)",
                 failure_mode_id="INFRA_004",
                 rpn=rpn,
                 remediation="Run: /health fix --apply",
+                segment_count=orphan_count,
                 duration_ms=duration,
             )
 
-        result = CheckResult.ok("No shared memory issues")
-        result.duration_ms = duration
-        return result
+        result_obj = CheckResult.ok("No orphaned shared memory segments")
+        result_obj.duration_ms = duration
+        return result_obj
 
+    except subprocess.TimeoutExpired:
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.error("ipcs command timed out", duration_ms=duration)
+    except FileNotFoundError:
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.skipped("ipcs command not found")
     except Exception as e:
         duration = int((time.monotonic() - start) * 1000)
-        return CheckResult.error(f"Failed to parse process-compose log: {e}", duration_ms=duration)
+        return CheckResult.error(f"Failed to check shared memory: {e}", duration_ms=duration)
 
 
 # Registry of all infra checks
