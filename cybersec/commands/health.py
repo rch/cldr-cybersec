@@ -66,7 +66,7 @@ async def cmd_health_pyflink(cmd: ParsedCommand) -> CommandResult:
         --json, -j  Output as JSON
     """
     from ..health.pyflink_diagnostics import gather_pyflink_diagnostics
-    from ..health.pyflink_fixes import apply_pyflink_fixes
+    from ..health.fixes import apply_fixes
     from ..health.environment import run_conftest
     from ..config.runtime import gather_runtime_config, merge_runtime_config
     from ..config import load_config, hydrate_config
@@ -120,7 +120,7 @@ async def cmd_health_pyflink(cmd: ParsedCommand) -> CommandResult:
     # Compute planned fixes (dry-run) to show what would be changed
     issues = data.get("issues", [])
     if issues:
-        planned_fixes = await apply_pyflink_fixes(data, dry_run=True)
+        planned_fixes = await apply_fixes(data, dry_run=True)
         data["planned_fixes"] = planned_fixes
 
     formatted = _format_pyflink_diagnostics(data)
@@ -146,7 +146,7 @@ async def cmd_health_fix_pyflink(cmd: ParsedCommand) -> CommandResult:
         --json, -j  Output as JSON
     """
     from ..health.pyflink_diagnostics import gather_pyflink_diagnostics
-    from ..health.pyflink_fixes import apply_pyflink_fixes
+    from ..health.fixes import apply_fixes
 
     dry_run = cmd.options.get("dry-run", False) or cmd.options.get("dry_run", False)
 
@@ -162,7 +162,7 @@ async def cmd_health_fix_pyflink(cmd: ParsedCommand) -> CommandResult:
         )
 
     # Apply fixes
-    fix_results = await apply_pyflink_fixes(diagnostics, dry_run=dry_run)
+    fix_results = await apply_fixes(diagnostics, dry_run=dry_run)
 
     data = {
         "dry_run": dry_run,
@@ -254,7 +254,7 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
     )
     from ..health.models import HealthContext
     from ..health.runner import run_health_check
-    from ..health.pyflink_fixes import apply_pyflink_fixes
+    from ..health.fixes import apply_fixes
 
     dry_run = not cmd.options.get("apply", False)
     target = cmd.args[0] if cmd.args else None
@@ -272,12 +272,20 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
     )
 
     # Automatable failure modes (can be fixed without user intervention)
-    # Note: PYFLINK_001 (PyFlink not installed) requires manual `uv sync`
+    # Manual fixes (require user action):
+    #   - PYFLINK_001: PyFlink not installed -> uv sync
+    #   - PYFLINK_003: kafka-python missing -> uv add kafka-python && uv sync
+    #   - PYFLINK_004: FLINK_HOME not set -> environment setup
+    #   - PYFLINK_006: Log errors -> diagnostic review
+    #   - PYFLINK_010: FLINK_HOME not exported -> shell config
+    #   - PYFLINK_013: Submodules not initialized -> git submodule update
+    #   - FLINK_005: Job stuck -> manual investigation
     automatable_fixes = {
-        "FLINK_004", "FLINK_005",
-        "PYFLINK_002", "PYFLINK_003", "PYFLINK_005",
-        "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_011", "PYFLINK_012", "PYFLINK_014",
-        "INFRA_004",
+        "FLINK_004",  # DataGen bounded source fix
+        "PYFLINK_002", "PYFLINK_005", "PYFLINK_009",  # Python path config
+        "PYFLINK_007", "PYFLINK_008",  # Cluster restart
+        "PYFLINK_011", "PYFLINK_012", "PYFLINK_014",  # Iceberg JARs
+        "INFRA_004",  # Shared memory cleanup
     }
 
     # Determine what to fix
@@ -354,7 +362,7 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
             formatted="\n".join(lines),
         )
 
-    # Build diagnostics dict for apply_pyflink_fixes
+    # Build diagnostics dict for apply_fixes
     diagnostics = {
         "issues": fixable_issues,
         "python_environment": {
@@ -365,7 +373,7 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
     }
 
     # Apply fixes
-    fix_results = await apply_pyflink_fixes(diagnostics, dry_run=dry_run)
+    fix_results = await apply_fixes(diagnostics, dry_run=dry_run)
 
     data = {
         "mode": mode,

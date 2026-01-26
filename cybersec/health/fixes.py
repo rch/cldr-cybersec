@@ -1,6 +1,9 @@
-"""PyFlink fix implementations.
+"""Health fix implementations.
 
-Provides automated fixes for detected PyFlink issues.
+Provides automated fixes for detected health issues across all categories:
+- Flink/PyFlink environment issues
+- Infrastructure issues (shared memory, etc.)
+
 Uses FMEA tier system to determine which fixes can be auto-applied.
 """
 
@@ -12,11 +15,11 @@ from pathlib import Path
 from typing import Any
 
 
-async def apply_pyflink_fixes(diagnostics: dict, dry_run: bool = True) -> list[dict[str, Any]]:
-    """Apply fixes for detected PyFlink issues.
+async def apply_fixes(diagnostics: dict, dry_run: bool = True) -> list[dict[str, Any]]:
+    """Apply fixes for detected health issues.
 
     Args:
-        diagnostics: Output from gather_pyflink_diagnostics()
+        diagnostics: Dict containing 'issues' list from health checks
         dry_run: If True, show what would be done without making changes
 
     Returns:
@@ -37,19 +40,9 @@ async def apply_pyflink_fixes(diagnostics: dict, dry_run: bool = True) -> list[d
     for issue in issues:
         failure_mode_id = issue.get("failure_mode_id", "")
 
-        if failure_mode_id == "PYFLINK_001":
-            # PyFlink not installed - can auto-fix
-            result = await _fix_pyflink_not_installed(dry_run)
-            results.append(result)
-
-        elif failure_mode_id == "PYFLINK_002":
+        if failure_mode_id == "PYFLINK_002":
             # Python path mismatch - fix flink-conf.yaml
             result = await _fix_python_path_mismatch(diagnostics, flink_home, dry_run)
-            results.append(result)
-
-        elif failure_mode_id == "PYFLINK_003":
-            # kafka-python missing - can auto-fix
-            result = await _fix_kafka_python_missing(dry_run)
             results.append(result)
 
         elif failure_mode_id == "PYFLINK_004":
@@ -139,84 +132,6 @@ async def apply_pyflink_fixes(diagnostics: dict, dry_run: bool = True) -> list[d
             results.append(result)
 
     return results
-
-
-async def _fix_pyflink_not_installed(dry_run: bool) -> dict[str, Any]:
-    """Fix: Install PyFlink package."""
-    import subprocess
-
-    result = {
-        "failure_mode_id": "PYFLINK_001",
-        "action": "install_package",
-        "package": "apache-flink",
-        "command": "uv pip install apache-flink",
-    }
-
-    if dry_run:
-        result["success"] = True
-        result["message"] = "Would install apache-flink package"
-        result["dry_run"] = True
-        return result
-
-    try:
-        proc = subprocess.run(
-            ["uv", "pip", "install", "apache-flink"],
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5 min timeout
-        )
-        if proc.returncode == 0:
-            result["success"] = True
-            result["message"] = "Installed apache-flink package"
-            result["output"] = proc.stdout
-        else:
-            result["success"] = False
-            result["message"] = "Failed to install apache-flink"
-            result["error"] = proc.stderr
-    except Exception as e:
-        result["success"] = False
-        result["message"] = f"Error installing package: {e}"
-
-    return result
-
-
-async def _fix_kafka_python_missing(dry_run: bool) -> dict[str, Any]:
-    """Fix: Install kafka-python package."""
-    import subprocess
-
-    result = {
-        "failure_mode_id": "PYFLINK_003",
-        "action": "install_package",
-        "package": "kafka-python",
-        "command": "uv pip install kafka-python",
-    }
-
-    if dry_run:
-        result["success"] = True
-        result["message"] = "Would install kafka-python package"
-        result["dry_run"] = True
-        return result
-
-    try:
-        proc = subprocess.run(
-            ["uv", "pip", "install", "kafka-python"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if proc.returncode == 0:
-            result["success"] = True
-            result["message"] = "Installed kafka-python package"
-            result["output"] = proc.stdout
-        else:
-            result["success"] = False
-            result["message"] = "Failed to install kafka-python"
-            result["error"] = proc.stderr
-    except Exception as e:
-        result["success"] = False
-        result["message"] = f"Error installing package: {e}"
-
-    return result
 
 
 async def _fix_python_path_mismatch(
