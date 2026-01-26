@@ -18,62 +18,154 @@ from ..catalog import get_failure_mode
 
 
 async def check_pyflink_installed(ctx: HealthContext) -> CheckResult:
-    """PYFLINK_001: Check PyFlink is installed in devenv Python.
+    """PYFLINK_001: Check PyFlink is installed and accessible.
 
-    Verifies the devenv Python can import pyflink module.
+    Checks if any Python in the environment has pyflink installed.
+    This is a prerequisite check - PYFLINK_002 checks if Flink is configured correctly.
     """
     start = time.monotonic()
 
     devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
-    devenv_python = Path(devenv_root) / ".devenv" / "profile" / "bin" / "python3"
 
-    if not devenv_python.exists():
+    # Check candidate Python paths in order of preference
+    candidates = [
+        ("uv_venv", Path(devenv_root) / ".devenv" / "state" / "venv" / "bin" / "python3"),
+        ("devenv_profile", Path(devenv_root) / ".devenv" / "profile" / "bin" / "python3"),
+    ]
+
+    pyflink_found = None
+    for name, python_path in candidates:
+        if not python_path.exists():
+            continue
+        try:
+            result = subprocess.run(
+                [str(python_path), "-c", "import pyflink; print(pyflink.__version__)"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                pyflink_found = (name, str(python_path), result.stdout.strip())
+                break
+        except (subprocess.TimeoutExpired, Exception):
+            continue
+
+    duration = int((time.monotonic() - start) * 1000)
+
+    if pyflink_found:
+        name, python_path, version = pyflink_found
+        result_obj = CheckResult.ok(
+            f"PyFlink {version} found in {name}",
+            version=version,
+            python=python_path,
+            location=name,
+        )
+        result_obj.duration_ms = duration
+        return result_obj
+    else:
+        fm = get_failure_mode("PYFLINK_001")
+        rpn = fm.calculate_rpn() if fm else None
+
+        return CheckResult.critical(
+            "PyFlink not installed in any Python environment",
+            failure_mode_id="PYFLINK_001",
+            rpn=rpn,
+            remediation="Run: uv sync",
+            checked_paths=[str(p) for _, p in candidates if p.exists()],
+            duration_ms=duration,
+        )
+
+
+async def check_flink_python_config(ctx: HealthContext) -> CheckResult:
+    """PYFLINK_002: Check Flink is configured to use a Python with pyflink.
+
+    Verifies python.executable in flink-conf.yaml points to a Python that has pyflink.
+    """
+    start = time.monotonic()
+
+    # Get Flink home
+    flink_home = ctx.config.get_flink_home() if ctx.config else None
+    if not flink_home:
+        devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
+        flink_home = Path(devenv_root) / "thirdparty" / "flink" / "flink-dist" / "target" / "flink-1.20.1-bin" / "flink-1.20.1"
+
+    flink_conf = flink_home / "conf" / "flink-conf.yaml"
+
+    if not flink_conf.exists():
         duration = int((time.monotonic() - start) * 1000)
-        return CheckResult.skipped(
-            "Devenv Python not found",
-            devenv_python=str(devenv_python),
+        result = CheckResult.skipped(f"flink-conf.yaml not found: {flink_conf}")
+        result.duration_ms = duration
+        return result
+
+    # Read configured Python path
+    content = flink_conf.read_text()
+    configured_python = None
+    for line in content.split('\n'):
+        if line.strip().startswith('python.executable:'):
+            configured_python = line.split(':', 1)[1].strip()
+            break
+
+    duration = int((time.monotonic() - start) * 1000)
+
+    if not configured_python:
+        fm = get_failure_mode("PYFLINK_002")
+        rpn = fm.calculate_rpn() if fm else None
+        return CheckResult.warning(
+            "python.executable not configured in flink-conf.yaml",
+            failure_mode_id="PYFLINK_002",
+            rpn=rpn,
+            remediation="Run: /health fix --apply",
+            flink_conf=str(flink_conf),
+            duration_ms=duration,
+        )
+
+    # Check if configured Python has pyflink
+    if not Path(configured_python).exists():
+        fm = get_failure_mode("PYFLINK_002")
+        rpn = fm.calculate_rpn() if fm else None
+        return CheckResult.critical(
+            f"Configured Python does not exist: {configured_python}",
+            failure_mode_id="PYFLINK_002",
+            rpn=rpn,
+            remediation="Run: /health fix --apply",
+            configured_python=configured_python,
             duration_ms=duration,
         )
 
     try:
         result = subprocess.run(
-            [str(devenv_python), "-c", "import pyflink; print(pyflink.__version__)"],
+            [configured_python, "-c", "import pyflink; print(pyflink.__version__)"],
             capture_output=True,
             text=True,
             timeout=10,
         )
 
-        duration = int((time.monotonic() - start) * 1000)
-
         if result.returncode == 0:
             version = result.stdout.strip()
             result_obj = CheckResult.ok(
-                f"PyFlink installed: {version}",
+                f"Flink configured with PyFlink {version}",
                 version=version,
-                python=str(devenv_python),
+                configured_python=configured_python,
             )
             result_obj.duration_ms = duration
             return result_obj
         else:
-            fm = get_failure_mode("PYFLINK_001")
+            fm = get_failure_mode("PYFLINK_002")
             rpn = fm.calculate_rpn() if fm else None
-
             return CheckResult.critical(
-                "PyFlink not installed in devenv Python",
-                failure_mode_id="PYFLINK_001",
+                f"Configured Python missing pyflink: {configured_python}",
+                failure_mode_id="PYFLINK_002",
                 rpn=rpn,
-                remediation="Run: uv sync",
-                python=str(devenv_python),
-                error=result.stderr.strip(),
+                remediation="Run: /health fix --apply",
+                configured_python=configured_python,
+                error=result.stderr.strip()[:200],
                 duration_ms=duration,
             )
 
     except subprocess.TimeoutExpired:
-        duration = int((time.monotonic() - start) * 1000)
-        return CheckResult.error("PyFlink check timed out", duration_ms=duration)
+        return CheckResult.error("Python check timed out", duration_ms=duration)
     except Exception as e:
-        duration = int((time.monotonic() - start) * 1000)
-        return CheckResult.error(f"Failed to check PyFlink: {e}", duration_ms=duration)
+        return CheckResult.error(f"Failed to check Python config: {e}", duration_ms=duration)
 
 
 async def check_submodules(ctx: HealthContext) -> CheckResult:
@@ -191,6 +283,7 @@ async def check_iceberg_jars(ctx: HealthContext) -> CheckResult:
 # Registry of all pyflink checks
 CHECKS: dict[str, Any] = {
     "PYFLINK_001": check_pyflink_installed,
+    "PYFLINK_002": check_flink_python_config,
     "PYFLINK_011": check_iceberg_jars,
     "PYFLINK_012": check_iceberg_jars,  # Same check covers both
     "PYFLINK_013": check_submodules,

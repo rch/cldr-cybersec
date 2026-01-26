@@ -11,8 +11,50 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
+
+
+async def _find_python_with_pyflink() -> str | None:
+    """Find a Python interpreter that has pyflink installed.
+
+    Checks multiple candidate paths in order of preference:
+    1. UV virtualenv Python (.devenv/state/venv/bin/python3)
+    2. Devenv profile Python (.devenv/profile/bin/python3)
+    3. Current Python (sys.executable)
+
+    Returns the first one that can import pyflink, or None if none found.
+    """
+    import sys
+
+    devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
+
+    candidates = [
+        # UV virtualenv - where uv sync installs packages
+        Path(devenv_root) / ".devenv" / "state" / "venv" / "bin" / "python3",
+        # Devenv profile Python
+        Path(devenv_root) / ".devenv" / "profile" / "bin" / "python3",
+        # Current Python
+        Path(sys.executable),
+    ]
+
+    for python_path in candidates:
+        if not python_path.exists():
+            continue
+
+        try:
+            result = subprocess.run(
+                [str(python_path), "-c", "import pyflink"],
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return str(python_path)
+        except (subprocess.TimeoutExpired, Exception):
+            continue
+
+    return None
 
 
 async def apply_fixes(diagnostics: dict, dry_run: bool = True) -> list[dict[str, Any]]:
@@ -157,18 +199,12 @@ async def _fix_python_path_mismatch(
         result["message"] = f"flink-conf.yaml not found at {flink_conf_path}"
         return result
 
-    # Determine the correct Python path
-    py_env = diagnostics.get("python_environment", {})
-
-    # Prefer devenv Python on macOS, otherwise use current executable
-    if platform.system() == "Darwin" and py_env.get("devenv_python_exists"):
-        python_path = py_env.get("devenv_python")
-    else:
-        python_path = py_env.get("executable")
+    # Determine the correct Python path - must have pyflink installed
+    python_path = await _find_python_with_pyflink()
 
     if not python_path:
         result["success"] = False
-        result["message"] = "Could not determine correct Python path"
+        result["message"] = "Could not find a Python with pyflink installed. Run: uv sync"
         return result
 
     result["python_path"] = python_path
