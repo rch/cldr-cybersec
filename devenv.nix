@@ -862,18 +862,19 @@ except Exception as e:
         NIFI_PACKAGE="$PWD/thirdparty/nifi/nifi-2.0.0"
 
         if [ ! -d "$NIFI_PACKAGE" ]; then
-          echo "ERROR: NiFi not found at $NIFI_PACKAGE"
+          echo "NiFi not found at $NIFI_PACKAGE"
+          echo "Downloading NiFi 2.0.0..."
           echo ""
-          echo "To install NiFi, run:"
-          echo "  ./scripts/setup_nifi_bin.sh 2.0.0"
-          echo ""
-          echo "Or use the health system:"
-          echo "  cybersec \"/health fix --apply\""
-          echo ""
-          echo "To disable NiFi (not recommended), set DISABLE_NIFI=true"
-          echo ""
-          # NiFi is required - fail if not available
-          exit 1
+          if [ -x "$PWD/scripts/setup_nifi_bin.sh" ]; then
+            "$PWD/scripts/setup_nifi_bin.sh" 2.0.0
+            if [ ! -d "$NIFI_PACKAGE" ]; then
+              echo "ERROR: NiFi download failed"
+              exit 1
+            fi
+          else
+            echo "ERROR: Setup script not found at $PWD/scripts/setup_nifi_bin.sh"
+            exit 1
+          fi
         fi
 
         # NiFi 2.0 requires running from the package directory for proper JAR loading.
@@ -995,7 +996,7 @@ except Exception as e:
           period_seconds = 5;
           failure_threshold = 24;
         };
-        # Required by default - disable with DISABLE_NIFI=true (not recommended)
+        # Auto-downloads if missing. Disable with DISABLE_NIFI=true (not recommended)
       };
     };
   };
