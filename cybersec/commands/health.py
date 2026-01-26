@@ -268,6 +268,7 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
         "FLINK_004", "FLINK_005",
         "PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_005",
         "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_011", "PYFLINK_012", "PYFLINK_014",
+        "INFRA_004",
     }
 
     if failure_mode_id in automatable_fixes:
@@ -368,6 +369,15 @@ def _format_single_fix(fix_result: dict, failure_mode, dry_run: bool) -> str:
                 for i, step in enumerate(fix_result["steps"], 1):
                     lines.append(f"    {i}. {step}")
 
+        elif action == "cleanup_shared_memory":
+            lines.append(f"  {message}")
+            if fix_result.get("segments"):
+                lines.append(f"  Segments to clean: {len(fix_result['segments'])}")
+                for seg in fix_result["segments"][:5]:  # Show first 5
+                    lines.append(f"    - shmid {seg}")
+                if len(fix_result["segments"]) > 5:
+                    lines.append(f"    ... and {len(fix_result['segments']) - 5} more")
+
         else:
             lines.append(f"  {message}")
 
@@ -386,6 +396,14 @@ def _format_single_fix(fix_result: dict, failure_mode, dry_run: bool) -> str:
             lines.append("  Removed:")
             for line in fix_result["removed_lines"]:
                 lines.append(f"    - {line}")
+
+        # Handle shared memory cleanup results
+        if fix_result.get("removed"):
+            lines.append(f"  Cleaned up segments: {len(fix_result['removed'])}")
+        if fix_result.get("failed"):
+            lines.append(f"  Failed to clean: {len(fix_result['failed'])}")
+            for f in fix_result["failed"][:3]:
+                lines.append(f"    - shmid {f['shmid']}: {f.get('error', 'unknown error')}")
 
         if fix_result.get("restart_required"):
             lines.append("")

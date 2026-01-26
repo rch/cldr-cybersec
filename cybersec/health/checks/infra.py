@@ -4,16 +4,19 @@ Checks for:
 - INFRA_001: PostgreSQL down
 - INFRA_002: MinIO unhealthy
 - INFRA_003: Polaris degraded
+- INFRA_004: macOS Shared Memory Exhaustion
 """
 
+import os
 import socket
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from ..models import CheckResult, HealthContext
-from ..catalog import INFRA_001, INFRA_002, INFRA_003
+from ..catalog import INFRA_001, INFRA_002, INFRA_003, INFRA_004
 
 
 async def check_postgres(ctx: HealthContext) -> CheckResult:
@@ -168,9 +171,57 @@ async def check_polaris(ctx: HealthContext) -> CheckResult:
         return CheckResult.error(f"Failed to check Polaris: {e}", duration_ms=duration)
 
 
+async def check_shared_memory(ctx: HealthContext) -> CheckResult:
+    """INFRA_004: Check for shared memory exhaustion in process-compose logs.
+
+    On macOS, orphaned IPC shared memory segments from previous devenv crashes
+    can accumulate and exhaust system limits, preventing PostgreSQL from starting.
+    """
+    start = time.monotonic()
+
+    # Locate process-compose log
+    devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
+    log_path = Path(devenv_root) / ".devenv" / "state" / "process-compose" / "process-compose.log"
+
+    if not log_path.exists():
+        return CheckResult.skipped("process-compose log not found")
+
+    try:
+        # Read last portion of log file for efficiency
+        content = log_path.read_text(errors='ignore')
+        lines = content.split('\n')[-1000:]
+
+        # Search for shared memory error pattern
+        shm_error = any(
+            "No space left on device" in line and "shared memory" in line.lower()
+            for line in lines
+        )
+
+        duration = int((time.monotonic() - start) * 1000)
+
+        if shm_error:
+            rpn = INFRA_004.calculate_rpn()
+            return CheckResult.critical(
+                "Shared memory exhaustion detected - orphaned IPC segments",
+                failure_mode_id="INFRA_004",
+                rpn=rpn,
+                remediation="Run: cybersec --cmd '/health fix INFRA_004'",
+                duration_ms=duration,
+            )
+
+        result = CheckResult.ok("No shared memory issues")
+        result.duration_ms = duration
+        return result
+
+    except Exception as e:
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.error(f"Failed to parse process-compose log: {e}", duration_ms=duration)
+
+
 # Registry of all infra checks
 CHECKS: dict[str, Any] = {
     "INFRA_001": check_postgres,
     "INFRA_002": check_minio,
     "INFRA_003": check_polaris,
+    "INFRA_004": check_shared_memory,
 }

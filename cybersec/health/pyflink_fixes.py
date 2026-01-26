@@ -133,6 +133,11 @@ async def apply_pyflink_fixes(diagnostics: dict, dry_run: bool = True) -> list[d
             result = await _fix_iceberg_version_mismatch(flink_home, dry_run)
             results.append(result)
 
+        elif failure_mode_id == "INFRA_004":
+            # Shared memory exhaustion - clean up orphaned IPC segments
+            result = await _fix_shared_memory_exhaustion(dry_run)
+            results.append(result)
+
     return results
 
 
@@ -727,5 +732,125 @@ async def _fix_flink_cluster_restart(flink_home: Path | None, dry_run: bool) -> 
     except Exception as e:
         result["success"] = False
         result["message"] = f"Error restarting cluster: {e}"
+
+    return result
+
+
+async def _fix_shared_memory_exhaustion(dry_run: bool) -> dict[str, Any]:
+    """Fix: Clean up orphaned shared memory segments using ipcrm.
+
+    On macOS, orphaned IPC shared memory segments from previous devenv crashes
+    can accumulate and exhaust system limits, preventing PostgreSQL from starting.
+    """
+    import getpass
+    import subprocess
+
+    result = {
+        "failure_mode_id": "INFRA_004",
+        "action": "cleanup_shared_memory",
+    }
+
+    # Check platform - this is primarily a macOS issue
+    if platform.system() not in ("Darwin", "Linux"):
+        result["success"] = True
+        result["message"] = f"Platform {platform.system()} - shared memory cleanup not applicable"
+        result["skipped"] = True
+        return result
+
+    # List current segments using ipcs -m
+    try:
+        list_proc = subprocess.run(
+            ["ipcs", "-m"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        if list_proc.returncode != 0:
+            result["success"] = False
+            result["message"] = f"Failed to list shared memory segments: {list_proc.stderr}"
+            return result
+
+        # Parse segments owned by current user
+        current_user = getpass.getuser()
+        segments_to_remove = []
+
+        # ipcs -m output format varies by platform:
+        # macOS: T ID KEY MODE OWNER GROUP
+        # Linux: key shmid owner perms bytes nattch
+        lines = list_proc.stdout.strip().split('\n')
+
+        for line in lines:
+            # Skip header lines
+            if not line.strip() or line.startswith('---') or 'shmid' in line.lower() or 'key' in line.lower():
+                continue
+
+            parts = line.split()
+            if len(parts) >= 3:
+                # On macOS, format is: T ID KEY MODE OWNER GROUP
+                # On Linux, format is: key shmid owner perms bytes nattch
+                if current_user in line:
+                    # Extract shmid - second field on macOS, second on Linux
+                    if platform.system() == "Darwin":
+                        # macOS: m 65536 0x00000000 --rw------- ryanhill staff
+                        if len(parts) >= 2 and parts[0] in ('m', 's', 'q'):
+                            shmid = parts[1]
+                            segments_to_remove.append(shmid)
+                    else:
+                        # Linux: 0x00000000 65536 ryanhill 600 56 0
+                        if len(parts) >= 2:
+                            shmid = parts[1]
+                            segments_to_remove.append(shmid)
+
+        result["current_user"] = current_user
+        result["segments_found"] = len(segments_to_remove)
+
+        if not segments_to_remove:
+            result["success"] = True
+            result["message"] = "No orphaned shared memory segments found"
+            return result
+
+        result["segments"] = segments_to_remove
+
+        if dry_run:
+            result["success"] = True
+            result["dry_run"] = True
+            result["message"] = f"Would remove {len(segments_to_remove)} shared memory segment(s)"
+            return result
+
+        # Remove each segment
+        removed = []
+        failed = []
+
+        for shmid in segments_to_remove:
+            proc = subprocess.run(
+                ["ipcrm", "-m", shmid],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if proc.returncode == 0:
+                removed.append(shmid)
+            else:
+                failed.append({"shmid": shmid, "error": proc.stderr.strip()})
+
+        result["removed"] = removed
+        result["failed"] = failed
+        result["success"] = len(removed) > 0
+        result["message"] = f"Removed {len(removed)}/{len(segments_to_remove)} shared memory segment(s)"
+
+        if removed:
+            result["restart_required"] = True
+            result["restart_command"] = "devenv up"
+
+    except subprocess.TimeoutExpired:
+        result["success"] = False
+        result["message"] = "Timeout running ipcs/ipcrm commands"
+    except FileNotFoundError:
+        result["success"] = False
+        result["message"] = "ipcs command not found - cannot list shared memory segments"
+    except Exception as e:
+        result["success"] = False
+        result["message"] = f"Error cleaning up shared memory: {e}"
 
     return result

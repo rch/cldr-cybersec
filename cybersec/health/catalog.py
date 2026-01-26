@@ -522,6 +522,26 @@ INFRA_003 = FailureMode(
     solution_level=AutomationLevel.B,
 )
 
+INFRA_004 = FailureMode(
+    failure_mode_id="INFRA_004",
+    category="infra",
+    name="macOS Shared Memory Exhaustion",
+    description="Orphaned IPC shared memory segments exhaust system limits",
+    base_severity=8,   # High - services won't start
+    base_occurrence=6,  # Common on macOS after crashes
+    base_detection=3,   # Moderate - parse logs
+    symptom="PostgreSQL fails with 'could not create shared memory segment: No space left on device'",
+    cause="Orphaned IPC shm segments from previous devenv crashes on macOS",
+    detection_method="Parse process-compose.log for 'No space left on device' + 'shared memory'",
+    remediation_steps=[
+        "List orphaned segments: ipcs -m",
+        "Clean up segments owned by current user: ipcrm -m <shmid>",
+        "Restart services: devenv up",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.A,
+)
+
 # Data quality failure modes
 DATA_001 = FailureMode(
     failure_mode_id="DATA_001",
@@ -571,6 +591,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "INFRA_001": INFRA_001,
     "INFRA_002": INFRA_002,
     "INFRA_003": INFRA_003,
+    "INFRA_004": INFRA_004,
     "DATA_001": DATA_001,
 }
 
@@ -579,7 +600,7 @@ CATEGORIES: dict[str, list[str]] = {
     "iceberg": ["ICE_001", "ICE_002", "ICE_003"],
     "flink": ["FLINK_001", "FLINK_002", "FLINK_003", "FLINK_004", "FLINK_005"],
     "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_010", "PYFLINK_011", "PYFLINK_012", "PYFLINK_013", "PYFLINK_014"],
-    "infra": ["INFRA_001", "INFRA_002", "INFRA_003"],
+    "infra": ["INFRA_001", "INFRA_002", "INFRA_003", "INFRA_004"],
     "data": ["DATA_001"],
 }
 
