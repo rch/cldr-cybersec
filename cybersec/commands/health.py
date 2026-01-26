@@ -2,11 +2,11 @@
 
 Commands:
     /health                      - Run FMEA health diagnostics
-    /health pyflink              - PyFlink diagnostics + planned fixes
+    /health flink                - Check flink category
     /health fix                  - Dry-run all detected issues
     /health fix --apply          - Apply all fixes
-    /health fix pyflink          - Dry-run pyflink category
-    /health fix system --apply   - Fix system category
+    /health fix flink            - Dry-run flink category
+    /health fix flink --apply    - Fix flink category
     /health diagnose <id>        - Diagnose specific failure mode
 """
 
@@ -18,14 +18,17 @@ from .registry import register_command
 async def cmd_health(cmd: ParsedCommand) -> CommandResult:
     """Run FMEA-based health diagnostics.
 
+    Args:
+        [category]  Optional: category to check (flink, rest-catalog, postgres, system, data)
+
     Options:
-        --category, -c <cat>  Specific category (iceberg, flink, infra, data)
         --quick, -q           Run only critical checks
         --json, -j            Output as JSON
     """
     from ..bootstrap import BootstrapService
     from ..health.models import HealthContext
     from ..health.runner import run_health_check
+    from ..health.catalog import CATEGORIES, CATEGORY_ALIASES
 
     service = BootstrapService()
     config = service.get_config()
@@ -39,7 +42,18 @@ async def cmd_health(cmd: ParsedCommand) -> CommandResult:
         browser_port=config.iceberg_browser_port or 5050,
     )
 
-    category = cmd.options.get("category")
+    # Category can be argument or option (argument takes precedence)
+    category = cmd.args[0] if cmd.args else cmd.options.get("category")
+    if category:
+        category = category.lower()
+        # Resolve aliases
+        category = CATEGORY_ALIASES.get(category, category)
+        if category not in CATEGORIES:
+            all_cats = ", ".join(sorted(CATEGORIES.keys()))
+            return CommandResult(
+                success=False,
+                error=f"Unknown category: '{category}'. Available: {all_cats}",
+            )
     quick = cmd.options.get("quick", False)
 
     report = await run_health_check(ctx, category=category, quick=quick)
@@ -603,11 +617,8 @@ def _format_health_report(data: dict) -> str:
     # Add next steps guidance based on detected issues
     if next_steps:
         lines.append("Next Steps:")
-        lines.append("  Run deeper diagnostics:")
-        lines.append("    cybersec --cmd '/health pyflink'")
-        lines.append("")
-        lines.append("  Or fix issues directly:")
-        lines.append("    cybersec --cmd '/health fix pyflink'")
+        lines.append("  Fix detected issues:")
+        lines.append("    /health fix --apply")
 
     return "\n".join(lines)
 
@@ -1314,32 +1325,21 @@ def register_health_commands():
         "health",
         cmd_health,
         description="Run FMEA-based health diagnostics",
+        args=[
+            {"name": "category", "required": False, "description": "Category (flink, rest-catalog, postgres, system, data)"},
+        ],
         options=[
-            {"name": "category", "short": "c", "description": "Category (flink, pyflink, rest-catalog, local-s3, postgres, system)"},
             {"name": "quick", "short": "q", "description": "Run only critical checks"},
             {"name": "json", "short": "j", "description": "Output as JSON"},
         ],
         examples=[
             "/health",
-            "/health --category pyflink",
-            "/health --quick --json",
+            "/health flink",
+            "/health --quick",
         ],
     )
 
-    register_command(
-        "health.pyflink",
-        cmd_health_pyflink,
-        description="PyFlink diagnostics with planned fixes (like terraform plan)",
-        options=[
-            {"name": "json", "short": "j", "description": "Output as JSON"},
-        ],
-        examples=[
-            "/health pyflink",
-            "/health pyflink --json",
-        ],
-    )
-
-    # Note: health.fix.pyflink removed - consolidated into health.fix with category support
+    # Note: /health pyflink removed - use /health flink instead (pyflink is alias)
 
     register_command(
         "health.diagnose",

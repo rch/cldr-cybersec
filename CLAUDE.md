@@ -243,10 +243,10 @@ The health system provides FMEA-based diagnostics and automated remediation.
 # CLI usage: cybersec "<command>"
 # MCP usage: cmd("<command>")
 
-# Run all health checks
-/health
-/health --category flink
-/health --quick
+# Run health checks
+/health                    # All categories
+/health flink              # Flink category only
+/health --quick            # Critical checks only
 
 # Fix detected issues (fix-all mode is default)
 /health fix                # Dry-run all issues
@@ -254,7 +254,7 @@ The health system provides FMEA-based diagnostics and automated remediation.
 
 # Fix by category
 /health fix flink          # Dry-run flink issues
-/health fix system --apply # Fix system issues
+/health fix flink --apply  # Fix flink issues
 
 # Fix specific failure mode
 /health fix INFRA_004 --apply

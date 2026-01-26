@@ -23,11 +23,11 @@ mcp = FastMCP(
 Execute commands using the `cmd` tool with slash-prefixed commands:
 
     cmd("/health")                  - Run FMEA health diagnostics
-    cmd("/health pyflink")          - PyFlink diagnostics + planned fixes
+    cmd("/health flink")            - Check flink category
     cmd("/health fix")              - Dry-run all detected issues
     cmd("/health fix --apply")      - Apply all fixes
-    cmd("/health fix pyflink")      - Dry-run pyflink category
-    cmd("/health fix system --apply") - Fix system category
+    cmd("/health fix flink")        - Dry-run flink category
+    cmd("/health fix flink --apply") - Fix flink category
     cmd("/health diagnose FLINK_001") - Diagnose specific failure
     cmd("/bootstrap status")        - Check service health
     cmd("/bootstrap info")          - Show configuration
@@ -37,7 +37,7 @@ Execute commands using the `cmd` tool with slash-prefixed commands:
     cmd("/bootstrap settings")      - View/modify settings
 
 Add --json to any command for structured output:
-    cmd("/health pyflink --json")
+    cmd("/health flink --json")
 
 Available command groups:
 - /health - FMEA-based health diagnostics
@@ -53,11 +53,11 @@ async def cmd(command: str) -> dict:
 
     Commands use slash-prefix syntax identical to CLI and TUI:
         /health                     - FMEA health diagnostics
-        /health pyflink             - PyFlink diagnostics + planned fixes
+        /health flink               - Check flink category
         /health fix                 - Dry-run all detected issues
         /health fix --apply         - Apply all fixes
-        /health fix pyflink         - Dry-run pyflink category
-        /health fix system --apply  - Fix system category
+        /health fix flink           - Dry-run flink category
+        /health fix flink --apply   - Fix flink category
         /health diagnose <id>       - Diagnose failure mode
         /bootstrap status           - Service health
         /bootstrap info             - Configuration
@@ -67,7 +67,7 @@ async def cmd(command: str) -> dict:
         /bootstrap settings         - View/modify settings
 
     Args:
-        command: The command to execute (e.g., "/health pyflink --json")
+        command: The command to execute (e.g., "/health flink --json")
 
     Returns:
         Command result with:
@@ -78,8 +78,8 @@ async def cmd(command: str) -> dict:
 
     Examples:
         cmd("/health")
-        cmd("/health pyflink")
-        cmd("/health fix pyflink")
+        cmd("/health flink")
+        cmd("/health fix flink")
         cmd("/health fix --apply")
         cmd("/bootstrap status --json")
         cmd("/health diagnose FLINK_001")

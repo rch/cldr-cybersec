@@ -54,20 +54,27 @@ async def dispatch(command_input: str | ParsedCommand) -> CommandResult:
     if not handler_info:
         handler_info = get_command(cmd.full_path)
 
-    # If no specific subcommand handler, try parent command
+    # If no specific subcommand handler, try parent command with subcommand as first arg
     if not handler_info and cmd.subcommand:
-        handler_info = get_command(cmd.command)
-        # If parent exists but subcommand doesn't, it's an error
-        if handler_info and cmd.subcommand:
-            # Check if this is a real subcommand or unknown
+        parent_handler = get_command(cmd.command)
+        if parent_handler:
+            # Check if this is a registered subcommand or should be treated as arg
             from .registry import get_subcommands
             valid_subs = [s.name.split(".")[-1] for s in get_subcommands(cmd.command)]
-            if cmd.subcommand not in valid_subs and valid_subs:
+
+            if cmd.subcommand in valid_subs:
+                # It's a valid subcommand but we didn't find it - shouldn't happen
                 return CommandResult(
                     success=False,
                     error=f"Unknown subcommand '{cmd.subcommand}'. "
                           f"Available: {', '.join(valid_subs)}",
                 )
+            else:
+                # Not a subcommand - treat it as an argument to parent command
+                handler_info = parent_handler
+                # Prepend subcommand to args so parent can handle it
+                cmd.args = [cmd.subcommand] + cmd.args
+                cmd.subcommand = None
 
     if not handler_info:
         # List available commands in error

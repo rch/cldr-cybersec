@@ -48,6 +48,11 @@ def main(
         None,
         help='Command to execute (e.g., "/health fix --apply")',
     ),
+    cmd: Optional[str] = typer.Option(
+        None,
+        "--cmd", "-c",
+        help='Command to execute (e.g., "/health fix --apply")',
+    ),
 ):
     """Cybersec Toolkit CLI.
 
@@ -55,10 +60,11 @@ def main(
 
         cybersec "/health"
         cybersec "/health fix --apply"
-        cybersec "/bootstrap status --json"
+        cybersec --cmd "/health fix --apply"
 
     Commands:
         /health                 - Run FMEA health diagnostics
+        /health flink           - Check flink category
         /health fix             - Dry-run all detected issues
         /health fix --apply     - Apply all fixes
         /health fix flink       - Dry-run flink category
@@ -67,8 +73,11 @@ def main(
         /bootstrap run          - Run bootstrap process
         /bootstrap info         - Show configuration
     """
-    if command:
-        _run_unified_command(command)
+    # Support both positional argument and --cmd option
+    cmd_to_run = command or cmd
+
+    if cmd_to_run:
+        _run_unified_command(cmd_to_run)
         raise typer.Exit()
 
     # If no command, show help
