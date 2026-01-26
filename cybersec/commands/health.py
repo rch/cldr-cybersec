@@ -614,8 +614,8 @@ def _format_health_report(data: dict) -> str:
             lines.append(f"  • {rec}")
         lines.append("")
 
-    # Add next steps guidance based on detected issues
-    if next_steps:
+    # Add next steps guidance only if there are actual issues to fix
+    if issues:
         lines.append("Next Steps:")
         lines.append("  Fix detected issues:")
         lines.append("    /health fix --apply")
