@@ -164,7 +164,7 @@ PYFLINK_002 = FailureMode(
     cause="PYFLINK_CLIENT_EXECUTABLE not set or points to wrong Python",
     detection_method="Compare sys.executable with flink-conf.yaml python settings",
     remediation_steps=[
-        "Run: cybersec --cmd '/health fix pyflink' (auto-fixes config)",
+        "Run: /health fix --apply",
         "Or manually add to flink-conf.yaml: python.client.executable: /path/to/python",
         "Then restart: devenv tasks run restart:clean",
     ],
@@ -223,7 +223,7 @@ PYFLINK_005 = FailureMode(
     cause="macOS has multiple Python installations, Flink picks wrong one",
     detection_method="Platform is Darwin AND python settings not in flink-conf.yaml",
     remediation_steps=[
-        "Run: cybersec --cmd '/health fix pyflink' (auto-fixes config)",
+        "Run: /health fix --apply",
         "Or manually edit $FLINK_HOME/conf/flink-conf.yaml with devenv Python path",
         "Then restart: devenv tasks run restart:clean",
     ],
@@ -260,7 +260,7 @@ PYFLINK_007 = FailureMode(
     base_severity=8,   # High - fix appears successful but doesn't work
     base_occurrence=6,  # High - common after fix without restart
     base_detection=3,   # Moderate - need to check both config and runtime
-    symptom="'Python process exits with code: 1' persists after /health fix pyflink",
+    symptom="'Python process exits with code: 1' persists after /health fix --apply",
     cause="Flink cluster not restarted after config change, JVM still using old config",
     detection_method="Config has python.executable but TaskManager logs show wrong Python",
     remediation_steps=[
@@ -308,7 +308,7 @@ PYFLINK_009 = FailureMode(
     remediation_steps=[
         "Check configured path: grep python.executable $FLINK_HOME/conf/flink-conf.yaml",
         "Verify path exists: ls -la /path/to/python3",
-        "Re-run fix to update path: cybersec --cmd '/health fix pyflink'",
+        "Re-run fix: /health fix --apply",
         "Restart cluster: devenv tasks run restart:clean",
     ],
     observation_level=AutomationLevel.A,
@@ -595,13 +595,36 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "DATA_001": DATA_001,
 }
 
-# Category groupings
+# Category groupings - organized by type
 CATEGORIES: dict[str, list[str]] = {
-    "iceberg": ["ICE_001", "ICE_002", "ICE_003"],
-    "flink": ["FLINK_001", "FLINK_002", "FLINK_003", "FLINK_004", "FLINK_005"],
-    "pyflink": ["PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005", "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_010", "PYFLINK_011", "PYFLINK_012", "PYFLINK_013", "PYFLINK_014"],
-    "infra": ["INFRA_001", "INFRA_002", "INFRA_003", "INFRA_004"],
+    # Cloudera OSS components (named directly)
+    "flink": [
+        # Core Flink
+        "FLINK_001", "FLINK_002", "FLINK_003", "FLINK_004", "FLINK_005",
+        # PyFlink (same component from health perspective)
+        "PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_004", "PYFLINK_005",
+        "PYFLINK_006", "PYFLINK_007", "PYFLINK_008", "PYFLINK_009", "PYFLINK_010",
+        "PYFLINK_011", "PYFLINK_012", "PYFLINK_013", "PYFLINK_014",
+    ],
+    "nifi": [],     # Future
+    "kafka": [],    # Future
+
+    # Provider-agnostic (swappable components)
+    "rest-catalog": ["ICE_001", "ICE_002", "ICE_003", "INFRA_003"],  # Iceberg + Polaris
+    "local-s3": ["INFRA_002"],   # MinIO locally
+    "aws-s3": [],   # Future AWS S3
+
+    # Infrastructure
+    "postgres": ["INFRA_001"],
+    "system": ["INFRA_004"],     # OS-level: shm, eBPF, nvidia-smi
+    "infra": [],    # terraform/ansible: VPC, selinux (future)
     "data": ["DATA_001"],
+}
+
+# Backward compatibility aliases
+CATEGORY_ALIASES: dict[str, str] = {
+    "iceberg": "rest-catalog",
+    "pyflink": "flink",  # PyFlink is just Flink from health perspective
 }
 
 # Quick checks (critical infrastructure only)
@@ -618,10 +641,21 @@ def get_failure_mode(failure_mode_id: str) -> FailureMode | None:
     return FAILURE_MODES.get(failure_mode_id)
 
 
+def get_category_mode_ids(category: str) -> list[str]:
+    """Get failure mode IDs for a category (supports aliases)."""
+    resolved = CATEGORY_ALIASES.get(category, category)
+    return CATEGORIES.get(resolved, [])
+
+
 def get_category_modes(category: str) -> list[FailureMode]:
     """Get all failure modes in a category."""
-    mode_ids = CATEGORIES.get(category, [])
+    mode_ids = get_category_mode_ids(category)
     return [FAILURE_MODES[mid] for mid in mode_ids if mid in FAILURE_MODES]
+
+
+def get_all_categories() -> list[str]:
+    """Get list of all available categories."""
+    return list(CATEGORIES.keys())
 
 
 def get_quick_check_modes() -> list[FailureMode]:

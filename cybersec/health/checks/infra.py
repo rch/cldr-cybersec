@@ -205,7 +205,7 @@ async def check_shared_memory(ctx: HealthContext) -> CheckResult:
                 "Shared memory exhaustion detected - orphaned IPC segments",
                 failure_mode_id="INFRA_004",
                 rpn=rpn,
-                remediation="Run: cybersec --cmd '/health fix INFRA_004'",
+                remediation="Run: /health fix --apply",
                 duration_ms=duration,
             )
 

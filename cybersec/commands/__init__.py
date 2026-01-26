@@ -8,8 +8,11 @@ This module provides a single command parser that all interfaces delegate to:
 Commands follow a slash-prefixed structure:
     /health                     - Run FMEA health diagnostics
     /health pyflink             - PyFlink diagnostics
+    /health fix                 - Dry-run all detected issues
+    /health fix --apply         - Apply all fixes
+    /health fix pyflink         - Dry-run pyflink category
+    /health fix system --apply  - Fix system category
     /health diagnose <id>       - Diagnose specific failure mode
-    /health fix <id>            - Remediation for failure mode
     /bootstrap status           - Check service health
     /bootstrap run              - Run bootstrap process
     /bootstrap info             - Show configuration

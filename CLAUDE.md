@@ -233,6 +233,56 @@ Bootstrap routes are integrated into iceberg_browser.py:
 - `/api/bootstrap/run` - Bootstrap execution (SSE stream)
 - `/api/bootstrap/assess` - Quick assessment API
 
+## Health Diagnostics
+
+The health system provides FMEA-based diagnostics and automated remediation.
+
+### Commands (CLI and MCP use identical syntax)
+
+```bash
+# CLI usage: cybersec "<command>"
+# MCP usage: cmd("<command>")
+
+# Run all health checks
+/health
+/health --category flink
+/health --quick
+
+# Fix detected issues (fix-all mode is default)
+/health fix                # Dry-run all issues
+/health fix --apply        # Apply all fixes
+
+# Fix by category
+/health fix flink          # Dry-run flink issues
+/health fix system --apply # Fix system issues
+
+# Fix specific failure mode
+/health fix INFRA_004 --apply
+
+# Diagnose specific failure mode
+/health diagnose FLINK_001
+
+# Bootstrap commands
+/bootstrap status          # Check service health
+/bootstrap run             # Run bootstrap process
+/bootstrap info            # Show configuration
+```
+
+### Categories
+
+Provider-agnostic naming for swappable components:
+- `flink` - Flink and PyFlink issues
+- `nifi`, `kafka` - Future Cloudera OSS components
+- `rest-catalog` - REST catalog (Polaris)
+- `local-s3` - Local S3 storage (MinIO)
+- `aws-s3` - AWS S3 (future)
+- `postgres` - PostgreSQL database
+- `system` - OS-level issues (shared memory, eBPF)
+- `infra` - Infrastructure (terraform/ansible)
+- `data` - Data quality checks
+
+Aliases: `iceberg` → `rest-catalog`, `pyflink` → `flink`
+
 ## Operations Agent (@ops)
 
 The Operations Agent (`@ops`) provides automated environment validation, service health monitoring, and operational verification. **Invoke this agent when:**

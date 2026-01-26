@@ -1,10 +1,33 @@
 """Main CLI entry point using Typer.
 
-Supports two modes:
-1. Subcommand mode: `cybersec bootstrap status`
-2. Unified command mode: `cybersec --cmd "/bootstrap status"`
+All commands go through the unified command parser shared with MCP:
 
-The --cmd mode uses the unified command parser that is shared with MCP and TUI.
+    cybersec "/health fix --apply"
+    cybersec "/bootstrap status --json"
+    cybersec "/health diagnose FLINK_001"
+
+Architecture Note
+-----------------
+This CLI is intentionally a thin wrapper around the unified command system in
+`cybersec.commands`. All command logic lives there, ensuring parity between:
+
+    - CLI: cybersec "/health fix --apply"
+    - MCP: cmd("/health fix --apply")
+
+DO NOT add Typer subcommands or duplicate logic here. To add new functionality:
+
+    1. Add the command handler in cybersec/commands/<domain>.py
+    2. Register it in the domain's register_*_commands() function
+    3. It automatically becomes available in both CLI and MCP
+
+This pattern ensures:
+    - Single implementation of all logic
+    - Consistent behavior across interfaces
+    - Easier testing (test commands once, works everywhere)
+    - Documentation stays in sync (one set of docstrings)
+
+If you find yourself writing @app.command() here, stop and add it to the
+unified command system instead.
 """
 
 import asyncio
@@ -17,50 +40,39 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 
-# Import legacy subcommands (kept for backwards compatibility during transition)
-from . import bootstrap
-from . import health
-
-# Register legacy subcommands
-app.add_typer(bootstrap.app, name="bootstrap")
-app.add_typer(health.app, name="health")
-
 
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    cmd: Optional[str] = typer.Option(
+    command: Optional[str] = typer.Argument(
         None,
-        "--cmd", "-c",
-        help='Execute a unified command (e.g., "/health pyflink --json")',
+        help='Command to execute (e.g., "/health fix --apply")',
     ),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
 ):
     """Cybersec Toolkit CLI.
 
-    Use --cmd to run unified commands that work identically across CLI, MCP, and TUI:
+    Run unified commands that work identically across CLI and MCP:
 
-        cybersec --cmd "/health pyflink"
-        cybersec --cmd "/bootstrap status --json"
-        cybersec -c "/health diagnose FLINK_001"
+        cybersec "/health"
+        cybersec "/health fix --apply"
+        cybersec "/bootstrap status --json"
 
-    Or use subcommands for backwards compatibility:
-
-        cybersec health pyflink
-        cybersec bootstrap status
+    Commands:
+        /health                 - Run FMEA health diagnostics
+        /health fix             - Dry-run all detected issues
+        /health fix --apply     - Apply all fixes
+        /health fix flink       - Dry-run flink category
+        /health diagnose <id>   - Diagnose specific failure mode
+        /bootstrap status       - Check service health
+        /bootstrap run          - Run bootstrap process
+        /bootstrap info         - Show configuration
     """
-    if verbose:
-        import logging
-        logging.basicConfig(level=logging.DEBUG)
-
-    if cmd:
-        # Unified command mode
-        _run_unified_command(cmd)
+    if command:
+        _run_unified_command(command)
         raise typer.Exit()
 
-    # If no command and no subcommand invoked, show help
-    if ctx.invoked_subcommand is None and not cmd:
-        # Show available commands
+    # If no command, show help
+    if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
 
 
@@ -90,20 +102,6 @@ def _run_unified_command(command_str: str):
 
     if not result.success:
         raise typer.Exit(code=1)
-
-
-@app.command("cmd")
-def cmd_command(
-    command: str = typer.Argument(..., help='Command to execute (e.g., "/health pyflink")'),
-):
-    """Execute a unified command.
-
-    Alternative to --cmd flag for running unified commands:
-
-        cybersec cmd "/health pyflink"
-        cybersec cmd "/bootstrap status --json"
-    """
-    _run_unified_command(command)
 
 
 def run():

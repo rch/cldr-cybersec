@@ -24,9 +24,11 @@ Execute commands using the `cmd` tool with slash-prefixed commands:
 
     cmd("/health")                  - Run FMEA health diagnostics
     cmd("/health pyflink")          - PyFlink diagnostics + planned fixes
-    cmd("/health fix pyflink")      - Apply PyFlink fixes
+    cmd("/health fix")              - Dry-run all detected issues
+    cmd("/health fix --apply")      - Apply all fixes
+    cmd("/health fix pyflink")      - Dry-run pyflink category
+    cmd("/health fix system --apply") - Fix system category
     cmd("/health diagnose FLINK_001") - Diagnose specific failure
-    cmd("/health fix <id>")         - Remediation steps
     cmd("/bootstrap status")        - Check service health
     cmd("/bootstrap info")          - Show configuration
     cmd("/bootstrap verify")        - Verify environment
@@ -52,9 +54,11 @@ async def cmd(command: str) -> dict:
     Commands use slash-prefix syntax identical to CLI and TUI:
         /health                     - FMEA health diagnostics
         /health pyflink             - PyFlink diagnostics + planned fixes
-        /health fix pyflink         - Apply PyFlink fixes
+        /health fix                 - Dry-run all detected issues
+        /health fix --apply         - Apply all fixes
+        /health fix pyflink         - Dry-run pyflink category
+        /health fix system --apply  - Fix system category
         /health diagnose <id>       - Diagnose failure mode
-        /health fix <id>            - Remediation steps
         /bootstrap status           - Service health
         /bootstrap info             - Configuration
         /bootstrap verify           - Verify environment
@@ -76,6 +80,7 @@ async def cmd(command: str) -> dict:
         cmd("/health")
         cmd("/health pyflink")
         cmd("/health fix pyflink")
+        cmd("/health fix --apply")
         cmd("/bootstrap status --json")
         cmd("/health diagnose FLINK_001")
     """

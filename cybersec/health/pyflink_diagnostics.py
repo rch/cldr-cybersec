@@ -710,7 +710,7 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
                 "details": flink_job_status.get("details", []),
             })
             recommendations.insert(0, "Fix DataGen source: remove bounded row limit or use unbounded mode")
-            recommendations.insert(1, "Run: cybersec --cmd '/health fix FLINK_004'")
+            recommendations.insert(1, "Run: /health fix --apply")
 
     # FLINK_005: Job Submission Timeout
     if flink_job_status.get("job_stuck_initializing"):
@@ -743,7 +743,7 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
                 "details": flink_job_status.get("details", []),
             })
             recommendations.insert(0, "CRITICAL: Iceberg JAR version mismatch - rebuild JARs from source")
-            recommendations.insert(1, "Run: cybersec --cmd '/health fix PYFLINK_014'")
+            recommendations.insert(1, "Run: /health fix --apply")
 
     # === Summary ===
 

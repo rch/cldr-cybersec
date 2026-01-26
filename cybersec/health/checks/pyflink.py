@@ -112,7 +112,7 @@ async def check_iceberg_jars(ctx: HealthContext) -> CheckResult:
             f"Missing Iceberg JARs: {', '.join(missing)}",
             failure_mode_id="PYFLINK_011",
             rpn=rpn,
-            remediation="Run: cybersec --cmd '/health fix pyflink'",
+            remediation="Run: /health fix --apply",
             missing_jars=missing,
             lib_dir=str(lib_dir),
             duration_ms=duration,

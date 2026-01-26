@@ -31,18 +31,39 @@ Each observation and solution is classified:
 
 ## Categories
 
-- `iceberg/` - PyIceberg catalog, table, and scan issues
-- `flink/` - Flink JobManager, TaskManager, job issues
-- `infra/` - PostgreSQL, MinIO, Polaris infrastructure
+Provider-agnostic naming for swappable components:
+
+- `flink/` - Flink and PyFlink issues (JobManager, TaskManager, Python env, JARs)
+- `rest-catalog/` - REST catalog issues (Polaris)
+- `local-s3/` - Local S3 storage (MinIO)
+- `postgres/` - PostgreSQL database
+- `system/` - OS-level issues (shared memory, eBPF)
+- `infra/` - Infrastructure (terraform/ansible)
 - `data/` - Data quality, staleness, accumulation
+
+Aliases: `iceberg` → `rest-catalog`, `pyflink` → `flink`
 
 ## Usage
 
-```
-/health              - Run full health check
-/health quick        - Run critical checks only (QUICK_CHECKS)
-/health iceberg      - Run checks for specific category
-/health fix ICE_001  - Attempt automated remediation
+```bash
+# Run health checks
+/health                      # Run full health check
+/health --quick              # Run critical checks only
+/health --category pyflink   # Run checks for specific category
+
+# Fix detected issues (fix-all mode is default)
+/health fix                  # Dry-run all issues
+/health fix --apply          # Apply all fixes
+
+# Fix by category
+/health fix pyflink          # Dry-run pyflink issues
+/health fix system --apply   # Fix system issues
+
+# Fix specific failure mode
+/health fix INFRA_004 --apply
+
+# Diagnose specific failure mode
+/health diagnose FLINK_001
 ```
 
 ## Adding New Heuristics

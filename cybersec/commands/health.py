@@ -2,11 +2,12 @@
 
 Commands:
     /health                      - Run FMEA health diagnostics
-    /health pyflink              - PyFlink diagnostics + planned fixes (terraform plan)
-    /health fix pyflink          - Apply PyFlink fixes (terraform apply)
-    /health fix pyflink --dry-run - Preview fixes without applying
+    /health pyflink              - PyFlink diagnostics + planned fixes
+    /health fix                  - Dry-run all detected issues
+    /health fix --apply          - Apply all fixes
+    /health fix pyflink          - Dry-run pyflink category
+    /health fix system --apply   - Fix system category
     /health diagnose <id>        - Diagnose specific failure mode
-    /health fix <id>             - Remediation for failure mode
 """
 
 from io import StringIO
@@ -134,11 +135,14 @@ async def cmd_health_pyflink(cmd: ParsedCommand) -> CommandResult:
 async def cmd_health_fix_pyflink(cmd: ParsedCommand) -> CommandResult:
     """Fix detected PyFlink issues.
 
+    DEPRECATED: Use `/health fix pyflink` instead. This function is kept
+    for internal use but is no longer registered as a command.
+
     Runs diagnostics, identifies issues, and applies fixes.
-    Default is to execute fixes. Use --dry-run to preview changes.
+    Default is dry-run. Use --apply to execute changes.
 
     Options:
-        --dry-run   Preview changes without applying (like terraform plan)
+        --apply     Apply fixes (default: dry-run preview)
         --json, -j  Output as JSON
     """
     from ..health.pyflink_diagnostics import gather_pyflink_diagnostics
@@ -229,41 +233,45 @@ async def cmd_health_diagnose(cmd: ParsedCommand) -> CommandResult:
 
 
 async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
-    """Attempt remediation for a failure mode.
+    """Fix detected health issues.
 
-    For TIER_0/TIER_1 issues (RPN <= 200), can auto-remediate.
-    For TIER_2/MANUAL issues (RPN > 200), returns instructions only.
+    With no arguments, runs all checks and fixes all detected issues.
+    With a category, fixes only issues in that category.
+    With a failure mode ID, fixes only that specific issue.
 
     Args:
-        <id>  Failure mode ID to fix (e.g., ICE_001, FLINK_004)
+        [target]  Optional: category (flink, pyflink, rest-catalog, local-s3, postgres, system)
+                  or failure mode ID (FLINK_001, INFRA_004)
 
     Options:
-        --execute   Execute remediation (default: dry-run)
+        --apply     Apply fixes (default: dry-run preview)
         --json, -j  Output as JSON
     """
-    from ..health.catalog import get_failure_mode
+    from ..bootstrap import BootstrapService
+    from ..health.catalog import (
+        get_failure_mode, get_category_mode_ids, get_all_categories,
+        FAILURE_MODES, CATEGORIES, CATEGORY_ALIASES,
+    )
+    from ..health.models import HealthContext
+    from ..health.runner import run_health_check
     from ..health.pyflink_fixes import apply_pyflink_fixes
 
-    if not cmd.args:
-        return CommandResult(
-            success=False,
-            error="Missing required argument: failure_mode_id (e.g., FLINK_001, FLINK_004)",
-        )
+    dry_run = not cmd.options.get("apply", False)
+    target = cmd.args[0] if cmd.args else None
 
-    failure_mode_id = cmd.args[0].upper()
-    dry_run = not cmd.options.get("execute", False)
+    # Set up health context for running checks
+    service = BootstrapService()
+    config = service.get_config()
+    ctx = HealthContext(
+        config=config,
+        flink_url=config.flink_url or "http://localhost:8081",
+        minio_endpoint=config.minio_endpoint or "http://localhost:9010",
+        polaris_url=config.polaris_api_url or "http://localhost:8181",
+        postgres_port=config.postgres_port or 5438,
+        browser_port=config.iceberg_browser_port or 5050,
+    )
 
-    failure_mode = get_failure_mode(failure_mode_id)
-    if not failure_mode:
-        return CommandResult(
-            success=False,
-            error=f"Unknown failure mode: {failure_mode_id}",
-        )
-
-    rpn = failure_mode.calculate_rpn()
-    tier = rpn.tier
-
-    # Check if this failure mode has an automated fix
+    # Automatable failure modes
     automatable_fixes = {
         "FLINK_004", "FLINK_005",
         "PYFLINK_001", "PYFLINK_002", "PYFLINK_003", "PYFLINK_005",
@@ -271,60 +279,107 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
         "INFRA_004",
     }
 
-    if failure_mode_id in automatable_fixes:
-        # Create a mock diagnostics dict with just this issue
-        mock_diagnostics = {
-            "issues": [{
-                "failure_mode_id": failure_mode_id,
-                "name": failure_mode.name,
-                "severity": "warning",
-                "symptom": failure_mode.symptom,
-                "rpn": rpn.rpn,
-                "remediation": failure_mode.remediation_steps,
-            }],
-            "python_environment": {
-                "executable": __import__("sys").executable,
-                "devenv_python": __import__("os").environ.get("DEVENV_ROOT", "") + "/.devenv/profile/bin/python3",
-                "devenv_python_exists": True,
-            },
-        }
-
-        fix_results = await apply_pyflink_fixes(mock_diagnostics, dry_run=dry_run)
-
-        if fix_results:
-            fix_result = fix_results[0]
-            data = {
-                "failure_mode_id": failure_mode_id,
-                "tier": tier.name,
-                "dry_run": dry_run,
-                "fix_result": fix_result,
-            }
-
-            formatted = _format_single_fix(fix_result, failure_mode, dry_run)
-
+    # Determine what to fix
+    if target is None:
+        # Fix-all mode: run health check, fix all detected issues
+        report = await run_health_check(ctx)
+        issues = report.to_dict().get("issues", [])
+        mode = "all"
+        target_desc = "all detected issues"
+    elif target.upper() in FAILURE_MODES:
+        # Specific failure mode ID
+        failure_mode_id = target.upper()
+        failure_mode = get_failure_mode(failure_mode_id)
+        issues = [{
+            "failure_mode_id": failure_mode_id,
+            "name": failure_mode.name,
+            "severity": "warning",
+            "symptom": failure_mode.symptom,
+            "rpn": failure_mode.calculate_rpn().rpn,
+            "remediation": failure_mode.remediation_steps,
+        }]
+        mode = "single"
+        target_desc = f"{failure_mode_id} ({failure_mode.name})"
+    elif target.lower() in CATEGORIES or target.lower() in CATEGORY_ALIASES:
+        # Category-based fix
+        category = target.lower()
+        mode_ids = get_category_mode_ids(category)
+        if not mode_ids:
             return CommandResult(
-                success=fix_result.get("success", False) or dry_run,
-                data=data,
-                formatted=formatted,
+                success=True,
+                data={"category": category, "issues": []},
+                formatted=f"Category '{category}' has no failure modes defined yet.",
             )
+        # Run health check filtered to this category
+        report = await run_health_check(ctx, category=category)
+        issues = report.to_dict().get("issues", [])
+        mode = "category"
+        target_desc = f"category '{category}'"
+    else:
+        # Unknown target
+        all_cats = ", ".join(sorted(CATEGORIES.keys()))
+        return CommandResult(
+            success=False,
+            error=f"Unknown target: '{target}'. Use a category ({all_cats}) or failure mode ID (e.g., FLINK_001).",
+        )
 
-    # Default behavior for non-automatable fixes
-    data = {
-        "failure_mode_id": failure_mode_id,
-        "tier": tier.name,
-        "tier_value": int(tier),
-        "requires_approval": rpn.requires_approval,
-        "dry_run": dry_run,
-        "action": "manual_required" if rpn.requires_approval else "dry_run" if dry_run else "would_execute",
-        "instructions": failure_mode.remediation_steps,
-        "symptom": failure_mode.symptom,
-        "target_state": f"Resolve {failure_mode.name}",
+    # Filter to only automatable issues
+    fixable_issues = [i for i in issues if i.get("failure_mode_id") in automatable_fixes]
+    non_fixable_issues = [i for i in issues if i.get("failure_mode_id") not in automatable_fixes]
+
+    if not issues:
+        return CommandResult(
+            success=True,
+            data={"mode": mode, "target": target, "issues_found": 0, "fixes": []},
+            formatted=f"No issues detected for {target_desc}.",
+        )
+
+    if not fixable_issues:
+        # Only non-automatable issues found
+        lines = [f"Found {len(issues)} issue(s) for {target_desc}, but none have automated fixes:"]
+        for issue in non_fixable_issues:
+            fm_id = issue.get("failure_mode_id", "?")
+            name = issue.get("name", issue.get("message", "Unknown"))
+            lines.append(f"  - [{fm_id}] {name}")
+            if issue.get("remediation"):
+                steps = issue.get("remediation", [])
+                if isinstance(steps, list) and steps:
+                    lines.append(f"    → {steps[0]}")
+        return CommandResult(
+            success=True,
+            data={"mode": mode, "issues": issues, "fixes": []},
+            formatted="\n".join(lines),
+        )
+
+    # Build diagnostics dict for apply_pyflink_fixes
+    diagnostics = {
+        "issues": fixable_issues,
+        "python_environment": {
+            "executable": __import__("sys").executable,
+            "devenv_python": __import__("os").environ.get("DEVENV_ROOT", "") + "/.devenv/profile/bin/python3",
+            "devenv_python_exists": True,
+        },
     }
 
-    formatted = _format_fix(data, failure_mode_id)
+    # Apply fixes
+    fix_results = await apply_pyflink_fixes(diagnostics, dry_run=dry_run)
+
+    data = {
+        "mode": mode,
+        "target": target,
+        "dry_run": dry_run,
+        "issues_found": len(issues),
+        "fixable_issues": len(fixable_issues),
+        "non_fixable_issues": len(non_fixable_issues),
+        "fixes": fix_results,
+    }
+
+    formatted = _format_health_fixes(fix_results, dry_run, target_desc, non_fixable_issues)
+
+    all_success = all(f.get("success", False) for f in fix_results) if fix_results else True
 
     return CommandResult(
-        success=True,
+        success=all_success or dry_run,
         data=data,
         formatted=formatted,
     )
@@ -382,8 +437,8 @@ def _format_single_fix(fix_result: dict, failure_mode, dry_run: bool) -> str:
             lines.append(f"  {message}")
 
         lines.append("")
-        lines.append("To apply this fix:")
-        lines.append(f"  cybersec --cmd '/health fix {fm_id} --execute'")
+        lines.append("To apply:")
+        lines.append(f"  /health fix --apply")
 
     else:
         icon = "✓" if success else "✗"
@@ -412,6 +467,73 @@ def _format_single_fix(fix_result: dict, failure_mode, dry_run: bool) -> str:
 
         if fix_result.get("already_fixed"):
             lines.append("  (No changes needed - already in correct state)")
+
+    return "\n".join(lines)
+
+
+def _format_health_fixes(fix_results: list, dry_run: bool, target_desc: str, non_fixable: list) -> str:
+    """Format health fix results for human display."""
+    lines = []
+
+    if dry_run:
+        lines.append(f"Health Fix Preview ({target_desc})")
+        lines.append("=" * 50)
+        lines.append("")
+        lines.append("DRY RUN - The following changes would be made:")
+        lines.append("")
+    else:
+        lines.append(f"Health Fix Applied ({target_desc})")
+        lines.append("=" * 50)
+        lines.append("")
+
+    # Show fix results
+    for fix in fix_results:
+        fm_id = fix.get("failure_mode_id", "?")
+        action = fix.get("action", "unknown")
+        success = fix.get("success", False)
+        message = fix.get("message", "")
+
+        if dry_run:
+            if action == "install_package":
+                lines.append(f"  + [{fm_id}] Would install: {fix.get('package', 'unknown')}")
+            elif action == "update_flink_config":
+                lines.append(f"  ~ [{fm_id}] Would update flink-conf.yaml")
+            elif action == "rebuild_iceberg_jars":
+                lines.append(f"  ~ [{fm_id}] Would rebuild Iceberg JARs")
+            elif action == "cleanup_shared_memory":
+                segs = fix.get("segments", [])
+                lines.append(f"  ~ [{fm_id}] Would clean {len(segs)} shared memory segment(s)")
+            else:
+                lines.append(f"  ~ [{fm_id}] {message}")
+        else:
+            icon = "✓" if success else "✗"
+            lines.append(f"  {icon} [{fm_id}] {message}")
+
+    # Show non-fixable issues
+    if non_fixable:
+        lines.append("")
+        lines.append("Manual intervention needed:")
+        for issue in non_fixable:
+            fm_id = issue.get("failure_mode_id", "?")
+            name = issue.get("name", issue.get("message", "Unknown"))
+            lines.append(f"  ! [{fm_id}] {name}")
+
+    # Summary
+    lines.append("")
+    success_count = sum(1 for f in fix_results if f.get("success"))
+    total = len(fix_results)
+
+    if dry_run:
+        lines.append(f"Preview: {total} fix(es) would be applied")
+        lines.append("")
+        lines.append("To apply:")
+        lines.append("  /health fix --apply")
+    else:
+        lines.append(f"Applied: {success_count}/{total} fix(es)")
+        if any(f.get("restart_required") for f in fix_results):
+            lines.append("")
+            lines.append("⚠ Restart required:")
+            lines.append("  devenv tasks run restart:clean")
 
     return "\n".join(lines)
 
@@ -675,11 +797,11 @@ def _format_pyflink_diagnostics(data: dict) -> str:
 
             lines.append("")
 
-        lines.append("To apply these changes:")
+        lines.append("To preview changes (dry-run, default):")
         lines.append("  cybersec --cmd \"/health fix pyflink\"")
         lines.append("")
-        lines.append("To preview only (confirm before execution):")
-        lines.append("  cybersec --cmd \"/health fix pyflink --dry-run\"")
+        lines.append("To apply these changes:")
+        lines.append("  cybersec --cmd \"/health fix pyflink --apply\"")
 
     # Status summary
     status = data.get("status", {})
@@ -1182,13 +1304,13 @@ def register_health_commands():
         cmd_health,
         description="Run FMEA-based health diagnostics",
         options=[
-            {"name": "category", "short": "c", "description": "Category to check (iceberg, flink, infra, data)"},
+            {"name": "category", "short": "c", "description": "Category (flink, pyflink, rest-catalog, local-s3, postgres, system)"},
             {"name": "quick", "short": "q", "description": "Run only critical checks"},
             {"name": "json", "short": "j", "description": "Output as JSON"},
         ],
         examples=[
             "/health",
-            "/health --category flink",
+            "/health --category pyflink",
             "/health --quick --json",
         ],
     )
@@ -1206,19 +1328,7 @@ def register_health_commands():
         ],
     )
 
-    register_command(
-        "health.fix.pyflink",
-        cmd_health_fix_pyflink,
-        description="Apply PyFlink fixes (like terraform apply)",
-        options=[
-            {"name": "dry-run", "description": "Preview changes without applying"},
-            {"name": "json", "short": "j", "description": "Output as JSON"},
-        ],
-        examples=[
-            "/health fix pyflink",
-            "/health fix pyflink --dry-run",
-        ],
-    )
+    # Note: health.fix.pyflink removed - consolidated into health.fix with category support
 
     register_command(
         "health.diagnose",
@@ -1239,17 +1349,19 @@ def register_health_commands():
     register_command(
         "health.fix",
         cmd_health_fix,
-        description="Remediation for a failure mode",
+        description="Fix detected health issues",
         args=[
-            {"name": "failure_mode_id", "required": True, "description": "Failure mode ID to fix"},
+            {"name": "target", "required": False, "description": "Category (flink, pyflink, rest-catalog) or failure mode ID"},
         ],
         options=[
-            {"name": "execute", "description": "Execute remediation (default: dry-run)"},
+            {"name": "apply", "description": "Apply fixes (default: dry-run preview)"},
             {"name": "json", "short": "j", "description": "Output as JSON"},
         ],
         examples=[
-            "/health fix ICE_001",
-            "/health fix FLINK_002 --execute",
+            "/health fix",
+            "/health fix --apply",
+            "/health fix pyflink",
+            "/health fix system --apply",
         ],
     )
 
