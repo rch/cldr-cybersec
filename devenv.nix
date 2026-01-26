@@ -612,20 +612,27 @@ except Exception as e:
     cloudtrail-datagen = {
       exec = ''
         echo "Starting CloudTrail DataGen job..."
-        
+
         # Set Flink paths
         export FLINK_HOME="$PWD/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1"
         FLINK_BIN="$FLINK_HOME/bin/flink"
-        
+
+        # Use uv venv Python which has PyFlink installed
+        if [ -f "$PWD/.devenv/state/venv/bin/python3" ]; then
+          PYCLIENT="$PWD/.devenv/state/venv/bin/python3"
+        else
+          PYCLIENT="python3"
+        fi
+
         # Add comprehensive Java module opens for checkpoint serialization
         export FLINK_ENV_JAVA_OPTS="--add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED --add-opens java.base/java.lang.reflect=ALL-UNNAMED --add-opens java.base/java.text=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/java.net=ALL-UNNAMED --add-opens java.base/java.util.concurrent=ALL-UNNAMED --add-opens java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/sun.security.action=ALL-UNNAMED"
-        
+
         # Function to check if job is already running
         check_job_running() {
           curl -s http://localhost:8081/jobs/overview 2>/dev/null | \
             grep -q '"state":"RUNNING"'
         }
-        
+
         # Check if CloudTrail DataGen is already running
         if check_job_running; then
           echo "CloudTrail DataGen job is already running. Monitoring..."
@@ -633,19 +640,19 @@ except Exception as e:
           while true; do
             if ! check_job_running; then
               echo "Job stopped. Resubmitting..."
-              "$FLINK_BIN" run -pyclientexec python -py flink_jobs/cloudtrail_datagen.py
+              "$FLINK_BIN" run -pyclientexec "$PYCLIENT" -py flink_jobs/cloudtrail_datagen.py
             fi
             sleep 30
           done
         else
           echo "Submitting CloudTrail DataGen job to Flink cluster using flink run..."
-          "$FLINK_BIN" run -pyclientexec python -py flink_jobs/cloudtrail_datagen.py
-          
+          "$FLINK_BIN" run -pyclientexec "$PYCLIENT" -py flink_jobs/cloudtrail_datagen.py
+
           # Monitor the job and keep process alive
           while true; do
             if ! check_job_running; then
               echo "Job stopped. Resubmitting..."
-              "$FLINK_BIN" run -pyclientexec python -py flink_jobs/cloudtrail_datagen.py
+              "$FLINK_BIN" run -pyclientexec "$PYCLIENT" -py flink_jobs/cloudtrail_datagen.py
             fi
             sleep 30
           done

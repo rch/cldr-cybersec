@@ -319,9 +319,11 @@ start_datagen() {
     fi
     
     # Submit the job in background
-    # Use devenv Python for PyFlink compatibility (especially on macOS)
+    # Use uv venv Python which has PyFlink installed
     local PYCLIENT
-    if [ -f "$PWD/.devenv/profile/bin/python3" ]; then
+    if [ -f "$PWD/.devenv/state/venv/bin/python3" ]; then
+        PYCLIENT="$PWD/.devenv/state/venv/bin/python3"
+    elif [ -f "$PWD/.devenv/profile/bin/python3" ]; then
         PYCLIENT="$PWD/.devenv/profile/bin/python3"
     else
         PYCLIENT="python3"
