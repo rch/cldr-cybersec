@@ -1,18 +1,79 @@
 """PyFlink health checks.
 
 Checks for:
+- PYFLINK_001: PyFlink not installed
 - PYFLINK_011: Iceberg AWS bundle missing
 - PYFLINK_012: Iceberg Flink runtime missing
 - PYFLINK_013: Git submodules not initialized
 """
 
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
 from ..models import CheckResult, HealthContext
 from ..catalog import get_failure_mode
+
+
+async def check_pyflink_installed(ctx: HealthContext) -> CheckResult:
+    """PYFLINK_001: Check PyFlink is installed in devenv Python.
+
+    Verifies the devenv Python can import pyflink module.
+    """
+    start = time.monotonic()
+
+    devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
+    devenv_python = Path(devenv_root) / ".devenv" / "profile" / "bin" / "python3"
+
+    if not devenv_python.exists():
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.skipped(
+            "Devenv Python not found",
+            devenv_python=str(devenv_python),
+            duration_ms=duration,
+        )
+
+    try:
+        result = subprocess.run(
+            [str(devenv_python), "-c", "import pyflink; print(pyflink.__version__)"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        duration = int((time.monotonic() - start) * 1000)
+
+        if result.returncode == 0:
+            version = result.stdout.strip()
+            result_obj = CheckResult.ok(
+                f"PyFlink installed: {version}",
+                version=version,
+                python=str(devenv_python),
+            )
+            result_obj.duration_ms = duration
+            return result_obj
+        else:
+            fm = get_failure_mode("PYFLINK_001")
+            rpn = fm.calculate_rpn() if fm else None
+
+            return CheckResult.critical(
+                "PyFlink not installed in devenv Python",
+                failure_mode_id="PYFLINK_001",
+                rpn=rpn,
+                remediation="Run: /health fix --apply",
+                python=str(devenv_python),
+                error=result.stderr.strip(),
+                duration_ms=duration,
+            )
+
+    except subprocess.TimeoutExpired:
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.error("PyFlink check timed out", duration_ms=duration)
+    except Exception as e:
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.error(f"Failed to check PyFlink: {e}", duration_ms=duration)
 
 
 async def check_submodules(ctx: HealthContext) -> CheckResult:
@@ -129,6 +190,7 @@ async def check_iceberg_jars(ctx: HealthContext) -> CheckResult:
 
 # Registry of all pyflink checks
 CHECKS: dict[str, Any] = {
+    "PYFLINK_001": check_pyflink_installed,
     "PYFLINK_011": check_iceberg_jars,
     "PYFLINK_012": check_iceberg_jars,  # Same check covers both
     "PYFLINK_013": check_submodules,
