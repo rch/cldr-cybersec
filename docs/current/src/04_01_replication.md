@@ -2,16 +2,9 @@
 
 ## Overview
 
-Cloudera Replication Manager supports Iceberg replication **between HDFS systems only**.
-For S3 → on-prem Iceberg replication, we use **Flink streaming replication**.
+Flink streaming replication provides continuous, incremental sync from AWS S3 Iceberg tables to on-prem storage (HDFS or Ozone).
 
-| Method | S3 → On-Prem | Use Case |
-|--------|--------------|----------|
-| Cloudera Replication Manager | No (HDFS-to-HDFS only) | On-prem to on-prem DR |
-| Flink Streaming | Yes | S3 Iceberg → HDFS/Ozone |
-| NiFi | Partial (files only) | Bulk file transfer |
-
-## Flink-Based Replication Architecture
+## Architecture
 
 ```d2
 direction: right
