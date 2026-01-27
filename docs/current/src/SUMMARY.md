@@ -10,7 +10,7 @@
     - [Glacier Archival](./03_03_glacier-archival.md)
 - [On-Prem Cloudera Cluster](./04_onprem-cluster.md)
     - [Replication Strategy](./04_01_replication.md)
-    - [Lakehouse Optimizer](./04_02_lakehouse-optimizer.md)
+    - [Table Optimization](./04_02_table-optimization.md)
 - [Operations](./05_operations.md)
     - [Historical Data Retrieval](./05_01_historical-retrieval.md)
     - [Data Verification](./05_02_data-verification.md)

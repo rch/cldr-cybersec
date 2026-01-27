@@ -13,7 +13,7 @@ The Cybersec Toolkit provides a unified pipeline for ingesting, processing, and 
 ## Key Principles
 
 - **Iceberg everywhere**: Consistent table format across AWS and on-prem
-- **Cloudera Lakehouse Optimizer**: Disable AWS-native Iceberg optimizer to avoid conflicts
+- **Cloudera Lakehouse Optimizer (CLO)**: Use CLO for S3 Iceberg tables; disable AWS-native optimizer to avoid conflicts
 - **Hybrid verification**: S3 Iceberg queries verify on-prem data completeness
 - **Cold storage retrieval**: Automated workflows to restore Glacier data for analysis
 
@@ -25,8 +25,11 @@ The Cybersec Toolkit provides a unified pipeline for ingesting, processing, and 
 | Table Format | Iceberg | Iceberg |
 | Storage | S3 + Glacier | HDFS / Ozone |
 | Catalog | AWS Glue (limited) | Cloudera SDX |
-| Optimizer | Disabled | Lakehouse Optimizer |
+| Optimizer | Cloudera Lakehouse Optimizer | Spark maintenance jobs* |
 | Query | Athena (verification) | Impala / Hive |
+
+*Note: Cloudera Lakehouse Optimizer is currently a cloud service. On-prem uses Spark-based
+Iceberg table maintenance (compaction, snapshot expiration) via scheduled jobs.
 
 ## Document Structure
 

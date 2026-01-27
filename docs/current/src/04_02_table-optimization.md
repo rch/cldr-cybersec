@@ -1,13 +1,24 @@
-# Lakehouse Optimizer
+# Table Optimization
 
 ## Overview
 
-Cloudera Lakehouse Optimizer handles table maintenance for Iceberg tables on-prem:
+Iceberg table maintenance ensures optimal query performance and storage efficiency:
 
 - **Compaction**: Merge small files into optimal sizes
 - **Snapshot expiration**: Clean up old snapshots
 - **Orphan file deletion**: Remove unreferenced data files
 - **Sort optimization**: Rewrite data for better query performance
+
+### Optimization by Environment
+
+| Environment | Optimizer | Notes |
+|-------------|-----------|-------|
+| **AWS (S3)** | Cloudera Lakehouse Optimizer (CLO) | Cloud service, manages S3 Iceberg tables |
+| **On-Prem** | Spark maintenance jobs | CLO not yet available for Private Cloud |
+
+> **Note**: Cloudera Lakehouse Optimizer is currently a cloud service announced at EVOLVE25.
+> On-prem environments use Spark-based Iceberg procedures for table maintenance.
+> Check [Cloudera docs](https://docs.cloudera.com) for Private Cloud availability updates.
 
 ```d2
 direction: down
@@ -27,12 +38,12 @@ Tables: {
 }
 
 Optimizer: {
-  label: "Lakehouse Optimizer"
+  label: "Spark Maintenance Jobs\n(On-Prem)"
   direction: right
 
   analyzer: "Table\nAnalyzer"
-  planner: "Optimization\nPlanner"
-  executor: "Job\nExecutor"
+  planner: "Airflow/Oozie\nScheduler"
+  executor: "Spark\nExecutor"
 }
 
 Operations: {
@@ -59,20 +70,20 @@ Operations.orphan -> Tables.cloudtrail
 Operations.sort -> Tables.cloudtrail
 ```
 
-## Why Disable AWS Optimizer
+## Why Disable AWS Native Optimizer
 
-Running two optimizers on shared Iceberg tables causes:
+AWS Glue provides automatic Iceberg optimization. We disable it because:
 
-1. **Conflicting compaction**: Both try to merge same files
-2. **Snapshot race conditions**: One expires what other needs
-3. **Orphan file deletion errors**: One deletes files other references
+1. **Use CLO instead**: Cloudera Lakehouse Optimizer provides unified management
+2. **Conflicting compaction**: Two optimizers would try to merge same files
+3. **Snapshot race conditions**: One expires what other needs
 4. **Metadata divergence**: Table state becomes inconsistent
 
 ### Solution
 
-- **AWS**: Disable all Glue Iceberg optimization
-- **On-prem**: Lakehouse Optimizer is sole optimizer
-- **AWS tables**: Remain queryable but not optimized locally
+- **AWS**: Disable Glue Iceberg optimization; use CLO for S3 tables
+- **On-prem**: Spark maintenance jobs (until CLO available for Private Cloud)
+- **S3 tables**: Remain queryable via Athena for verification
 
 ## Configuration
 
