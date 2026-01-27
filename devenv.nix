@@ -87,7 +87,7 @@
     enable = true;
     package = pkgs.python312;
     uv.enable = true;
-    #uv.sync.enable = true;
+    uv.sync.enable = true;
     venv.enable = true;
   };
 
