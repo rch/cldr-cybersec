@@ -56,14 +56,18 @@ This repository includes a complete local development environment using [devenv]
 ### Quick Start
 
 ```bash
-# Clone and enter devenv shell
-git clone --recursive https://github.com/cloudera/cybersec.git
+# Clone the repo (or pull latest if you already have it)
+git clone https://github.com/cloudera/cybersec.git
 cd cybersec
-devenv shell
 
-# Install Python dependencies and CLI
+# Initialize/update submodules
+git submodule update --init --recursive
+
+# Enter devenv (using direnv)
+direnv allow
+
+# Install Python dependencies
 uv sync
-uv pip install -e .
 
 # Start services (auto-bootstraps on first run)
 devenv tasks run restart:clean
@@ -73,7 +77,6 @@ cybersec "/bootstrap status"
 ```
 
 On first run, `restart:clean` automatically:
-- Initializes git submodules (if not cloned with `--recursive`)
 - Builds Flink from source (~10-15 minutes)
 - Downloads NiFi binary (~2 minutes on macOS)
 - Starts all services (PostgreSQL, Polaris, MinIO, Flink, NiFi, etc.)
