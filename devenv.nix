@@ -692,7 +692,7 @@ except Exception as e:
           fi
 
           if [ $((i % 30)) -eq 0 ]; then
-            echo "   Waiting for polaris_schema... ${i}s elapsed"
+            echo "   Waiting for polaris_schema... ''${i}s elapsed"
           fi
           sleep 1
         done
