@@ -88,7 +88,7 @@ class BootstrapConfig:
     nifi_version: str = "2.0.0"
 
     # UI configuration
-    ui_theme: str = "solarized-dark"
+    ui_theme: str = "nord"
 
     # FSN visualization settings
     fsn_default_mode: str = "cloudtrail"  # "cloudtrail" | "iceberg"
@@ -262,7 +262,7 @@ class SettingsManager:
 
         # UI section
         if "ui" in data:
-            flat["ui_theme"] = data["ui"].get("theme", "solarized-dark")
+            flat["ui_theme"] = data["ui"].get("theme", "nord")
 
         # FSN section
         if "fsn" in data:

@@ -1115,14 +1115,14 @@ def api_ui_theme():
 
         if request.method == "POST":
             data = request.json or {}
-            theme_id = data.get("theme", "solarized-dark")
+            theme_id = data.get("theme", "nord")
             service.update_config(ui_theme=theme_id)
             return jsonify({"theme": theme_id})
 
         config = service.get_config()
         return jsonify({"theme": config.ui_theme})
     except Exception as e:
-        return jsonify({"error": str(e), "theme": "solarized-dark"}), 500
+        return jsonify({"error": str(e), "theme": "nord"}), 500
 
 
 @app.route("/api/fsn/settings", methods=["GET", "POST"])
