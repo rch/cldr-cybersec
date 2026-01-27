@@ -19,11 +19,11 @@ AWS: {
   }
 
   flink: {
-    label: "Apache Flink\n(Ingestion)"
+    label: "Cloudera Data Flow\n(Flink)"
   }
 
-  s3_iceberg: {
-    label: "S3 Iceberg Tables\n(Processed Events)"
+  s3_tables: {
+    label: "S3 Table Bucket\n(Iceberg)"
     shape: cylinder
   }
 
@@ -32,22 +32,22 @@ AWS: {
     shape: cylinder
   }
 
-  athena: {
-    label: "Athena\n(Verification Queries)"
+  clo: {
+    label: "Cloudera Lakehouse\nOptimizer"
   }
 
   cloudtrail -> s3_raw: "Logs"
   s3_raw -> flink: "Ingest"
-  flink -> s3_iceberg: "Iceberg\nwrites"
-  s3_iceberg -> glacier: "Lifecycle\npolicy"
-  s3_iceberg -> athena: "Query"
+  flink -> s3_tables: "Iceberg\nwrites"
+  s3_tables -> glacier: "Lifecycle\npolicy"
+  clo -> s3_tables: "Optimize"
 }
 
 OnPrem: {
   label: "On-Prem Cloudera Cluster"
 
-  replication: {
-    label: "Replication\nManager"
+  flink_replication: {
+    label: "Flink\nReplication"
   }
 
   iceberg_tables: {
@@ -55,8 +55,8 @@ OnPrem: {
     shape: cylinder
   }
 
-  lakehouse_opt: {
-    label: "Lakehouse\nOptimizer"
+  spark_maint: {
+    label: "Spark\nMaintenance"
   }
 
   impala: {
@@ -67,14 +67,13 @@ OnPrem: {
     label: "SDX\nGovernance"
   }
 
-  replication -> iceberg_tables: "Sync"
-  iceberg_tables -> lakehouse_opt: "Optimize"
+  flink_replication -> iceberg_tables: "Sync"
+  iceberg_tables -> spark_maint: "Optimize"
   iceberg_tables -> impala: "Query"
   sdx -> iceberg_tables: "Govern"
 }
 
-AWS.s3_iceberg -> OnPrem.replication: "Replicate\nevents"
-AWS.athena -> OnPrem.impala: "Verify\ncompleteness" {style.stroke-dash: 5}
+AWS.s3_tables -> OnPrem.flink_replication: "Replicate\nevents"
 ```
 
 ## Design Principles
@@ -88,19 +87,15 @@ Both AWS and on-prem environments use Apache Iceberg:
 - **Partition evolution** to adapt to query patterns
 - **Snapshot isolation** for consistent reads during writes
 
-### Optimizer Conflict Resolution
+### S3 Table Buckets with CLO
 
-AWS provides native Iceberg optimization, but this conflicts with Cloudera's Lakehouse Optimizer. Our approach:
-
-1. **Disable AWS optimizer** via OpenTofu configuration
-2. **Use Cloudera Lakehouse Optimizer** exclusively for compaction and optimization
-3. **S3 tables remain queryable** via Athena for verification purposes
+S3 Tables provide native Iceberg with built-in catalog. We disable S3's automatic optimization and use Cloudera Lakehouse Optimizer (CLO) for consistent management across hybrid environment.
 
 ### Hybrid Query Strategy
 
 | Query Type | Location | Tool | Use Case |
 |------------|----------|------|----------|
-| Verification | AWS | Athena | Confirm all events replicated |
+| Direct query | AWS | S3 Tables | Lightweight verification |
 | Ad-hoc investigation | On-prem | Impala | Security analysis |
 | Historical deep dive | On-prem | Spark/Hive | Multi-year correlation |
 | ML training | On-prem | Cloudera AI | Anomaly detection models |

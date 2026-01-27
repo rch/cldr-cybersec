@@ -2,7 +2,7 @@
 
 ## Overview
 
-Flink streaming replication provides continuous, incremental sync from AWS S3 Iceberg tables to on-prem storage (HDFS or Ozone).
+Flink streaming replication provides continuous, incremental sync from AWS S3 Table Buckets to on-prem storage (HDFS or Ozone).
 
 ## Architecture
 
@@ -12,14 +12,10 @@ direction: right
 AWS: {
   label: "AWS Source"
 
-  rest_catalog: "Iceberg REST Catalog"
-
-  s3_iceberg: {
-    label: "S3 Iceberg Tables\n(cloudtrail_events)"
+  s3_tables: {
+    label: "S3 Table Bucket\n(cloudtrail_events)"
     shape: cylinder
   }
-
-  rest_catalog -> s3_iceberg
 }
 
 Flink: {
@@ -45,7 +41,7 @@ OnPrem: {
   rest_catalog -> storage
 }
 
-AWS.s3_iceberg -> Flink.source: "Stream read\n(incremental)"
+AWS.s3_tables -> Flink.source: "Stream read\n(incremental)"
 Flink.sink -> OnPrem.storage: "Write"
 Flink.sink -> OnPrem.rest_catalog: "Commit"
 ```
@@ -55,13 +51,11 @@ Flink.sink -> OnPrem.rest_catalog: "Commit"
 ### Catalog Configuration
 
 ```sql
--- AWS Source Catalog (Iceberg REST + S3)
+-- AWS Source Catalog (S3 Tables)
 CREATE CATALOG aws_catalog WITH (
   'type' = 'iceberg',
-  'catalog-impl' = 'org.apache.iceberg.rest.RESTCatalog',
-  'uri' = 'https://iceberg-rest.aws.example.com',
-  'warehouse' = 's3://cybersec-cloudtrail-iceberg/warehouse',
-  'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO'
+  'catalog-impl' = 'software.amazon.s3tables.iceberg.S3TablesCatalog',
+  'warehouse' = 'arn:aws:s3tables:us-east-1:123456789012:bucket/cybersec-cloudtrail'
 );
 
 -- On-Prem Target Catalog (Iceberg REST + HDFS/Ozone)
@@ -122,14 +116,12 @@ def create_replication_job():
     t_env.get_config().set("execution.checkpointing.interval", "120s")
     t_env.get_config().set("execution.checkpointing.mode", "EXACTLY_ONCE")
 
-    # AWS Source Catalog (Iceberg REST)
+    # AWS Source Catalog (S3 Tables)
     t_env.execute_sql("""
         CREATE CATALOG aws_catalog WITH (
             'type' = 'iceberg',
-            'catalog-impl' = 'org.apache.iceberg.rest.RESTCatalog',
-            'uri' = 'https://iceberg-rest.aws.example.com',
-            'warehouse' = 's3://cybersec-cloudtrail-iceberg/warehouse',
-            'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO'
+            'catalog-impl' = 'software.amazon.s3tables.iceberg.S3TablesCatalog',
+            'warehouse' = 'arn:aws:s3tables:us-east-1:123456789012:bucket/cybersec-cloudtrail'
         )
     """)
 

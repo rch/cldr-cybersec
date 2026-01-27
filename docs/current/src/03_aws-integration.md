@@ -22,62 +22,45 @@ S3: {
     label: "Raw Logs Bucket"
     shape: cylinder
   }
-  iceberg_bucket: {
-    label: "Iceberg Tables Bucket"
+  table_bucket: {
+    label: "S3 Table Bucket\n(Iceberg)"
     shape: cylinder
   }
 }
 
-Catalog: {
-  label: "Iceberg REST Catalog"
-
-  rest_api: "REST API"
-  optimizer: "AWS Optimizer\n(DISABLED)"
-}
-
 Flink: {
-  label: "Apache Flink"
+  label: "Cloudera Data Flow"
 
-  cluster: "Flink Cluster\n(EKS or EMR)"
+  cluster: "Flink Cluster"
   job: "CloudTrail\nProcessor Job"
 }
 
-Query: {
-  label: "Query Layer"
+CLO: {
+  label: "Cloudera Lakehouse\nOptimizer"
 
-  athena: "Athena\n(verification)"
+  compaction: "Compaction"
+  snapshots: "Snapshot\nManagement"
 }
 
 CloudTrail -> S3.raw_bucket: "Deliver logs"
 S3.raw_bucket -> Flink.job: "Ingest"
-Flink.job -> S3.iceberg_bucket: "Write Iceberg"
-S3.iceberg_bucket -> Catalog.rest_api: "Register tables"
-Catalog.rest_api -> Query.athena: "Metadata"
-S3.iceberg_bucket -> Query.athena: "Scan data"
-
-Catalog.optimizer -> S3.iceberg_bucket: "DISABLED" {
-  style.stroke: "#ff0000"
-  style.stroke-dash: 5
-}
+Flink.job -> S3.table_bucket: "Write Iceberg"
+CLO -> S3.table_bucket: "Optimize"
 ```
 
 ## Key Design Decisions
 
-### 1. Disable AWS Iceberg Optimizer
+### 1. S3 Table Buckets
 
-AWS provides automatic Iceberg optimization (compaction, snapshot expiration). We disable this to:
+S3 Tables provide native Iceberg support with built-in catalog for direct queries. We disable S3's automatic optimization and use CLO instead for consistent management across hybrid environment.
 
-- Avoid conflicts with Cloudera Lakehouse Optimizer
-- Maintain consistent optimization strategy across hybrid environment
-- Preserve snapshots for replication verification
+### 2. Cloudera Lakehouse Optimizer (CLO)
 
-### 2. Iceberg REST Catalog
+CLO manages S3 table buckets:
 
-We use Cloudera's Iceberg REST Catalog for:
-
-- Table metadata registration (schema, partitioning)
-- Consistent catalog interface across AWS and on-prem
-- Athena query access via catalog integration
+- Compaction and file optimization
+- Snapshot expiration
+- Consistent optimization strategy with on-prem
 
 ### 3. Flink for Ingestion
 

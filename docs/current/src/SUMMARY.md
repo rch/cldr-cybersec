@@ -6,7 +6,7 @@
     - [Storage Strategy](./02_02_storage-strategy.md)
 - [AWS Integration](./03_aws-integration.md)
     - [CloudTrail Ingestion](./03_01_cloudtrail-ingestion.md)
-    - [S3 Iceberg Tables](./03_02_s3-iceberg-tables.md)
+    - [S3 Table Buckets](./03_02_s3-tables.md)
     - [Glacier Archival](./03_03_glacier-archival.md)
 - [On-Prem Cloudera Cluster](./04_onprem-cluster.md)
     - [Replication Strategy](./04_01_replication.md)

@@ -4,8 +4,8 @@ The Cybersec Toolkit provides a unified pipeline for ingesting, processing, and 
 
 ## Goals
 
-1. **Ingest CloudTrail logs** from AWS S3 using Apache Flink
-2. **Land events in Iceberg format** on AWS S3 for lightweight query capability
+1. **Ingest CloudTrail logs** from AWS S3 using Flink
+2. **Land events in S3 Table Buckets** (native Iceberg) for lightweight query capability
 3. **Replicate to on-prem Cloudera cluster** for deep analysis and long-term governance
 4. **Archive to Glacier** for 7+ year retention with retrieval workflows
 5. **Gradual migration** to on-prem as DR capabilities mature (1-3 year horizon)
@@ -13,20 +13,20 @@ The Cybersec Toolkit provides a unified pipeline for ingesting, processing, and 
 ## Key Principles
 
 - **Iceberg everywhere**: Consistent table format across AWS and on-prem
-- **Cloudera Lakehouse Optimizer (CLO)**: Use CLO for S3 Iceberg tables; disable AWS-native optimizer to avoid conflicts
-- **Hybrid verification**: S3 Iceberg queries verify on-prem data completeness
+- **Cloudera Lakehouse Optimizer (CLO)**: Use CLO for S3 table buckets; disable S3's built-in optimizer
+- **Hybrid verification**: S3 Tables direct queries verify on-prem data completeness
 - **Cold storage retrieval**: Automated workflows to restore Glacier data for analysis
 
 ## Technology Stack
 
 | Component | AWS | On-Prem |
 |-----------|-----|---------|
-| Streaming | Flink (managed or self-hosted) | Cloudera Data Flow / Flink |
-| Table Format | Iceberg | Iceberg |
-| Storage | S3 + Glacier | HDFS / Ozone |
-| Catalog | Iceberg REST Catalog | Iceberg REST Catalog |
+| Streaming | Cloudera Data Flow (Flink) | Cloudera Data Flow (Flink) |
+| Table Format | Iceberg (S3 Tables) | Iceberg |
+| Storage | S3 Table Buckets + Glacier | HDFS / Ozone |
+| Catalog | S3 Tables (built-in) | Iceberg REST Catalog |
 | Optimizer | Cloudera Lakehouse Optimizer | Spark maintenance jobs* |
-| Query | Athena (verification) | Impala / Hive |
+| Query | S3 Tables (direct) | Impala / Hive |
 
 *Note: Cloudera Lakehouse Optimizer is currently a cloud service. On-prem uses Spark-based
 Iceberg table maintenance (compaction, snapshot expiration) via scheduled jobs.
