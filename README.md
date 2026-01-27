@@ -53,33 +53,37 @@ mvn clean install -DskipTests
 
 This repository includes a complete local development environment using [devenv](https://devenv.sh/).
 
-### Quick Start
+### Quickstart (devenv)
 
 ```bash
-# Clone the repo (or pull latest if you already have it)
-git clone https://github.com/cloudera/cybersec.git
+# Clone with submodules
+git clone --recurse-submodules https://github.com/cloudera/cybersec.git
 cd cybersec
 
-# Initialize/update submodules
-git submodule update --init --recursive
-
-# Enter devenv (using direnv)
+# Enter devenv shell (auto-installs Python dependencies)
 direnv allow
 
-# Install Python dependencies
-uv sync
-
-# Start services (auto-bootstraps on first run)
-devenv tasks run restart:clean
-
-# Verify environment
-cybersec "/bootstrap status"
+# Start all services
+devenv up
 ```
 
-On first run, `restart:clean` automatically:
+On first run, `devenv up` automatically:
 - Builds Flink from source (~10-15 minutes)
-- Downloads NiFi binary (~2 minutes on macOS)
+- Downloads NiFi binary (~2 minutes)
 - Starts all services (PostgreSQL, Polaris, MinIO, Flink, NiFi, etc.)
+- Initializes Polaris catalog
+
+**Already have the repo cloned?**
+```bash
+git submodule update --init --recursive
+direnv allow
+devenv up
+```
+
+**Clean restart** (wipes PostgreSQL data, re-initializes everything):
+```bash
+devenv tasks run restart:clean
+```
 
 ### CLI Usage
 
