@@ -20,64 +20,66 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 
-import java.sql.DriverManager;
 import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Flink job to write AWS CloudTrail events to Apache Iceberg tables using MinIO and PostgreSQL catalog.
- * 
- * This class demonstrates direct Iceberg integration with Flink using the Iceberg connector.
- * It creates an Iceberg catalog backed by PostgreSQL and writes data to MinIO S3-compatible storage.
+ * Flink job to write AWS CloudTrail events to Apache Iceberg tables using Iceberg REST Catalog.
+ *
+ * This class demonstrates direct Iceberg integration with Flink using the industry-standard
+ * Iceberg REST Catalog API. It works with any REST Catalog implementation (Apache Polaris,
+ * Tabular, Nessie, etc.) and uses S3-compatible storage (MinIO, AWS S3, etc.).
  */
 public class CloudTrailIcebergWriter {
-    
-    // Force PostgreSQL driver registration for JDBC DriverManager
-    static {
-        try {
-            // Explicitly register the PostgreSQL driver with DriverManager
-            // This is needed because the driver is loaded by Flink's user classloader
-            // but DriverManager uses the system classloader
-            Class.forName("org.postgresql.Driver");
-            DriverManager.registerDriver(new org.postgresql.Driver());
-            System.out.println("PostgreSQL driver registered successfully");
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to register PostgreSQL driver", e);
-        }
-    }
-    
+
     private static final String CATALOG_NAME = "iceberg_catalog";
     private static final String DATABASE_NAME = "cybersec";
     private static final String TABLE_NAME = "cloudtrail_events";
     
     /**
-     * Configure and create Iceberg catalog with REST catalog backend (Apache Polaris).
-     * Uses REST API for all catalog operations - avoids all classloader conflicts.
-     * 
+     * Configure and create Iceberg catalog with REST catalog backend.
+     * Uses the industry-standard Iceberg REST Catalog API for all catalog operations.
+     *
      * @param tableEnv The Flink table environment
-     * @param catalogUri REST catalog URI (default: http://localhost:8181)
-     * @param warehouse Warehouse location (default: s3://cybersec/iceberg/warehouse)
+     * @param catalogUri REST catalog base URI (e.g., http://localhost:8181)
+     * @param warehouseName The catalog/warehouse name in the REST catalog (e.g., "cybersec")
+     * @param s3Endpoint S3-compatible endpoint (e.g., http://localhost:9010 for MinIO)
+     * @param s3AccessKey S3 access key
+     * @param s3SecretKey S3 secret key
      */
     public static void createIcebergCatalog(
             TableEnvironment tableEnv,
             String catalogUri,
-            String warehouse) {
-        
+            String warehouseName,
+            String s3Endpoint,
+            String s3AccessKey,
+            String s3SecretKey) {
+
         Map<String, String> catalogProperties = new HashMap<>();
         catalogProperties.put("type", "iceberg");
-        catalogProperties.put("catalog-impl", "org.apache.iceberg.rest.RESTCatalog");
-        catalogProperties.put("uri", catalogUri);
-        catalogProperties.put("warehouse", warehouse);
-        
-        // Credentials handled by Polaris
+        catalogProperties.put("catalog-type", "rest");
+        catalogProperties.put("uri", catalogUri + "/api/catalog");
+        catalogProperties.put("warehouse", warehouseName);
+
+        // OAuth credentials for REST catalog
         catalogProperties.put("credential", "admin:admin");
-        
+        catalogProperties.put("scope", "PRINCIPAL_ROLE:ALL");
+
+        // S3/MinIO configuration - use S3FileIO to avoid Hadoop dependencies
+        catalogProperties.put("io-impl", "org.apache.iceberg.aws.s3.S3FileIO");
+        catalogProperties.put("s3.endpoint", s3Endpoint);
+        catalogProperties.put("s3.region", "us-east-1");
+        catalogProperties.put("s3.path-style-access", "true");
+        catalogProperties.put("s3.access-key-id", s3AccessKey);
+        catalogProperties.put("s3.secret-access-key", s3SecretKey);
+        catalogProperties.put("client.region", "us-east-1");
+
         tableEnv.executeSql(String.format(
             "CREATE CATALOG %s WITH (%s)",
             CATALOG_NAME,
             mapToSqlProperties(catalogProperties)
         ));
-        
+
         tableEnv.useCatalog(CATALOG_NAME);
     }
     
@@ -158,25 +160,28 @@ public class CloudTrailIcebergWriter {
      */
     public static StreamTableEnvironment setupIcebergEnvironment(
             String catalogUri,
-            String warehouse) {
-        
+            String warehouseName,
+            String s3Endpoint,
+            String s3AccessKey,
+            String s3SecretKey) {
+
         EnvironmentSettings settings = EnvironmentSettings
                 .newInstance()
                 .inStreamingMode()
                 .build();
-        
+
         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(
                 StreamExecutionEnvironment.getExecutionEnvironment(),
                 settings);
-        
-        createIcebergCatalog(tableEnv, catalogUri, warehouse);
-        
-        // Create database if it doesn't exist
-        tableEnv.executeSql(String.format("CREATE DATABASE IF NOT EXISTS %s.%s", 
+
+        createIcebergCatalog(tableEnv, catalogUri, warehouseName, s3Endpoint, s3AccessKey, s3SecretKey);
+
+        // Create database if it doesn't exist (use backticks for reserved words)
+        tableEnv.executeSql(String.format("CREATE DATABASE IF NOT EXISTS %s.`%s`",
                                          CATALOG_NAME, DATABASE_NAME));
-        
+
         createCloudTrailTable(tableEnv);
-        
+
         return tableEnv;
     }
 }

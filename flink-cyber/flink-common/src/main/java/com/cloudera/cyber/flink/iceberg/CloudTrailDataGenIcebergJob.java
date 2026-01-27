@@ -12,44 +12,44 @@
 
 package com.cloudera.cyber.flink.iceberg;
 
-import org.apache.flink.api.common.eventtime.WatermarkStrategy;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.utils.ParameterTool;
-import org.apache.flink.connector.datagen.table.DataGenConnectorOptions;
-import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.EnvironmentSettings;
-import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
-import org.apache.flink.types.Row;
-
-import java.time.Duration;
 
 /**
  * Flink job that generates synthetic AWS CloudTrail events and writes them directly to Iceberg.
- * 
+ *
+ * Uses the industry-standard Iceberg REST Catalog API for catalog operations.
+ * Works with any REST Catalog implementation (Apache Polaris, Tabular, Nessie, etc.)
+ *
  * Usage:
  *   flink run -c com.cloudera.cyber.flink.iceberg.CloudTrailDataGenIcebergJob \
- *     flink-common.jar \
- *     --postgres.host localhost \
- *     --postgres.port 5438 \
- *     --postgres.db iceberg \
- *     --postgres.user $USER \
- *     --minio.endpoint http://localhost:9010 \
- *     --minio.access-key minioadmin \
- *     --minio.secret-key minioadmin \
+ *     flink-common-2.4.0-iceberg.jar \
+ *     --catalog.uri http://localhost:8181 \
+ *     --warehouse.name cybersec \
+ *     --s3.endpoint http://localhost:9010 \
+ *     --s3.access-key minioadmin \
+ *     --s3.secret-key minioadmin \
  *     --rows-per-second 10
  */
 public class CloudTrailDataGenIcebergJob {
-    
+
     public static void main(String[] args) throws Exception {
         // Parse parameters
         ParameterTool params = ParameterTool.fromArgs(args);
-        
+
+        // REST Catalog configuration
         String catalogUri = params.get("catalog.uri", "http://localhost:8181");
-        String warehouse = params.get("warehouse", "s3://cybersec/iceberg/warehouse");
+        String warehouseName = params.get("warehouse.name", "cybersec");
+
+        // S3/MinIO configuration
+        String s3Endpoint = params.get("s3.endpoint", "http://localhost:9010");
+        String s3AccessKey = params.get("s3.access-key", "minioadmin");
+        String s3SecretKey = params.get("s3.secret-key", "minioadmin");
+
         int rowsPerSecond = params.getInt("rows-per-second", 10);
-        
+
         // Create streaming environment
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         EnvironmentSettings settings = EnvironmentSettings
@@ -57,18 +57,22 @@ public class CloudTrailDataGenIcebergJob {
                 .inStreamingMode()
                 .build();
         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, settings);
-        
-        // Setup Iceberg catalog with REST catalog (Apache Polaris)
+
+        // Setup Iceberg catalog with REST catalog
         CloudTrailIcebergWriter.createIcebergCatalog(
             tableEnv,
-            catalogUri, warehouse
+            catalogUri,
+            warehouseName,
+            s3Endpoint,
+            s3AccessKey,
+            s3SecretKey
         );
-        
-        // Create database if not exists
-        tableEnv.executeSql("CREATE DATABASE IF NOT EXISTS iceberg_catalog.cybersec");
-        
+
+        // Create database if not exists (use backticks for reserved words like 'default')
+        tableEnv.executeSql("CREATE DATABASE IF NOT EXISTS iceberg_catalog.`cybersec`");
+
         CloudTrailIcebergWriter.createCloudTrailTable(tableEnv);
-        
+
         // Create DataGen source for CloudTrail events
         String createSourceDdl = String.format(
             "CREATE TEMPORARY TABLE cloudtrail_source (" +
@@ -115,8 +119,9 @@ public class CloudTrailDataGenIcebergJob {
             "SELECT * FROM cloudtrail_source";
         
         System.out.println("Starting CloudTrail DataGen -> Iceberg job...");
-        System.out.println("Catalog: iceberg_catalog (REST catalog at " + catalogUri + ")");
-        System.out.println("Warehouse: " + warehouse);
+        System.out.println("REST Catalog: " + catalogUri + "/api/catalog");
+        System.out.println("Warehouse: " + warehouseName);
+        System.out.println("S3 Endpoint: " + s3Endpoint);
         System.out.println("Generating " + rowsPerSecond + " events per second...");
         
         tableEnv.executeSql(insertSql);
