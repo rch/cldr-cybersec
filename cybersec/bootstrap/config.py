@@ -324,7 +324,7 @@ class SettingsManager:
         return {
             "bootstrap": {
                 "completed": self._config.completed,
-                "last_run": self._config.last_run,
+                "last_run": self._config.last_run or "",  # TOML can't serialize None
             },
             "paths": {
                 "minio_data_dir": self._config.minio_data_dir,
