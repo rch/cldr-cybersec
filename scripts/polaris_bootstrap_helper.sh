@@ -182,44 +182,39 @@ trigger_catalog_init() {
 
 # Verify all components are ready and bootstrapped
 verify_all() {
-    local all_ok=true
-    
     log_info "=== Complete Bootstrap Verification ==="
     echo
-    
-    if wait_for_postgres 15 2; then
-        echo
-    else
-        all_ok=false
+
+    # Critical infrastructure - bail immediately if not ready
+    if ! wait_for_postgres 30 2; then
+        log_error "PostgreSQL not ready - aborting"
+        return 1
     fi
-    
-    if wait_for_polaris 60 2; then
-        echo
-    else
-        all_ok=false
+    echo
+
+    # Polaris is critical - use 300 second timeout
+    if ! wait_for_polaris 150 2; then
+        log_error "Polaris not ready after 300 seconds - aborting"
+        return 1
     fi
-    
-    if verify_bootstrap; then
-        echo
-    else
-        all_ok=false
+    echo
+
+    if ! verify_bootstrap; then
+        log_error "Polaris bootstrap verification failed - aborting"
+        return 1
     fi
-    
+    echo
+
     if verify_catalog; then
         echo
     else
         log_warn "Catalog verification failed - may need initialization"
         # Don't fail on catalog missing - it might be intentional
     fi
-    
+
     echo
-    if [ "$all_ok" = true ]; then
-        log_success "=== All bootstrap verifications passed ==="
-        return 0
-    else
-        log_error "=== Some bootstrap verifications failed ==="
-        return 1
-    fi
+    log_success "=== All bootstrap verifications passed ==="
+    return 0
 }
 
 # Check if port is in use (portable - works on Linux and macOS)
@@ -362,56 +357,50 @@ verify_events() {
 
 # Complete end-to-end verification including datagen and events
 verify_e2e() {
-    local all_ok=true
-    
     log_info "=== Complete E2E Verification ==="
     echo
-    
-    # Basic infrastructure checks
-    if wait_for_postgres 15 2; then
-        echo
-    else
-        all_ok=false
+
+    # Critical infrastructure - bail immediately if not ready
+    if ! wait_for_postgres 30 2; then
+        log_error "PostgreSQL not ready - aborting bootstrap"
+        return 1
     fi
-    
-    if wait_for_polaris 60 2; then
-        echo
-    else
-        all_ok=false
+    echo
+
+    # Polaris is critical - use 300 second timeout (150 attempts × 2 seconds)
+    if ! wait_for_polaris 150 2; then
+        log_error "Polaris not ready after 300 seconds - aborting bootstrap"
+        return 1
     fi
-    
-    if verify_bootstrap; then
-        echo
-    else
-        all_ok=false
+    echo
+
+    if ! verify_bootstrap; then
+        log_error "Polaris bootstrap verification failed - aborting"
+        return 1
     fi
-    
-    if verify_catalog; then
-        echo
-    else
+    echo
+
+    # Catalog can be initialized if missing
+    if ! verify_catalog; then
         log_warn "Catalog not found - triggering initialization..."
-        if trigger_catalog_init 3 "./setup_polaris_catalog.sh"; then
-            echo
-        else
-            log_error "Catalog initialization failed"
-            all_ok=false
+        if ! trigger_catalog_init 3 "./setup_polaris_catalog.sh"; then
+            log_error "Catalog initialization failed - aborting"
+            return 1
         fi
     fi
-    
-    # Flink and DataGen checks
-    if wait_for_flink 30 2; then
-        echo
-    else
+    echo
+
+    # Flink and DataGen checks - these can be warnings, not fatal
+    local all_ok=true
+
+    if ! wait_for_flink 30 2; then
         log_warn "Flink not ready - skipping datagen checks"
         all_ok=false
-    fi
-    
-    if $all_ok; then
+    else
+        echo
         if wait_for_datagen 24 5; then
             echo
-            if verify_events 1 60; then
-                echo
-            else
+            if ! verify_events 1 60; then
                 log_warn "Event verification failed - data may not be flowing yet"
                 all_ok=false
             fi
@@ -420,7 +409,7 @@ verify_e2e() {
             all_ok=false
         fi
     fi
-    
+
     echo
     if $all_ok; then
         log_success "=== E2E verification completed successfully ==="
