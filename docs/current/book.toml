@@ -27,6 +27,8 @@ output-dir = "d2"
 
 [output.html]
 default-theme = "light"
+additional-css = ["theme/custom.css"]
+additional-js = ["theme/diagrams.js"]
 
 [output.html.print]
 enable = true
