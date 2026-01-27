@@ -48,7 +48,7 @@ def get_theme(theme_id: str) -> dict[str, Any]:
     path = THEMES_DIR / f"{theme_id}.toml"
     if not path.exists():
         # Fallback to default theme
-        path = THEMES_DIR / "solarized-dark.toml"
+        path = THEMES_DIR / "nord.toml"
 
     with open(path, "rb") as fp:
         data = tomllib.load(fp)
@@ -70,4 +70,4 @@ def get_theme(theme_id: str) -> dict[str, Any]:
 
 def get_default_theme() -> str:
     """Return the default theme ID."""
-    return "solarized-dark"
+    return "nord"
