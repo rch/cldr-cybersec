@@ -1,6 +1,17 @@
 # Replication Strategy
 
-## Replication Architecture
+## Overview
+
+Cloudera Replication Manager supports Iceberg replication **between HDFS systems only**.
+For S3 → on-prem Iceberg replication, we use **Flink streaming replication**.
+
+| Method | S3 → On-Prem | Use Case |
+|--------|--------------|----------|
+| Cloudera Replication Manager | No (HDFS-to-HDFS only) | On-prem to on-prem DR |
+| Flink Streaming | Yes | S3 Iceberg → HDFS/Ozone |
+| NiFi | Partial (files only) | Bulk file transfer |
+
+## Flink-Based Replication Architecture
 
 ```d2
 direction: right
@@ -8,198 +19,175 @@ direction: right
 AWS: {
   label: "AWS Source"
 
+  glue: "Glue Catalog"
+
   s3_iceberg: {
     label: "S3 Iceberg Tables\n(cloudtrail_events)"
     shape: cylinder
   }
 
-  metadata: {
-    label: "Iceberg Metadata"
-    shape: document
-  }
-
-  data: {
-    label: "Parquet Data Files"
-    shape: document
-  }
-
-  s3_iceberg -> metadata
-  s3_iceberg -> data
+  glue -> s3_iceberg
 }
 
-Replication: {
-  label: "Replication Manager"
+Flink: {
+  label: "Flink Replication Job"
 
-  scheduler: "Snapshot\nScheduler"
-  differ: "Incremental\nDiff Engine"
-  transfer: "Data\nTransfer"
-  commit: "Metadata\nCommit"
+  source: "Iceberg\nStreaming Source"
+  transform: "Schema\nMapping"
+  sink: "Iceberg\nSink"
+
+  source -> transform -> sink
 }
 
 OnPrem: {
   label: "On-Prem Target"
 
-  ozone_iceberg: {
-    label: "Ozone Iceberg Tables\n(cloudtrail_events)"
+  hive_metastore: "Hive Metastore"
+
+  storage: {
+    label: "HDFS or Ozone"
     shape: cylinder
   }
 
-  metadata: {
-    label: "Iceberg Metadata"
-    shape: document
-  }
-
-  data: {
-    label: "Parquet Data Files"
-    shape: document
-  }
-
-  ozone_iceberg -> metadata
-  ozone_iceberg -> data
+  hive_metastore -> storage
 }
 
-AWS.metadata -> Replication.scheduler: "Poll snapshots"
-Replication.scheduler -> Replication.differ
-Replication.differ -> Replication.transfer: "New files"
-AWS.data -> Replication.transfer: "Copy"
-Replication.transfer -> OnPrem.data
-Replication.commit -> OnPrem.metadata
+AWS.s3_iceberg -> Flink.source: "Stream read\n(incremental)"
+Flink.sink -> OnPrem.storage: "Write"
+Flink.sink -> OnPrem.hive_metastore: "Commit"
 ```
 
-## Replication Modes
+## Flink Replication Job
 
-### 1. Snapshot-Based Replication
+### Catalog Configuration
 
-Replicate complete Iceberg snapshots for consistency:
+```sql
+-- AWS Source Catalog (Glue + S3)
+CREATE CATALOG aws_catalog WITH (
+  'type' = 'iceberg',
+  'catalog-type' = 'glue',
+  'warehouse' = 's3://cybersec-cloudtrail-iceberg/warehouse',
+  'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO'
+);
+
+-- On-Prem Target Catalog (Hive Metastore + HDFS/Ozone)
+CREATE CATALOG onprem_catalog WITH (
+  'type' = 'iceberg',
+  'catalog-type' = 'hive',
+  'uri' = 'thrift://hive-metastore.onprem:9083',
+  'warehouse' = 'ofs://ozone1/iceberg/warehouse'  -- Ozone
+  -- OR: 'warehouse' = 'hdfs://namenode:8020/iceberg/warehouse'  -- HDFS
+);
+```
+
+### Streaming Replication Query
+
+```sql
+-- Continuous incremental replication from S3 to on-prem
+INSERT INTO onprem_catalog.cybersec.cloudtrail_events
+SELECT
+  event_id,
+  event_time,
+  event_source,
+  event_name,
+  event_type,
+  aws_region,
+  source_ip_address,
+  user_agent,
+  user_identity,
+  request_parameters,
+  response_elements,
+  error_code,
+  error_message,
+  resources,
+  geo_country,
+  geo_city,
+  asn_org,
+  ingested_at,
+  raw_event
+FROM aws_catalog.cybersec.cloudtrail_events
+/*+ OPTIONS(
+  'streaming' = 'true',
+  'monitor-interval' = '60s'
+) */;
+```
+
+### PyFlink Replication Job
 
 ```python
-# replication_job.py
-from pyiceberg.catalog import load_catalog
+# flink_jobs/iceberg_replicator.py
+"""Flink job to replicate Iceberg tables from S3 to on-prem."""
 
-def replicate_snapshot(source_catalog, target_catalog, table_name):
-    """Replicate latest snapshot from AWS to on-prem."""
+from pyflink.table import EnvironmentSettings, TableEnvironment
 
-    source_table = source_catalog.load_table(table_name)
-    target_table = target_catalog.load_table(table_name)
+def create_replication_job():
+    env_settings = EnvironmentSettings.in_streaming_mode()
+    t_env = TableEnvironment.create(env_settings)
 
-    # Get latest source snapshot
-    source_snapshot = source_table.current_snapshot()
+    # Configure checkpointing for exactly-once
+    t_env.get_config().set("execution.checkpointing.interval", "120s")
+    t_env.get_config().set("execution.checkpointing.mode", "EXACTLY_ONCE")
 
-    # Get current target snapshot
-    target_snapshot = target_table.current_snapshot()
+    # AWS Source Catalog
+    t_env.execute_sql("""
+        CREATE CATALOG aws_catalog WITH (
+            'type' = 'iceberg',
+            'catalog-type' = 'glue',
+            'warehouse' = 's3://cybersec-cloudtrail-iceberg/warehouse',
+            'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO'
+        )
+    """)
 
-    if source_snapshot.snapshot_id == target_snapshot.snapshot_id:
-        print("Already in sync")
-        return
+    # On-Prem Target Catalog (Ozone or HDFS)
+    t_env.execute_sql("""
+        CREATE CATALOG onprem_catalog WITH (
+            'type' = 'iceberg',
+            'catalog-type' = 'hive',
+            'uri' = 'thrift://hive-metastore.onprem:9083',
+            'warehouse' = 'ofs://ozone1/iceberg/warehouse'
+        )
+    """)
 
-    # Find new data files since last sync
-    new_files = []
-    for entry in source_snapshot.manifests:
-        manifest = source_table.io.read_manifest(entry)
-        for file in manifest.entries:
-            if file.snapshot_id > target_snapshot.snapshot_id:
-                new_files.append(file)
+    # Start streaming replication
+    t_env.execute_sql("""
+        INSERT INTO onprem_catalog.cybersec.cloudtrail_events
+        SELECT * FROM aws_catalog.cybersec.cloudtrail_events
+        /*+ OPTIONS('streaming'='true', 'monitor-interval'='60s') */
+    """)
 
-    # Copy new data files
-    for file in new_files:
-        copy_s3_to_ozone(file.file_path, target_path)
-
-    # Commit new snapshot to target
-    target_table.append(new_files)
+if __name__ == "__main__":
+    create_replication_job()
 ```
 
-### 2. Streaming Replication (Near Real-Time)
+## On-Prem Storage Options
 
-For lower latency, replicate as Flink writes:
+### HDFS
 
-```d2
-direction: right
+Traditional Hadoop storage, well-supported:
 
-Flink: {
-  label: "Flink Job"
-
-  writer: "Iceberg\nWriter"
-}
-
-AWS: {
-  label: "AWS"
-
-  s3: {
-    label: "S3"
-    shape: cylinder
-  }
-
-  sns: "SNS Topic"
-}
-
-OnPrem: {
-  label: "On-Prem"
-
-  listener: "Event\nListener"
-  copier: "File\nCopier"
-  ozone: {
-    label: "Ozone"
-    shape: cylinder
-  }
-}
-
-Flink.writer -> AWS.s3: "Write"
-AWS.s3 -> AWS.sns: "Object created"
-AWS.sns -> OnPrem.listener: "Notify"
-OnPrem.listener -> OnPrem.copier: "Trigger"
-AWS.s3 -> OnPrem.copier: "Copy" {style.stroke-dash: 5}
-OnPrem.copier -> OnPrem.ozone: "Write"
+```sql
+'warehouse' = 'hdfs://namenode:8020/iceberg/warehouse'
 ```
 
-## Configuration
+### Ozone
 
-### Cloudera Replication Manager Policy
+Cloud-native object store for Cloudera, S3-compatible:
 
-```yaml
-# replication-policy.yaml
-apiVersion: replication.cloudera.com/v1
-kind: IcebergReplicationPolicy
-metadata:
-  name: cloudtrail-aws-to-onprem
-spec:
-  source:
-    type: aws-s3
-    bucket: cybersec-cloudtrail-iceberg-123456789012
-    region: us-east-1
-    credentials:
-      secretRef: aws-replication-creds
-    catalog:
-      type: glue
-      database: cybersec
-
-  target:
-    type: ozone
-    bucket: cybersec
-    path: /iceberg/warehouse
-    catalog:
-      type: hive
-      database: cybersec
-
-  tables:
-    - name: cloudtrail_events
-      partitionFilter: "event_time >= current_date - interval 90 days"
-
-  schedule:
-    interval: 15m
-    retryPolicy:
-      maxRetries: 3
-      backoff: exponential
-
-  bandwidth:
-    limit: 1Gbps
-    throttleOnPeak: true
-    peakHours: "09:00-17:00"
-
-  verification:
-    enabled: true
-    checksum: true
-    rowCount: true
+```sql
+'warehouse' = 'ofs://ozone1/iceberg/warehouse'
+-- OR using S3 gateway:
+'warehouse' = 's3a://iceberg-bucket/warehouse'
 ```
+
+### Comparison
+
+| Feature | HDFS | Ozone |
+|---------|------|-------|
+| Protocol | hdfs:// | ofs://, s3a:// |
+| Scalability | Limited by NameNode | Petabyte scale |
+| S3 compatibility | No | Yes (S3 Gateway) |
+| Erasure coding | Yes | Yes |
+| Recommended for | Existing clusters | New deployments |
 
 ## Monitoring
 
@@ -208,9 +196,9 @@ spec:
 | Metric | Alert Threshold | Description |
 |--------|-----------------|-------------|
 | `replication_lag_seconds` | > 900 (15 min) | Time since last successful sync |
-| `replication_bytes_pending` | > 10GB | Data waiting to replicate |
-| `replication_errors_count` | > 0 | Failed file transfers |
-| `snapshot_diff_files` | > 1000 | Files in pending snapshot |
+| `flink_checkpoint_duration` | > 60s | Checkpoint taking too long |
+| `flink_records_lag` | > 10,000 | Records pending replication |
+| `iceberg_commits_failed` | > 0 | Failed commits to target |
 
 ### Lag Dashboard Query
 
@@ -228,7 +216,7 @@ onprem_counts AS (
   SELECT
     date_trunc('hour', event_time) as event_hour,
     count(*) as onprem_count
-  FROM hive.cybersec.cloudtrail_events
+  FROM onprem_catalog.cybersec.cloudtrail_events
   WHERE event_time >= current_timestamp - interval '24' hour
   GROUP BY 1
 )
@@ -262,4 +250,28 @@ SELECT
 FROM cybersec.cloudtrail_events ct
 LEFT JOIN cybersec.local_enrichments e
   ON ct.event_id = e.event_id;
+```
+
+## Fallback: Batch Replication
+
+For initial load or catch-up after extended outage:
+
+```python
+# batch_replication.py
+"""One-time batch copy for initial sync or catch-up."""
+
+from pyflink.table import EnvironmentSettings, TableEnvironment
+
+def batch_replicate(start_date: str, end_date: str):
+    env_settings = EnvironmentSettings.in_batch_mode()
+    t_env = TableEnvironment.create(env_settings)
+
+    # ... catalog setup ...
+
+    t_env.execute_sql(f"""
+        INSERT INTO onprem_catalog.cybersec.cloudtrail_events
+        SELECT * FROM aws_catalog.cybersec.cloudtrail_events
+        WHERE event_time >= TIMESTAMP '{start_date}'
+          AND event_time < TIMESTAMP '{end_date}'
+    """)
 ```
