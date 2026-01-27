@@ -56,8 +56,9 @@ This repository includes a complete local development environment using [devenv]
 ### Quickstart (devenv)
 
 ```bash
-git clone https://github.com/cloudera/cybersec.git
-cd cybersec
+git clone git@github.com:rch/cldr-cybersec.git
+cd cldr-cybersec
+git checkout rch/devenv
 direnv allow    # Initializes submodules, installs Python deps
 devenv up       # Starts all services
 ```
