@@ -24,7 +24,7 @@ The Cybersec Toolkit provides a unified pipeline for ingesting, processing, and 
 | Streaming | Flink (managed or self-hosted) | Cloudera Data Flow / Flink |
 | Table Format | Iceberg | Iceberg |
 | Storage | S3 + Glacier | HDFS / Ozone |
-| Catalog | AWS Glue (limited) | Cloudera SDX |
+| Catalog | Iceberg REST Catalog | Iceberg REST Catalog |
 | Optimizer | Cloudera Lakehouse Optimizer | Spark maintenance jobs* |
 | Query | Athena (verification) | Impala / Hive |
 

@@ -72,7 +72,7 @@ Operations.sort -> Tables.cloudtrail
 
 ## Why Disable AWS Native Optimizer
 
-AWS Glue provides automatic Iceberg optimization. We disable it because:
+AWS provides automatic Iceberg optimization. We disable it because:
 
 1. **Use CLO instead**: Cloudera Lakehouse Optimizer provides unified management
 2. **Conflicting compaction**: Two optimizers would try to merge same files
@@ -81,7 +81,7 @@ AWS Glue provides automatic Iceberg optimization. We disable it because:
 
 ### Solution
 
-- **AWS**: Disable Glue Iceberg optimization; use CLO for S3 tables
+- **AWS**: Disable AWS Iceberg optimization; use CLO for S3 tables
 - **On-prem**: Spark maintenance jobs (until CLO available for Private Cloud)
 - **S3 tables**: Remain queryable via Athena for verification
 

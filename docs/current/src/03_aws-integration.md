@@ -28,11 +28,11 @@ S3: {
   }
 }
 
-Glue: {
-  label: "AWS Glue"
+Catalog: {
+  label: "Iceberg REST Catalog"
 
-  catalog: "Data Catalog\n(metadata only)"
-  optimizer: "Iceberg Optimizer\n(DISABLED)"
+  rest_api: "REST API"
+  optimizer: "AWS Optimizer\n(DISABLED)"
 }
 
 Flink: {
@@ -51,11 +51,11 @@ Query: {
 CloudTrail -> S3.raw_bucket: "Deliver logs"
 S3.raw_bucket -> Flink.job: "Ingest"
 Flink.job -> S3.iceberg_bucket: "Write Iceberg"
-S3.iceberg_bucket -> Glue.catalog: "Register tables"
-Glue.catalog -> Query.athena: "Metadata"
+S3.iceberg_bucket -> Catalog.rest_api: "Register tables"
+Catalog.rest_api -> Query.athena: "Metadata"
 S3.iceberg_bucket -> Query.athena: "Scan data"
 
-Glue.optimizer -> S3.iceberg_bucket: "DISABLED" {
+Catalog.optimizer -> S3.iceberg_bucket: "DISABLED" {
   style.stroke: "#ff0000"
   style.stroke-dash: 5
 }
@@ -65,19 +65,19 @@ Glue.optimizer -> S3.iceberg_bucket: "DISABLED" {
 
 ### 1. Disable AWS Iceberg Optimizer
 
-AWS Glue provides automatic Iceberg optimization (compaction, snapshot expiration). We disable this to:
+AWS provides automatic Iceberg optimization (compaction, snapshot expiration). We disable this to:
 
 - Avoid conflicts with Cloudera Lakehouse Optimizer
 - Maintain consistent optimization strategy across hybrid environment
 - Preserve snapshots for replication verification
 
-### 2. Minimal Glue Catalog Usage
+### 2. Iceberg REST Catalog
 
-AWS Glue Catalog is used only for:
+We use Cloudera's Iceberg REST Catalog for:
 
 - Table metadata registration (schema, partitioning)
-- Athena query access
-- NOT for optimization or governance
+- Consistent catalog interface across AWS and on-prem
+- Athena query access via catalog integration
 
 ### 3. Flink for Ingestion
 

@@ -90,7 +90,7 @@ Both AWS and on-prem environments use Apache Iceberg:
 
 ### Optimizer Conflict Resolution
 
-AWS provides native Iceberg optimization through Glue, but this conflicts with Cloudera's Lakehouse Optimizer. Our approach:
+AWS provides native Iceberg optimization, but this conflicts with Cloudera's Lakehouse Optimizer. Our approach:
 
 1. **Disable AWS optimizer** via OpenTofu configuration
 2. **Use Cloudera Lakehouse Optimizer** exclusively for compaction and optimization

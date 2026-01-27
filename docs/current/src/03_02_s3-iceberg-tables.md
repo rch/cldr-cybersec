@@ -35,63 +35,51 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "cloudtrail_iceber
 }
 ```
 
-## Disabling AWS Iceberg Optimizer
+## Iceberg REST Catalog Configuration
 
-### Critical: Prevent Glue Optimizer Conflicts
+### Catalog Registration
 
-AWS provides automatic Iceberg table optimization through Glue. This **must be disabled** to prevent conflicts with Cloudera Lakehouse Optimizer.
+Tables are registered via Iceberg REST Catalog for consistent access across AWS and on-prem:
 
-```hcl
-# AWS Glue Data Catalog Database
-resource "aws_glue_catalog_database" "cybersec" {
-  name        = "cybersec"
-  description = "Cybersec CloudTrail Iceberg tables"
-}
+```python
+# Using PyIceberg to create tables via REST Catalog
+from pyiceberg.catalog import load_catalog
 
-# Register Iceberg table WITHOUT optimizer
-resource "aws_glue_catalog_table" "cloudtrail_events" {
-  database_name = aws_glue_catalog_database.cybersec.name
-  name          = "cloudtrail_events"
-
-  table_type = "EXTERNAL_TABLE"
-
-  parameters = {
-    "table_type"                     = "ICEBERG"
-    "metadata_location"              = "s3://${aws_s3_bucket.cloudtrail_iceberg.id}/iceberg/warehouse/cloudtrail_events/metadata/00000-*.metadata.json"
-
-    # CRITICAL: Disable AWS automatic optimization
-    "optimization_enabled"           = "false"
-    "compaction_enabled"             = "false"
-    "snapshot_retention_enabled"     = "false"
-    "orphan_file_deletion_enabled"   = "false"
-  }
-
-  # Iceberg manages schema internally, but Glue needs this for Athena
-  storage_descriptor {
-    location      = "s3://${aws_s3_bucket.cloudtrail_iceberg.id}/iceberg/warehouse/cloudtrail_events"
-    input_format  = "org.apache.iceberg.mr.hive.HiveIcebergInputFormat"
-    output_format = "org.apache.iceberg.mr.hive.HiveIcebergOutputFormat"
-
-    ser_de_info {
-      serialization_library = "org.apache.iceberg.mr.hive.HiveIcebergSerDe"
+catalog = load_catalog(
+    "cybersec",
+    **{
+        "type": "rest",
+        "uri": "https://iceberg-rest.aws.example.com",
+        "warehouse": "s3://cybersec-cloudtrail-iceberg/warehouse",
+        "s3.access-key-id": "${AWS_ACCESS_KEY_ID}",
+        "s3.secret-access-key": "${AWS_SECRET_ACCESS_KEY}",
     }
-  }
-}
+)
+
+# Create namespace
+catalog.create_namespace("cybersec")
 ```
 
-### Verify Optimizer is Disabled
+## Disabling AWS Iceberg Optimizer
 
-After deployment, verify no automatic jobs are running:
+### Critical: Prevent Optimizer Conflicts
 
-```bash
-# Check for Glue optimization jobs
-aws glue get-table-optimizer \
-  --catalog-id ${ACCOUNT_ID} \
-  --database-name cybersec \
-  --table-name cloudtrail_events \
-  --type compaction
+AWS provides automatic Iceberg table optimization. This **must be disabled** to prevent conflicts with Cloudera Lakehouse Optimizer.
 
-# Expected: ResourceNotFoundException (no optimizer configured)
+Configure the REST Catalog to disable automatic optimization:
+
+```yaml
+# Iceberg REST Catalog configuration
+catalog:
+  name: cybersec
+  warehouse: s3://cybersec-cloudtrail-iceberg/warehouse
+
+  # Disable automatic optimization
+  table-defaults:
+    optimization.enabled: false
+    compaction.enabled: false
+    snapshot-retention.enabled: false
+    orphan-file-deletion.enabled: false
 ```
 
 ## Table Schema

@@ -12,14 +12,14 @@ direction: right
 AWS: {
   label: "AWS Source"
 
-  glue: "Glue Catalog"
+  rest_catalog: "Iceberg REST Catalog"
 
   s3_iceberg: {
     label: "S3 Iceberg Tables\n(cloudtrail_events)"
     shape: cylinder
   }
 
-  glue -> s3_iceberg
+  rest_catalog -> s3_iceberg
 }
 
 Flink: {
@@ -35,19 +35,19 @@ Flink: {
 OnPrem: {
   label: "On-Prem Target"
 
-  hive_metastore: "Hive Metastore"
+  rest_catalog: "Iceberg REST Catalog"
 
   storage: {
     label: "HDFS or Ozone"
     shape: cylinder
   }
 
-  hive_metastore -> storage
+  rest_catalog -> storage
 }
 
 AWS.s3_iceberg -> Flink.source: "Stream read\n(incremental)"
 Flink.sink -> OnPrem.storage: "Write"
-Flink.sink -> OnPrem.hive_metastore: "Commit"
+Flink.sink -> OnPrem.rest_catalog: "Commit"
 ```
 
 ## Flink Replication Job
@@ -55,19 +55,20 @@ Flink.sink -> OnPrem.hive_metastore: "Commit"
 ### Catalog Configuration
 
 ```sql
--- AWS Source Catalog (Glue + S3)
+-- AWS Source Catalog (Iceberg REST + S3)
 CREATE CATALOG aws_catalog WITH (
   'type' = 'iceberg',
-  'catalog-type' = 'glue',
+  'catalog-impl' = 'org.apache.iceberg.rest.RESTCatalog',
+  'uri' = 'https://iceberg-rest.aws.example.com',
   'warehouse' = 's3://cybersec-cloudtrail-iceberg/warehouse',
   'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO'
 );
 
--- On-Prem Target Catalog (Hive Metastore + HDFS/Ozone)
+-- On-Prem Target Catalog (Iceberg REST + HDFS/Ozone)
 CREATE CATALOG onprem_catalog WITH (
   'type' = 'iceberg',
-  'catalog-type' = 'hive',
-  'uri' = 'thrift://hive-metastore.onprem:9083',
+  'catalog-impl' = 'org.apache.iceberg.rest.RESTCatalog',
+  'uri' = 'https://iceberg-rest.onprem.example.com',
   'warehouse' = 'ofs://ozone1/iceberg/warehouse'  -- Ozone
   -- OR: 'warehouse' = 'hdfs://namenode:8020/iceberg/warehouse'  -- HDFS
 );
@@ -121,22 +122,23 @@ def create_replication_job():
     t_env.get_config().set("execution.checkpointing.interval", "120s")
     t_env.get_config().set("execution.checkpointing.mode", "EXACTLY_ONCE")
 
-    # AWS Source Catalog
+    # AWS Source Catalog (Iceberg REST)
     t_env.execute_sql("""
         CREATE CATALOG aws_catalog WITH (
             'type' = 'iceberg',
-            'catalog-type' = 'glue',
+            'catalog-impl' = 'org.apache.iceberg.rest.RESTCatalog',
+            'uri' = 'https://iceberg-rest.aws.example.com',
             'warehouse' = 's3://cybersec-cloudtrail-iceberg/warehouse',
             'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO'
         )
     """)
 
-    # On-Prem Target Catalog (Ozone or HDFS)
+    # On-Prem Target Catalog (Iceberg REST + Ozone or HDFS)
     t_env.execute_sql("""
         CREATE CATALOG onprem_catalog WITH (
             'type' = 'iceberg',
-            'catalog-type' = 'hive',
-            'uri' = 'thrift://hive-metastore.onprem:9083',
+            'catalog-impl' = 'org.apache.iceberg.rest.RESTCatalog',
+            'uri' = 'https://iceberg-rest.onprem.example.com',
             'warehouse' = 'ofs://ozone1/iceberg/warehouse'
         )
     """)
