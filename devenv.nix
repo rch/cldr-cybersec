@@ -106,9 +106,23 @@
     };
   };
 
-  # Ensure node_modules exists before devenv's npm integration tries to write checksum
+  # Shell initialization - runs on 'direnv allow' / entering the devenv shell
   enterShell = ''
+    # Ensure node_modules exists before devenv's npm integration tries to write checksum
     mkdir -p local-ui/node_modules
+
+    # Auto-initialize git submodules if needed (makes 'git clone && direnv allow' work)
+    if [ -d ".git" ] && [ ! -f "thirdparty/flink/pom.xml" ]; then
+      echo "Initializing git submodules..."
+      git submodule update --init --recursive
+    fi
+
+    # Create Polaris bin wrapper scripts if needed
+    POLARIS_HOME="$PWD/thirdparty/polaris/polaris-bin-1.3.0-incubating"
+    if [ -d "$POLARIS_HOME" ] && [ ! -x "$POLARIS_HOME/bin/admin" ]; then
+      echo "Creating Polaris bin wrapper scripts..."
+      "$PWD/scripts/setup_polaris_bin.sh" "$POLARIS_HOME" 2>/dev/null || true
+    fi
   '';
   
   languages.typescript = {

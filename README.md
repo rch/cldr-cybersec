@@ -56,31 +56,21 @@ This repository includes a complete local development environment using [devenv]
 ### Quickstart (devenv)
 
 ```bash
-# Clone with submodules
-git clone --recurse-submodules https://github.com/cloudera/cybersec.git
+git clone https://github.com/cloudera/cybersec.git
 cd cybersec
-
-# Enter devenv shell (auto-installs Python dependencies)
-direnv allow
-
-# Start all services
-devenv up
+direnv allow    # Initializes submodules, installs Python deps
+devenv up       # Starts all services
 ```
 
-On first run, `devenv up` automatically:
-- Builds Flink from source (~10-15 minutes)
-- Downloads NiFi binary (~2 minutes)
-- Starts all services (PostgreSQL, Polaris, MinIO, Flink, NiFi, etc.)
-- Initializes Polaris catalog
+On first run:
+- Git submodules are initialized automatically
+- Python dependencies are installed via `uv sync`
+- Flink is built from source (~10-15 minutes)
+- NiFi binary is downloaded (~2 minutes)
+- All services start (PostgreSQL, Polaris, MinIO, Flink, NiFi, etc.)
+- Polaris catalog is initialized
 
-**Already have the repo cloned?**
-```bash
-git submodule update --init --recursive
-direnv allow
-devenv up
-```
-
-**Clean restart** (wipes PostgreSQL data, re-initializes everything):
+**Clean restart** (wipes data, re-initializes everything):
 ```bash
 devenv tasks run restart:clean
 ```
