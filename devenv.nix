@@ -674,7 +674,15 @@ except Exception as e:
     # Bootstrap Polaris realm and principal before server starts
     polaris-bootstrap = {
       exec = ''
-        cd thirdparty/polaris/polaris-bin-1.3.0-incubating
+        POLARIS_HOME="$PWD/thirdparty/polaris/polaris-bin-1.3.0-incubating"
+
+        # Ensure Polaris bin wrapper scripts exist (creates bin/admin and bin/server)
+        if [ ! -x "$POLARIS_HOME/bin/admin" ] || [ ! -x "$POLARIS_HOME/bin/server" ]; then
+          echo "🔧 Creating Polaris bin wrapper scripts..."
+          "$PWD/scripts/setup_polaris_bin.sh" "$POLARIS_HOME"
+        fi
+
+        cd "$POLARIS_HOME"
 
         # Wait for PostgreSQL to be ready AND polaris_schema to exist
         # The schema is created by devenv's initialScript, which may run after postgres is "healthy"
