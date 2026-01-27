@@ -317,42 +317,72 @@ wait_for_datagen() {
 # Verify events are being written to Iceberg Browser
 verify_events() {
     local min_events="${1:-1}"
-    local max_wait="${2:-60}"
-    
-    log_info "Verifying events in Iceberg Browser (minimum: $min_events, timeout: ${max_wait}s)..."
-    
-    local elapsed=0
-    while [ $elapsed -lt $max_wait ]; do
-        local response=$(curl -s "http://localhost:5050/api/events?limit=1" 2>/dev/null)
-        
-        if [ -z "$response" ]; then
-            if [ $elapsed -eq 0 ]; then
-                log_info "Waiting for Iceberg Browser to be ready..."
-            fi
-            sleep 5
-            elapsed=$((elapsed + 5))
-            continue
+    local max_wait="${2:-300}"  # 5 minute failsafe timeout
+
+    log_info "Verifying events in Iceberg Browser..."
+
+    # Step 1: Wait for Iceberg Browser API to be ready
+    log_info "Step 1/3: Waiting for Iceberg Browser API..."
+    local browser_ready=false
+    for i in {1..60}; do
+        if curl -s -f "http://localhost:5050/api/tables" >/dev/null 2>&1; then
+            log_success "Iceberg Browser API is ready"
+            browser_ready=true
+            break
         fi
-        
-        # Check if we have a valid response with events
-        if echo "$response" | grep -q '"events":\s*\['; then
-            # Try to extract total count
-            local total=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total', 0))" 2>/dev/null || echo "0")
-            
-            if [ "$total" -ge "$min_events" ]; then
-                log_success "Events verified: $total events in Iceberg Browser"
-                return 0
-            elif [ $elapsed -eq 0 ]; then
-                log_info "Waiting for events to be written (current: $total, target: $min_events)..."
-            fi
+        if [ $((i % 10)) -eq 0 ]; then
+            log_info "  Waiting for Iceberg Browser... ${i}s"
         fi
-        
-        sleep 5
-        elapsed=$((elapsed + 5))
+        sleep 1
     done
-    
-    log_error "Event verification failed: did not reach $min_events events within ${max_wait}s"
-    return 1
+    if [ "$browser_ready" != "true" ]; then
+        log_error "Iceberg Browser API not ready after 60s"
+        return 1
+    fi
+
+    # Step 2: Wait for cloudtrail_events table to exist
+    log_info "Step 2/3: Waiting for cloudtrail_events table..."
+    local table_ready=false
+    for i in {1..120}; do
+        local tables=$(curl -s "http://localhost:5050/api/tables" 2>/dev/null)
+        if echo "$tables" | grep -q "cloudtrail_events"; then
+            log_success "Table cloudtrail_events exists"
+            table_ready=true
+            break
+        fi
+        if [ $((i % 15)) -eq 0 ]; then
+            log_info "  Waiting for table creation... ${i}s"
+        fi
+        sleep 1
+    done
+    if [ "$table_ready" != "true" ]; then
+        log_error "Table cloudtrail_events not found after 120s"
+        return 1
+    fi
+
+    # Step 3: Wait for at least min_events to appear
+    log_info "Step 3/3: Waiting for events (minimum: $min_events)..."
+    local events_ready=false
+    for i in {1..120}; do
+        local response=$(curl -s "http://localhost:5050/api/events?limit=1" 2>/dev/null)
+        local total=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total', 0))" 2>/dev/null || echo "0")
+
+        if [ "$total" -ge "$min_events" ]; then
+            log_success "Events verified: $total events in Iceberg Browser"
+            events_ready=true
+            break
+        fi
+        if [ $((i % 15)) -eq 0 ]; then
+            log_info "  Waiting for events... ${i}s (current: $total)"
+        fi
+        sleep 1
+    done
+    if [ "$events_ready" != "true" ]; then
+        log_error "Event verification failed: did not reach $min_events events after 120s"
+        return 1
+    fi
+
+    return 0
 }
 
 # Complete end-to-end verification including datagen and events
