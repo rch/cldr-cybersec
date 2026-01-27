@@ -1,0 +1,97 @@
+# AWS Integration
+
+## Overview
+
+```d2
+direction: right
+
+CloudTrail: {
+  label: "AWS CloudTrail"
+  shape: hexagon
+
+  org_trail: "Organization Trail"
+  mgmt_events: "Management Events"
+  data_events: "Data Events"
+  insights: "Insights Events"
+}
+
+S3: {
+  label: "S3 Storage"
+
+  raw_bucket: {
+    label: "Raw Logs Bucket"
+    shape: cylinder
+  }
+  iceberg_bucket: {
+    label: "Iceberg Tables Bucket"
+    shape: cylinder
+  }
+}
+
+Glue: {
+  label: "AWS Glue"
+
+  catalog: "Data Catalog\n(metadata only)"
+  optimizer: "Iceberg Optimizer\n(DISABLED)"
+}
+
+Flink: {
+  label: "Apache Flink"
+
+  cluster: "Flink Cluster\n(EKS or EMR)"
+  job: "CloudTrail\nProcessor Job"
+}
+
+Query: {
+  label: "Query Layer"
+
+  athena: "Athena\n(verification)"
+}
+
+CloudTrail -> S3.raw_bucket: "Deliver logs"
+S3.raw_bucket -> Flink.job: "Ingest"
+Flink.job -> S3.iceberg_bucket: "Write Iceberg"
+S3.iceberg_bucket -> Glue.catalog: "Register tables"
+Glue.catalog -> Query.athena: "Metadata"
+S3.iceberg_bucket -> Query.athena: "Scan data"
+
+Glue.optimizer -> S3.iceberg_bucket: "DISABLED" {
+  style.stroke: "#ff0000"
+  style.stroke-dash: 5
+}
+```
+
+## Key Design Decisions
+
+### 1. Disable AWS Iceberg Optimizer
+
+AWS Glue provides automatic Iceberg optimization (compaction, snapshot expiration). We disable this to:
+
+- Avoid conflicts with Cloudera Lakehouse Optimizer
+- Maintain consistent optimization strategy across hybrid environment
+- Preserve snapshots for replication verification
+
+### 2. Minimal Glue Catalog Usage
+
+AWS Glue Catalog is used only for:
+
+- Table metadata registration (schema, partitioning)
+- Athena query access
+- NOT for optimization or governance
+
+### 3. Flink for Ingestion
+
+We use Flink rather than Glue ETL because:
+
+- Lower latency (seconds vs minutes)
+- Better exactly-once semantics
+- Consistent with on-prem Cloudera Data Flow
+- More control over checkpointing and state
+
+## OpenTofu Configuration
+
+See subsections for detailed infrastructure-as-code:
+
+- [CloudTrail Ingestion](./03_01_cloudtrail-ingestion.md)
+- [S3 Iceberg Tables](./03_02_s3-iceberg-tables.md)
+- [Glacier Archival](./03_03_glacier-archival.md)
