@@ -556,21 +556,75 @@ except Exception as e:
 
         # Install Iceberg connectors if needed
         ICEBERG_JAR=$(ls "$FLINK_DIST/lib/iceberg-flink-runtime-1.20-"*.jar 2>/dev/null | head -1)
-        if [ -z "$ICEBERG_JAR" ]; then
+        AWS_BUNDLE_JAR=$(ls "$FLINK_DIST/lib/iceberg-aws-bundle-"*.jar 2>/dev/null | head -1)
+        if [ -z "$ICEBERG_JAR" ] || [ -z "$AWS_BUNDLE_JAR" ]; then
           echo "🔧 Installing Iceberg connectors..."
-          # Run the Python bootstrap for connectors only
-          uv run python -c "
-import asyncio
-from cybersec.bootstrap.service import BootstrapService
-async def run():
-    svc = BootstrapService()
-    async for event in svc._run_flink_connectors_setup():
-        if event.message:
-            print(f'  {event.message}')
-asyncio.run(run())
-" 2>&1 || echo "⚠️  Connector installation had issues - check manually"
+
+          # Ensure Iceberg submodule is initialized
+          if [ ! -f "thirdparty/iceberg/gradlew" ]; then
+            echo "  Initializing Iceberg submodule..."
+            git submodule update --init thirdparty/iceberg
+          fi
+
+          # Build and install Iceberg JARs
+          if [ -f "thirdparty/iceberg/gradlew" ]; then
+            echo "  Building Iceberg Flink runtime and AWS bundle..."
+            cd thirdparty/iceberg
+            ./gradlew -PflinkVersions=1.20 \
+              :iceberg-flink:iceberg-flink-runtime-1.20:shadowJar \
+              :iceberg-aws-bundle:shadowJar \
+              -x test -x integrationTest -x generateGitProperties \
+              --no-daemon 2>&1 | grep -E "(BUILD|Task|WARN|ERROR)" || true
+
+            # Copy Flink runtime JAR
+            for jar in flink/v1.20/flink-runtime/build/libs/iceberg-flink-runtime-1.20-*.jar; do
+              if [ -f "$jar" ] && [[ "$jar" != *"-sources.jar" ]] && [[ "$jar" != *"-javadoc.jar" ]]; then
+                cp "$jar" "$FLINK_DIST/lib/"
+                echo "  ✅ Installed: $(basename $jar)"
+                break
+              fi
+            done
+
+            # Copy AWS bundle JAR
+            for jar in aws-bundle/build/libs/iceberg-aws-bundle-*.jar; do
+              if [ -f "$jar" ] && [[ "$jar" != *"-sources.jar" ]] && [[ "$jar" != *"-javadoc.jar" ]]; then
+                cp "$jar" "$FLINK_DIST/lib/"
+                echo "  ✅ Installed: $(basename $jar)"
+                break
+              fi
+            done
+
+            cd ../..
+          else
+            echo "⚠️  Iceberg submodule not available - run: git submodule update --init thirdparty/iceberg"
+          fi
+
+          # Verify installation
+          ICEBERG_JAR=$(ls "$FLINK_DIST/lib/iceberg-flink-runtime-1.20-"*.jar 2>/dev/null | head -1)
+          AWS_BUNDLE_JAR=$(ls "$FLINK_DIST/lib/iceberg-aws-bundle-"*.jar 2>/dev/null | head -1)
+          if [ -z "$ICEBERG_JAR" ] || [ -z "$AWS_BUNDLE_JAR" ]; then
+            echo "❌ Iceberg JAR installation failed"
+            echo "   Missing: iceberg-flink-runtime and/or iceberg-aws-bundle"
+            echo "   Run: /health fix --apply"
+            exit 1
+          fi
         else
           echo "✅ Iceberg connectors already installed"
+        fi
+
+        # Copy additional required JARs from Flink opt/ directory
+        if [ ! -f "$FLINK_DIST/lib/flink-s3-fs-hadoop-1.20.1.jar" ]; then
+          if [ -f "$FLINK_DIST/opt/flink-s3-fs-hadoop-1.20.1.jar" ]; then
+            cp "$FLINK_DIST/opt/flink-s3-fs-hadoop-1.20.1.jar" "$FLINK_DIST/lib/"
+            echo "✅ Copied flink-s3-fs-hadoop to lib (S3 filesystem support)"
+          fi
+        fi
+
+        if [ ! -f "$FLINK_DIST/lib/flink-python-1.20.1.jar" ]; then
+          if [ -f "$FLINK_DIST/opt/flink-python-1.20.1.jar" ]; then
+            cp "$FLINK_DIST/opt/flink-python-1.20.1.jar" "$FLINK_DIST/lib/"
+            echo "✅ Copied flink-python to lib (PyFlink support)"
+          fi
         fi
 
         echo "✅ Flink bootstrap complete"
