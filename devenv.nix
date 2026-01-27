@@ -524,6 +524,65 @@ except Exception as e:
       };
     };
 
+    # Build Flink and install connectors if needed (one-shot process)
+    flink-bootstrap = {
+      exec = ''
+        FLINK_VERSION="1.20.1"
+        FLINK_DIST="$PWD/thirdparty/flink/flink-dist/target/flink-''${FLINK_VERSION}-bin/flink-''${FLINK_VERSION}"
+
+        # Check if Flink is already built
+        if [ -x "$FLINK_DIST/bin/flink" ]; then
+          echo "✅ Flink $FLINK_VERSION already built"
+        else
+          echo "🔧 Building Flink $FLINK_VERSION from source (this takes 10-15 minutes)..."
+
+          # Ensure submodules are initialized
+          if [ ! -f "thirdparty/flink/pom.xml" ]; then
+            echo "Initializing git submodules..."
+            git submodule update --init --recursive
+          fi
+
+          cd thirdparty/flink
+          mvn clean install -DskipTests -Dfast -T 1C
+          cd ../..
+
+          if [ -x "$FLINK_DIST/bin/flink" ]; then
+            echo "✅ Flink built successfully"
+          else
+            echo "❌ Flink build failed"
+            exit 1
+          fi
+        fi
+
+        # Install Iceberg connectors if needed
+        ICEBERG_JAR=$(ls "$FLINK_DIST/lib/iceberg-flink-runtime-1.20-"*.jar 2>/dev/null | head -1)
+        if [ -z "$ICEBERG_JAR" ]; then
+          echo "🔧 Installing Iceberg connectors..."
+          # Run the Python bootstrap for connectors only
+          uv run python -c "
+import asyncio
+from cybersec.bootstrap.service import BootstrapService
+async def run():
+    svc = BootstrapService()
+    async for event in svc._run_flink_connectors_setup():
+        if event.message:
+            print(f'  {event.message}')
+asyncio.run(run())
+" 2>&1 || echo "⚠️  Connector installation had issues - check manually"
+        else
+          echo "✅ Iceberg connectors already installed"
+        fi
+
+        echo "✅ Flink bootstrap complete"
+        exit 0
+      '';
+      process-compose = {
+        availability = {
+          restart = "no";
+        };
+      };
+    };
+
     flink-jobmanager = {
       exec = ''
         # Use custom-built Apache Flink 1.20.1 (for Iceberg compatibility)
@@ -531,10 +590,17 @@ except Exception as e:
         export FLINK_STATE_DIR="$DEVENV_STATE/flink"
         export HADOOP_CONF_DIR="$FLINK_HOME/conf"
         mkdir -p "$FLINK_STATE_DIR"/{logs,checkpoints,savepoints}
-        
+
+        # Verify Flink exists
+        if [ ! -x "$FLINK_HOME/bin/jobmanager.sh" ]; then
+          echo "❌ Flink not found at $FLINK_HOME"
+          echo "   Run: devenv tasks run restart:clean"
+          exit 1
+        fi
+
         # Add comprehensive Java module opens for checkpoint serialization
         export FLINK_ENV_JAVA_OPTS="--add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED --add-opens java.base/java.lang.reflect=ALL-UNNAMED --add-opens java.base/java.text=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/java.net=ALL-UNNAMED --add-opens java.base/java.util.concurrent=ALL-UNNAMED --add-opens java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/sun.security.action=ALL-UNNAMED"
-        
+
         # Run JobManager in foreground mode
         # classloader.parent-first-patterns: Fix Dropwizard metrics classloader conflict with Iceberg
         exec "$FLINK_HOME/bin/jobmanager.sh" start-foreground \
@@ -546,6 +612,11 @@ except Exception as e:
           -D 'classloader.parent-first-patterns.additional=com.codahale.metrics;org.apache.flink.dropwizard'
       '';
       process-compose = {
+        depends_on = {
+          flink-bootstrap = {
+            condition = "process_completed_successfully";
+          };
+        };
         readiness_probe = {
           http_get = {
             host = "localhost";
@@ -684,6 +755,9 @@ except Exception as e:
         depends_on = {
           flink-taskmanager = {
             condition = "process_healthy";
+          };
+          polaris-init = {
+            condition = "process_completed_successfully";
           };
         };
       };
