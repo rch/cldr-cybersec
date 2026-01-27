@@ -81,12 +81,12 @@ We use Cloudera's Iceberg REST Catalog for:
 
 ### 3. Flink for Ingestion
 
-We use Flink rather than Glue ETL because:
+Flink provides:
 
-- Lower latency (seconds vs minutes)
-- Better exactly-once semantics
-- Consistent with on-prem Cloudera Data Flow
-- More control over checkpointing and state
+- Low latency (seconds)
+- Exactly-once semantics
+- Consistent with on-prem Cloudera Data Flow (CDF)
+- Fine-grained checkpointing and state management
 
 ## OpenTofu Configuration
 
