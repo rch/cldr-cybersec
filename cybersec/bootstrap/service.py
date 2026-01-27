@@ -772,80 +772,14 @@ class BootstrapService:
                     message=f"Provided Flink path does not exist: {flink_home}",
                 )
 
-        # Need user input to decide what to do
-        self.state.set_waiting_input(task_id, "Flink installation required")
-
-        options = [
-            PromptOption("1", "Build from source", f"Build Flink {self.config.flink_version} (10-15 minutes)", default=True),
-            PromptOption("2", "Use existing", "Provide path to existing Flink installation"),
-            PromptOption("3", "Skip", "Skip Flink setup (services will fail)"),
-        ]
-
+        # Flink is required - auto-build if missing
         yield BootstrapEvent(
-            event_type=EventType.PROMPT_REQUIRED,
+            event_type=EventType.LOG_INFO,
             task_id=task_id,
-            message="No Flink installation found. Choose an option:",
-            prompt_options=options,
-            prompt_allow_custom=True,
+            message="Flink not found - building from source (Flink is required)",
         )
-
-        # Get user response through prompt handler
-        if self._prompt_handler:
-            prompt_event = BootstrapEvent(
-                event_type=EventType.PROMPT_REQUIRED,
-                task_id=task_id,
-                message="No Flink installation found. Choose an option:",
-                prompt_options=options,
-                prompt_allow_custom=True,
-            )
-            response = await self._prompt_handler(prompt_event)
-
-            if response == "1" or response.lower() == "build":
-                # Build from source
-                async for event in self._build_flink():
-                    yield event
-            elif response == "2" or response.lower() == "existing":
-                # This requires another prompt for the path
-                # For now, just skip - the CLI/Web will handle this
-                self.state.complete_task(task_id, success=False, message="Path input required")
-                yield BootstrapEvent(
-                    event_type=EventType.TASK_FAILED,
-                    task_id=task_id,
-                    message="Flink path required but not provided",
-                )
-            elif response == "3" or response.lower() == "skip":
-                self.state.skip_task(task_id, "Flink setup skipped by user")
-                yield BootstrapEvent(
-                    event_type=EventType.TASK_SKIPPED,
-                    task_id=task_id,
-                    message="Flink setup skipped",
-                )
-            elif Path(response).expanduser().exists():
-                # User provided a path directly
-                self.config.flink_home = str(Path(response).expanduser())
-                self.settings_manager.save(self.config)
-                self.state.complete_task(task_id, success=True, message=f"Using Flink: {response}")
-                yield BootstrapEvent(
-                    event_type=EventType.TASK_COMPLETED,
-                    task_id=task_id,
-                    message=f"Using Flink: {response}",
-                    progress=1.0,
-                )
-            else:
-                self.state.complete_task(task_id, success=False, error=f"Invalid response: {response}")
-                yield BootstrapEvent(
-                    event_type=EventType.TASK_FAILED,
-                    task_id=task_id,
-                    message=f"Invalid response: {response}",
-                )
-        else:
-            # No prompt handler - skip Flink setup
-            self.state.skip_task(task_id, "No prompt handler - skipping Flink setup")
-            yield BootstrapEvent(
-                event_type=EventType.TASK_SKIPPED,
-                task_id=task_id,
-                message="Flink setup skipped (no prompt handler)",
-            )
+        async for event in self._build_flink():
+            yield event
 
     async def _build_flink(self) -> AsyncIterator[BootstrapEvent]:
         """Build Flink from source."""
@@ -1200,71 +1134,14 @@ class BootstrapService:
                     message=f"Provided NiFi path does not exist: {nifi_home}",
                 )
 
-        # Need user input to decide what to do
-        self.state.set_waiting_input(task_id, "NiFi installation required")
-
-        options = [
-            PromptOption("1", "Download binary", f"Download NiFi {self.config.nifi_version} binary (~500MB)", default=True),
-            PromptOption("2", "Use existing", "Provide path to existing NiFi installation"),
-            PromptOption("3", "Skip", "Skip NiFi setup (OTEL visualization unavailable)"),
-        ]
-
+        # NiFi is required - auto-download if missing
         yield BootstrapEvent(
-            event_type=EventType.PROMPT_REQUIRED,
+            event_type=EventType.LOG_INFO,
             task_id=task_id,
-            message="No NiFi installation found. Choose an option:",
-            prompt_options=options,
-            prompt_allow_custom=True,
+            message="NiFi not found - downloading automatically (NiFi is required)",
         )
-
-        # Get user response through prompt handler
-        if self._prompt_handler:
-            prompt_event = BootstrapEvent(
-                event_type=EventType.PROMPT_REQUIRED,
-                task_id=task_id,
-                message="No NiFi installation found. Choose an option:",
-                prompt_options=options,
-                prompt_allow_custom=True,
-            )
-            response = await self._prompt_handler(prompt_event)
-
-            if response == "1" or response.lower() == "download":
-                # Download NiFi binary
-                async for event in self._download_nifi():
-                    yield event
-            elif response == "3" or response.lower() == "skip":
-                self.state.skip_task(task_id, "NiFi setup skipped by user")
-                yield BootstrapEvent(
-                    event_type=EventType.TASK_SKIPPED,
-                    task_id=task_id,
-                    message="NiFi setup skipped",
-                )
-            elif Path(response).expanduser().exists():
-                # User provided a path directly
-                self.config.nifi_home = str(Path(response).expanduser())
-                self.settings_manager.save(self.config)
-                self.state.complete_task(task_id, success=True, message=f"Using NiFi: {response}")
-                yield BootstrapEvent(
-                    event_type=EventType.TASK_COMPLETED,
-                    task_id=task_id,
-                    message=f"Using NiFi: {response}",
-                    progress=1.0,
-                )
-            else:
-                self.state.complete_task(task_id, success=False, error=f"Invalid response: {response}")
-                yield BootstrapEvent(
-                    event_type=EventType.TASK_FAILED,
-                    task_id=task_id,
-                    message=f"Invalid response: {response}",
-                )
-        else:
-            # No prompt handler - skip NiFi setup
-            self.state.skip_task(task_id, "No prompt handler - skipping NiFi setup")
-            yield BootstrapEvent(
-                event_type=EventType.TASK_SKIPPED,
-                task_id=task_id,
-                message="NiFi setup skipped (no prompt handler)",
-            )
+        async for event in self._download_nifi():
+            yield event
 
     async def _download_nifi(self) -> AsyncIterator[BootstrapEvent]:
         """Download NiFi binary distribution."""

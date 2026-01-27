@@ -87,7 +87,7 @@
     enable = true;
     package = pkgs.python312;
     uv.enable = true;
-    #uv.sync.enable = true;
+    uv.sync.enable = true;
     venv.enable = true;
   };
 
@@ -106,9 +106,23 @@
     };
   };
 
-  # Ensure node_modules exists before devenv's npm integration tries to write checksum
+  # Shell initialization - runs on 'direnv allow' / entering the devenv shell
   enterShell = ''
+    # Ensure node_modules exists before devenv's npm integration tries to write checksum
     mkdir -p local-ui/node_modules
+
+    # Auto-initialize git submodules if needed (makes 'git clone && direnv allow' work)
+    if [ -d ".git" ] && [ ! -f "thirdparty/flink/pom.xml" ]; then
+      echo "Initializing git submodules..."
+      git submodule update --init --recursive
+    fi
+
+    # Create Polaris bin wrapper scripts if needed
+    POLARIS_HOME="$PWD/thirdparty/polaris/polaris-bin-1.3.0-incubating"
+    if [ -d "$POLARIS_HOME" ] && [ ! -x "$POLARIS_HOME/bin/admin" ]; then
+      echo "Creating Polaris bin wrapper scripts..."
+      "$PWD/scripts/setup_polaris_bin.sh" "$POLARIS_HOME" 2>/dev/null || true
+    fi
   '';
   
   languages.typescript = {
@@ -510,6 +524,119 @@ except Exception as e:
       };
     };
 
+    # Build Flink and install connectors if needed (one-shot process)
+    flink-bootstrap = {
+      exec = ''
+        FLINK_VERSION="1.20.1"
+        FLINK_DIST="$PWD/thirdparty/flink/flink-dist/target/flink-''${FLINK_VERSION}-bin/flink-''${FLINK_VERSION}"
+
+        # Check if Flink is already built
+        if [ -x "$FLINK_DIST/bin/flink" ]; then
+          echo "✅ Flink $FLINK_VERSION already built"
+        else
+          echo "🔧 Building Flink $FLINK_VERSION from source (this takes 10-15 minutes)..."
+
+          # Ensure submodules are initialized
+          if [ ! -f "thirdparty/flink/pom.xml" ]; then
+            echo "Initializing git submodules..."
+            git submodule update --init --recursive
+          fi
+
+          cd thirdparty/flink
+          mvn clean install -DskipTests -Dfast -T 1C
+          cd ../..
+
+          if [ -x "$FLINK_DIST/bin/flink" ]; then
+            echo "✅ Flink built successfully"
+          else
+            echo "❌ Flink build failed"
+            exit 1
+          fi
+        fi
+
+        # Install Iceberg connectors if needed
+        ICEBERG_JAR=$(ls "$FLINK_DIST/lib/iceberg-flink-runtime-1.20-"*.jar 2>/dev/null | head -1)
+        AWS_BUNDLE_JAR=$(ls "$FLINK_DIST/lib/iceberg-aws-bundle-"*.jar 2>/dev/null | head -1)
+        if [ -z "$ICEBERG_JAR" ] || [ -z "$AWS_BUNDLE_JAR" ]; then
+          echo "🔧 Installing Iceberg connectors..."
+
+          # Ensure Iceberg submodule is initialized
+          if [ ! -f "thirdparty/iceberg/gradlew" ]; then
+            echo "  Initializing Iceberg submodule..."
+            git submodule update --init thirdparty/iceberg
+          fi
+
+          # Build and install Iceberg JARs
+          if [ -f "thirdparty/iceberg/gradlew" ]; then
+            echo "  Building Iceberg Flink runtime and AWS bundle..."
+            cd thirdparty/iceberg
+            ./gradlew -PflinkVersions=1.20 \
+              :iceberg-flink:iceberg-flink-runtime-1.20:shadowJar \
+              :iceberg-aws-bundle:shadowJar \
+              -x test -x integrationTest -x generateGitProperties \
+              --no-daemon 2>&1 | grep -E "(BUILD|Task|WARN|ERROR)" || true
+
+            # Copy Flink runtime JAR
+            for jar in flink/v1.20/flink-runtime/build/libs/iceberg-flink-runtime-1.20-*.jar; do
+              if [ -f "$jar" ] && [[ "$jar" != *"-sources.jar" ]] && [[ "$jar" != *"-javadoc.jar" ]]; then
+                cp "$jar" "$FLINK_DIST/lib/"
+                echo "  ✅ Installed: $(basename $jar)"
+                break
+              fi
+            done
+
+            # Copy AWS bundle JAR
+            for jar in aws-bundle/build/libs/iceberg-aws-bundle-*.jar; do
+              if [ -f "$jar" ] && [[ "$jar" != *"-sources.jar" ]] && [[ "$jar" != *"-javadoc.jar" ]]; then
+                cp "$jar" "$FLINK_DIST/lib/"
+                echo "  ✅ Installed: $(basename $jar)"
+                break
+              fi
+            done
+
+            cd ../..
+          else
+            echo "⚠️  Iceberg submodule not available - run: git submodule update --init thirdparty/iceberg"
+          fi
+
+          # Verify installation
+          ICEBERG_JAR=$(ls "$FLINK_DIST/lib/iceberg-flink-runtime-1.20-"*.jar 2>/dev/null | head -1)
+          AWS_BUNDLE_JAR=$(ls "$FLINK_DIST/lib/iceberg-aws-bundle-"*.jar 2>/dev/null | head -1)
+          if [ -z "$ICEBERG_JAR" ] || [ -z "$AWS_BUNDLE_JAR" ]; then
+            echo "❌ Iceberg JAR installation failed"
+            echo "   Missing: iceberg-flink-runtime and/or iceberg-aws-bundle"
+            echo "   Run: /health fix --apply"
+            exit 1
+          fi
+        else
+          echo "✅ Iceberg connectors already installed"
+        fi
+
+        # Copy additional required JARs from Flink opt/ directory
+        if [ ! -f "$FLINK_DIST/lib/flink-s3-fs-hadoop-1.20.1.jar" ]; then
+          if [ -f "$FLINK_DIST/opt/flink-s3-fs-hadoop-1.20.1.jar" ]; then
+            cp "$FLINK_DIST/opt/flink-s3-fs-hadoop-1.20.1.jar" "$FLINK_DIST/lib/"
+            echo "✅ Copied flink-s3-fs-hadoop to lib (S3 filesystem support)"
+          fi
+        fi
+
+        if [ ! -f "$FLINK_DIST/lib/flink-python-1.20.1.jar" ]; then
+          if [ -f "$FLINK_DIST/opt/flink-python-1.20.1.jar" ]; then
+            cp "$FLINK_DIST/opt/flink-python-1.20.1.jar" "$FLINK_DIST/lib/"
+            echo "✅ Copied flink-python to lib (PyFlink support)"
+          fi
+        fi
+
+        echo "✅ Flink bootstrap complete"
+        exit 0
+      '';
+      process-compose = {
+        availability = {
+          restart = "no";
+        };
+      };
+    };
+
     flink-jobmanager = {
       exec = ''
         # Use custom-built Apache Flink 1.20.1 (for Iceberg compatibility)
@@ -517,19 +644,33 @@ except Exception as e:
         export FLINK_STATE_DIR="$DEVENV_STATE/flink"
         export HADOOP_CONF_DIR="$FLINK_HOME/conf"
         mkdir -p "$FLINK_STATE_DIR"/{logs,checkpoints,savepoints}
-        
+
+        # Verify Flink exists
+        if [ ! -x "$FLINK_HOME/bin/jobmanager.sh" ]; then
+          echo "❌ Flink not found at $FLINK_HOME"
+          echo "   Run: devenv tasks run restart:clean"
+          exit 1
+        fi
+
         # Add comprehensive Java module opens for checkpoint serialization
         export FLINK_ENV_JAVA_OPTS="--add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED --add-opens java.base/java.lang.reflect=ALL-UNNAMED --add-opens java.base/java.text=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/java.net=ALL-UNNAMED --add-opens java.base/java.util.concurrent=ALL-UNNAMED --add-opens java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/sun.security.action=ALL-UNNAMED"
-        
+
         # Run JobManager in foreground mode
+        # classloader.parent-first-patterns: Fix Dropwizard metrics classloader conflict with Iceberg
         exec "$FLINK_HOME/bin/jobmanager.sh" start-foreground \
           -D jobmanager.rpc.address=localhost \
           -D rest.bind-address=0.0.0.0 \
           -D rest.port=8081 \
           -D state.checkpoints.dir=file://$FLINK_STATE_DIR/checkpoints \
-          -D state.savepoints.dir=file://$FLINK_STATE_DIR/savepoints
+          -D state.savepoints.dir=file://$FLINK_STATE_DIR/savepoints \
+          -D 'classloader.parent-first-patterns.additional=com.codahale.metrics;org.apache.flink.dropwizard'
       '';
       process-compose = {
+        depends_on = {
+          flink-bootstrap = {
+            condition = "process_completed_successfully";
+          };
+        };
         readiness_probe = {
           http_get = {
             host = "localhost";
@@ -557,10 +698,12 @@ except Exception as e:
         export FLINK_ENV_JAVA_OPTS="--add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED --add-opens java.base/java.lang.reflect=ALL-UNNAMED --add-opens java.base/java.text=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/java.net=ALL-UNNAMED --add-opens java.base/java.util.concurrent=ALL-UNNAMED --add-opens java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/sun.security.action=ALL-UNNAMED"
         
         # Run TaskManager in foreground mode
+        # classloader.parent-first-patterns: Fix Dropwizard metrics classloader conflict with Iceberg
         exec "$FLINK_HOME/bin/taskmanager.sh" start-foreground \
           -D jobmanager.rpc.address=localhost \
           -D taskmanager.numberOfTaskSlots=4 \
-          -D taskmanager.tmp.dirs=$FLINK_STATE_DIR/tmp
+          -D taskmanager.tmp.dirs=$FLINK_STATE_DIR/tmp \
+          -D 'classloader.parent-first-patterns.additional=com.codahale.metrics;org.apache.flink.dropwizard'
       '';
       process-compose = {
         depends_on = {
@@ -667,6 +810,9 @@ except Exception as e:
           flink-taskmanager = {
             condition = "process_healthy";
           };
+          polaris-init = {
+            condition = "process_completed_successfully";
+          };
         };
       };
     };
@@ -674,21 +820,42 @@ except Exception as e:
     # Bootstrap Polaris realm and principal before server starts
     polaris-bootstrap = {
       exec = ''
-        cd thirdparty/polaris/polaris-bin-1.3.0-incubating
-        
-        # Wait for PostgreSQL
-        echo "⏳ Waiting for PostgreSQL to be ready..."
-        for i in {1..30}; do
-          if psql "postgresql://cybersec:cybersec@localhost:5438/iceberg" -c "SELECT 1" > /dev/null 2>&1; then
-            echo "✅ PostgreSQL is ready"
+        POLARIS_HOME="$PWD/thirdparty/polaris/polaris-bin-1.3.0-incubating"
+
+        # Ensure Polaris bin wrapper scripts exist (creates bin/admin and bin/server)
+        if [ ! -x "$POLARIS_HOME/bin/admin" ] || [ ! -x "$POLARIS_HOME/bin/server" ]; then
+          echo "🔧 Creating Polaris bin wrapper scripts..."
+          "$PWD/scripts/setup_polaris_bin.sh" "$POLARIS_HOME"
+        fi
+
+        cd "$POLARIS_HOME"
+
+        # Wait for PostgreSQL to be ready AND polaris_schema to exist
+        # The schema is created by devenv's initialScript, which may run after postgres is "healthy"
+        echo "⏳ Waiting for PostgreSQL and polaris_schema to be ready..."
+        SCHEMA_READY=false
+        for i in {1..300}; do
+          # Check both: can connect AND schema exists
+          SCHEMA_EXISTS=$(psql "postgresql://cybersec:cybersec@localhost:5438/iceberg" -t -c \
+            "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'polaris_schema';" 2>/dev/null | tr -d ' ')
+
+          if [ "$SCHEMA_EXISTS" = "1" ]; then
+            echo "✅ PostgreSQL is ready with polaris_schema"
+            SCHEMA_READY=true
             break
           fi
-          if [ $i -eq 30 ]; then
-            echo "❌ PostgreSQL failed to become ready"
-            exit 1
+
+          if [ $((i % 30)) -eq 0 ]; then
+            echo "   Waiting for polaris_schema... ''${i}s elapsed"
           fi
           sleep 1
         done
+
+        if [ "$SCHEMA_READY" != "true" ]; then
+          echo "❌ polaris_schema not found after 300 seconds"
+          echo "   Check that PostgreSQL initialScript ran successfully"
+          exit 1
+        fi
         
         # Configure database connection for bootstrap
         export QUARKUS_DATASOURCE_DB_KIND=postgresql

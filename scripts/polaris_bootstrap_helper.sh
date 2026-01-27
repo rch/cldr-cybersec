@@ -182,44 +182,39 @@ trigger_catalog_init() {
 
 # Verify all components are ready and bootstrapped
 verify_all() {
-    local all_ok=true
-    
     log_info "=== Complete Bootstrap Verification ==="
     echo
-    
-    if wait_for_postgres 15 2; then
-        echo
-    else
-        all_ok=false
+
+    # Critical infrastructure - bail immediately if not ready
+    if ! wait_for_postgres 30 2; then
+        log_error "PostgreSQL not ready - aborting"
+        return 1
     fi
-    
-    if wait_for_polaris 60 2; then
-        echo
-    else
-        all_ok=false
+    echo
+
+    # Polaris is critical - use 300 second timeout
+    if ! wait_for_polaris 150 2; then
+        log_error "Polaris not ready after 300 seconds - aborting"
+        return 1
     fi
-    
-    if verify_bootstrap; then
-        echo
-    else
-        all_ok=false
+    echo
+
+    if ! verify_bootstrap; then
+        log_error "Polaris bootstrap verification failed - aborting"
+        return 1
     fi
-    
+    echo
+
     if verify_catalog; then
         echo
     else
         log_warn "Catalog verification failed - may need initialization"
         # Don't fail on catalog missing - it might be intentional
     fi
-    
+
     echo
-    if [ "$all_ok" = true ]; then
-        log_success "=== All bootstrap verifications passed ==="
-        return 0
-    else
-        log_error "=== Some bootstrap verifications failed ==="
-        return 1
-    fi
+    log_success "=== All bootstrap verifications passed ==="
+    return 0
 }
 
 # Check if port is in use (portable - works on Linux and macOS)
@@ -322,96 +317,120 @@ wait_for_datagen() {
 # Verify events are being written to Iceberg Browser
 verify_events() {
     local min_events="${1:-1}"
-    local max_wait="${2:-60}"
-    
-    log_info "Verifying events in Iceberg Browser (minimum: $min_events, timeout: ${max_wait}s)..."
-    
-    local elapsed=0
-    while [ $elapsed -lt $max_wait ]; do
-        local response=$(curl -s "http://localhost:5050/api/events?limit=1" 2>/dev/null)
-        
-        if [ -z "$response" ]; then
-            if [ $elapsed -eq 0 ]; then
-                log_info "Waiting for Iceberg Browser to be ready..."
-            fi
-            sleep 5
-            elapsed=$((elapsed + 5))
-            continue
+    local max_wait="${2:-300}"  # 5 minute failsafe timeout
+
+    log_info "Verifying events in Iceberg Browser..."
+
+    # Step 1: Wait for Iceberg Browser API to be ready
+    log_info "Step 1/3: Waiting for Iceberg Browser API..."
+    local browser_ready=false
+    for i in {1..60}; do
+        if curl -s -f "http://localhost:5050/api/tables" >/dev/null 2>&1; then
+            log_success "Iceberg Browser API is ready"
+            browser_ready=true
+            break
         fi
-        
-        # Check if we have a valid response with events
-        if echo "$response" | grep -q '"events":\s*\['; then
-            # Try to extract total count
-            local total=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total', 0))" 2>/dev/null || echo "0")
-            
-            if [ "$total" -ge "$min_events" ]; then
-                log_success "Events verified: $total events in Iceberg Browser"
-                return 0
-            elif [ $elapsed -eq 0 ]; then
-                log_info "Waiting for events to be written (current: $total, target: $min_events)..."
-            fi
+        if [ $((i % 10)) -eq 0 ]; then
+            log_info "  Waiting for Iceberg Browser... ${i}s"
         fi
-        
-        sleep 5
-        elapsed=$((elapsed + 5))
+        sleep 1
     done
-    
-    log_error "Event verification failed: did not reach $min_events events within ${max_wait}s"
-    return 1
+    if [ "$browser_ready" != "true" ]; then
+        log_error "Iceberg Browser API not ready after 60s"
+        return 1
+    fi
+
+    # Step 2: Wait for cloudtrail_events table to exist
+    log_info "Step 2/3: Waiting for cloudtrail_events table..."
+    local table_ready=false
+    for i in {1..120}; do
+        local tables=$(curl -s "http://localhost:5050/api/tables" 2>/dev/null)
+        if echo "$tables" | grep -q "cloudtrail_events"; then
+            log_success "Table cloudtrail_events exists"
+            table_ready=true
+            break
+        fi
+        if [ $((i % 15)) -eq 0 ]; then
+            log_info "  Waiting for table creation... ${i}s"
+        fi
+        sleep 1
+    done
+    if [ "$table_ready" != "true" ]; then
+        log_error "Table cloudtrail_events not found after 120s"
+        return 1
+    fi
+
+    # Step 3: Wait for at least min_events to appear
+    log_info "Step 3/3: Waiting for events (minimum: $min_events)..."
+    local events_ready=false
+    for i in {1..120}; do
+        local response=$(curl -s "http://localhost:5050/api/events?limit=1" 2>/dev/null)
+        local total=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total', 0))" 2>/dev/null || echo "0")
+
+        if [ "$total" -ge "$min_events" ]; then
+            log_success "Events verified: $total events in Iceberg Browser"
+            events_ready=true
+            break
+        fi
+        if [ $((i % 15)) -eq 0 ]; then
+            log_info "  Waiting for events... ${i}s (current: $total)"
+        fi
+        sleep 1
+    done
+    if [ "$events_ready" != "true" ]; then
+        log_error "Event verification failed: did not reach $min_events events after 120s"
+        return 1
+    fi
+
+    return 0
 }
 
 # Complete end-to-end verification including datagen and events
 verify_e2e() {
-    local all_ok=true
-    
     log_info "=== Complete E2E Verification ==="
     echo
-    
-    # Basic infrastructure checks
-    if wait_for_postgres 15 2; then
-        echo
-    else
-        all_ok=false
+
+    # Critical infrastructure - bail immediately if not ready
+    if ! wait_for_postgres 30 2; then
+        log_error "PostgreSQL not ready - aborting bootstrap"
+        return 1
     fi
-    
-    if wait_for_polaris 60 2; then
-        echo
-    else
-        all_ok=false
+    echo
+
+    # Polaris is critical - use 300 second timeout (150 attempts × 2 seconds)
+    if ! wait_for_polaris 150 2; then
+        log_error "Polaris not ready after 300 seconds - aborting bootstrap"
+        return 1
     fi
-    
-    if verify_bootstrap; then
-        echo
-    else
-        all_ok=false
+    echo
+
+    if ! verify_bootstrap; then
+        log_error "Polaris bootstrap verification failed - aborting"
+        return 1
     fi
-    
-    if verify_catalog; then
-        echo
-    else
+    echo
+
+    # Catalog can be initialized if missing
+    if ! verify_catalog; then
         log_warn "Catalog not found - triggering initialization..."
-        if trigger_catalog_init 3 "./setup_polaris_catalog.sh"; then
-            echo
-        else
-            log_error "Catalog initialization failed"
-            all_ok=false
+        if ! trigger_catalog_init 3 "./setup_polaris_catalog.sh"; then
+            log_error "Catalog initialization failed - aborting"
+            return 1
         fi
     fi
-    
-    # Flink and DataGen checks
-    if wait_for_flink 30 2; then
-        echo
-    else
+    echo
+
+    # Flink and DataGen checks - these can be warnings, not fatal
+    local all_ok=true
+
+    if ! wait_for_flink 30 2; then
         log_warn "Flink not ready - skipping datagen checks"
         all_ok=false
-    fi
-    
-    if $all_ok; then
+    else
+        echo
         if wait_for_datagen 24 5; then
             echo
-            if verify_events 1 60; then
-                echo
-            else
+            if ! verify_events 1 60; then
                 log_warn "Event verification failed - data may not be flowing yet"
                 all_ok=false
             fi
@@ -420,7 +439,7 @@ verify_e2e() {
             all_ok=false
         fi
     fi
-    
+
     echo
     if $all_ok; then
         log_success "=== E2E verification completed successfully ==="
