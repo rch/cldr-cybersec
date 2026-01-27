@@ -675,17 +675,28 @@ except Exception as e:
     polaris-bootstrap = {
       exec = ''
         cd thirdparty/polaris/polaris-bin-1.3.0-incubating
-        
-        # Wait for PostgreSQL
-        echo "⏳ Waiting for PostgreSQL to be ready..."
-        for i in {1..30}; do
-          if psql "postgresql://cybersec:cybersec@localhost:5438/iceberg" -c "SELECT 1" > /dev/null 2>&1; then
-            echo "✅ PostgreSQL is ready"
+
+        # Wait for PostgreSQL to be ready AND polaris_schema to exist
+        # The schema is created by devenv's initialScript, which may run after postgres is "healthy"
+        echo "⏳ Waiting for PostgreSQL and polaris_schema to be ready..."
+        for i in {1..60}; do
+          # Check both: can connect AND schema exists
+          SCHEMA_EXISTS=$(psql "postgresql://cybersec:cybersec@localhost:5438/iceberg" -t -c \
+            "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'polaris_schema';" 2>/dev/null | tr -d ' ')
+
+          if [ "$SCHEMA_EXISTS" = "1" ]; then
+            echo "✅ PostgreSQL is ready with polaris_schema"
             break
           fi
-          if [ $i -eq 30 ]; then
-            echo "❌ PostgreSQL failed to become ready"
+
+          if [ $i -eq 60 ]; then
+            echo "❌ polaris_schema not found after 60 seconds"
+            echo "   Check that PostgreSQL initialScript ran successfully"
             exit 1
+          fi
+
+          if [ $((i % 10)) -eq 0 ]; then
+            echo "   Waiting for polaris_schema... attempt $i/60"
           fi
           sleep 1
         done
