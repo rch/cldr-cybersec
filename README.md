@@ -59,21 +59,15 @@ This repository includes a complete local development environment using [devenv]
 git clone git@github.com:rch/cldr-cybersec.git
 cd cldr-cybersec
 git checkout rch/devenv
-direnv allow    # Initializes submodules, installs Python deps
-devenv up       # Starts all services
+direnv allow                       # Install Python deps
+devenv tasks run restart:clean     # First-time setup (~15 min)
 ```
 
-On first run:
-- Git submodules are initialized automatically
-- Python dependencies are installed via `uv sync`
-- Flink is built from source (~10-15 minutes)
-- NiFi binary is downloaded (~2 minutes)
-- All services start (PostgreSQL, Polaris, MinIO, Flink, NiFi, etc.)
-- Polaris catalog is initialized
+First-time setup (`restart:clean`) initializes submodules, builds Flink from source, and starts all services. Subsequent runs only need `devenv up`.
 
-**Clean restart** (wipes data, re-initializes everything):
+**Daily usage** (after first-time setup):
 ```bash
-devenv tasks run restart:clean
+devenv up       # Start all services
 ```
 
 ### CLI Usage
