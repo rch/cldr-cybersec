@@ -108,9 +108,6 @@
 
   # Shell initialization - runs on 'direnv allow' / entering the devenv shell
   enterShell = ''
-    # Ensure node_modules exists before devenv's npm integration tries to write checksum
-    mkdir -p local-ui/node_modules
-
     # Auto-initialize git submodules if needed (makes 'git clone && direnv allow' work)
     if [ -d ".git" ] && [ ! -f "thirdparty/flink/pom.xml" ]; then
       echo "Initializing git submodules..."
