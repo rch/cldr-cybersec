@@ -82,7 +82,13 @@ async def apply_fixes(diagnostics: dict, dry_run: bool = True) -> list[dict[str,
     for issue in issues:
         failure_mode_id = issue.get("failure_mode_id", "")
 
-        if failure_mode_id == "PYFLINK_002":
+        if failure_mode_id == "FLINK_001":
+            # Flink JobManager not running - diagnose and attempt to start
+            result = await _fix_flink_not_running(flink_home, dry_run)
+            result["failure_mode_id"] = "FLINK_001"
+            results.append(result)
+
+        elif failure_mode_id == "PYFLINK_002":
             # Python path mismatch - fix flink-conf.yaml
             result = await _fix_python_path_mismatch(diagnostics, flink_home, dry_run)
             results.append(result)
@@ -611,6 +617,164 @@ async def _fix_datagen_bounded_source(dry_run: bool) -> dict[str, Any]:
     except Exception as e:
         result["success"] = False
         result["message"] = f"Error updating DataGen source: {e}"
+
+    return result
+
+
+async def _fix_flink_not_running(flink_home: Path | None, dry_run: bool) -> dict[str, Any]:
+    """Fix: Diagnose why Flink isn't running and attempt to start it.
+
+    Checks for common causes:
+    - Flink not built (missing bin/flink)
+    - Process already running but unhealthy
+    - Port conflicts
+    - Missing JARs
+    """
+    import subprocess
+
+    result: dict[str, Any] = {
+        "action": "start_flink_cluster",
+        "diagnostics": {},
+    }
+
+    # Check FLINK_HOME
+    if not flink_home:
+        result["success"] = False
+        result["message"] = "FLINK_HOME not configured"
+        result["diagnostics"]["flink_home"] = "not set"
+        result["remediation"] = "Run: devenv tasks run restart:clean"
+        return result
+
+    result["diagnostics"]["flink_home"] = str(flink_home)
+
+    # Check if Flink is built
+    flink_bin = flink_home / "bin" / "flink"
+    if not flink_bin.exists():
+        result["success"] = False
+        result["message"] = "Flink not built - bin/flink not found"
+        result["diagnostics"]["flink_built"] = False
+        result["remediation"] = "Run: devenv tasks run restart:clean (builds Flink from source)"
+        return result
+
+    result["diagnostics"]["flink_built"] = True
+
+    # Check for existing Flink processes
+    try:
+        ps_result = subprocess.run(
+            ["pgrep", "-f", "org.apache.flink"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if ps_result.stdout.strip():
+            pids = ps_result.stdout.strip().split("\n")
+            result["diagnostics"]["existing_processes"] = pids
+            result["diagnostics"]["process_count"] = len(pids)
+        else:
+            result["diagnostics"]["existing_processes"] = []
+            result["diagnostics"]["process_count"] = 0
+    except Exception as e:
+        result["diagnostics"]["process_check_error"] = str(e)
+
+    # Check if port 8081 is in use
+    try:
+        lsof_result = subprocess.run(
+            ["lsof", "-i", ":8081", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if lsof_result.stdout.strip():
+            result["diagnostics"]["port_8081_pids"] = lsof_result.stdout.strip().split("\n")
+        else:
+            result["diagnostics"]["port_8081_pids"] = []
+    except Exception:
+        result["diagnostics"]["port_8081_pids"] = "check_failed"
+
+    # Check for required JARs
+    lib_dir = flink_home / "lib"
+    if lib_dir.exists():
+        iceberg_jars = list(lib_dir.glob("iceberg-flink-runtime-*.jar"))
+        aws_bundle_jars = list(lib_dir.glob("iceberg-aws-bundle-*.jar"))
+        result["diagnostics"]["iceberg_jars"] = [j.name for j in iceberg_jars]
+        result["diagnostics"]["aws_bundle_jars"] = [j.name for j in aws_bundle_jars]
+        result["diagnostics"]["jars_ok"] = bool(iceberg_jars) and bool(aws_bundle_jars)
+    else:
+        result["diagnostics"]["jars_ok"] = False
+        result["diagnostics"]["lib_dir_exists"] = False
+
+    # Check Flink logs for recent errors
+    log_dir = flink_home / "log"
+    if log_dir.exists():
+        log_files = sorted(log_dir.glob("flink-*-jobmanager-*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if log_files:
+            latest_log = log_files[0]
+            try:
+                # Read last 50 lines of most recent log
+                with open(latest_log) as f:
+                    lines = f.readlines()
+                    last_lines = lines[-50:] if len(lines) > 50 else lines
+                    # Look for errors
+                    errors = [l.strip() for l in last_lines if "ERROR" in l or "Exception" in l]
+                    if errors:
+                        result["diagnostics"]["recent_log_errors"] = errors[-5:]  # Last 5 errors
+                    result["diagnostics"]["latest_log"] = str(latest_log)
+            except Exception as e:
+                result["diagnostics"]["log_read_error"] = str(e)
+
+    if dry_run:
+        result["success"] = True
+        result["dry_run"] = True
+        result["message"] = "Would attempt to start Flink cluster"
+        result["steps"] = [
+            "Kill any orphaned Flink processes",
+            f"Start JobManager: {flink_home}/bin/jobmanager.sh start",
+            f"Start TaskManager: {flink_home}/bin/taskmanager.sh start",
+            "Or use: devenv tasks run restart:clean",
+        ]
+        return result
+
+    # Attempt to start Flink
+    try:
+        # Kill any orphaned processes first
+        subprocess.run(["pkill", "-9", "-f", "org.apache.flink"], capture_output=True, timeout=5)
+        import time
+        time.sleep(2)
+
+        # Start using start-cluster.sh
+        start_script = flink_home / "bin" / "start-cluster.sh"
+        if start_script.exists():
+            start_proc = subprocess.run(
+                [str(start_script)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=str(flink_home),
+            )
+            result["start_output"] = start_proc.stdout
+            result["start_stderr"] = start_proc.stderr
+
+            # Wait a bit and check if it's running
+            time.sleep(5)
+            import httpx
+            try:
+                resp = httpx.get("http://localhost:8081/overview", timeout=5.0)
+                if resp.status_code == 200:
+                    result["success"] = True
+                    result["message"] = "Flink cluster started successfully"
+                else:
+                    result["success"] = False
+                    result["message"] = f"Flink started but API returned {resp.status_code}"
+            except Exception:
+                result["success"] = False
+                result["message"] = "Flink started but API not responding - check logs"
+        else:
+            result["success"] = False
+            result["message"] = "start-cluster.sh not found"
+
+    except Exception as e:
+        result["success"] = False
+        result["message"] = f"Failed to start Flink: {e}"
 
     return result
 

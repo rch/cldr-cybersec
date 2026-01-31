@@ -63,11 +63,53 @@ async def check_taskmanagers(ctx: HealthContext) -> CheckResult:
     except httpx.ConnectError:
         duration = int((time.monotonic() - start) * 1000)
         rpn = FLINK_001.calculate_rpn()
+
+        # Gather diagnostic info
+        diagnostics = {}
+        import subprocess
+        import os
+
+        # Check FLINK_HOME
+        flink_home = os.environ.get("FLINK_HOME", "")
+        diagnostics["flink_home"] = flink_home or "not set"
+
+        # Check if Flink binary exists
+        if flink_home:
+            flink_bin = os.path.join(flink_home, "bin", "flink")
+            diagnostics["flink_built"] = os.path.exists(flink_bin)
+        else:
+            diagnostics["flink_built"] = False
+
+        # Check for Flink processes
+        try:
+            ps_result = subprocess.run(
+                ["pgrep", "-f", "org.apache.flink"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            diagnostics["flink_processes"] = len(ps_result.stdout.strip().split("\n")) if ps_result.stdout.strip() else 0
+        except Exception:
+            diagnostics["flink_processes"] = "check_failed"
+
+        # Check port 8081
+        try:
+            lsof_result = subprocess.run(
+                ["lsof", "-i", ":8081", "-t"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            diagnostics["port_8081_in_use"] = bool(lsof_result.stdout.strip())
+        except Exception:
+            diagnostics["port_8081_in_use"] = "check_failed"
+
         return CheckResult.critical(
             "Cannot connect to Flink JobManager",
             failure_mode_id="FLINK_001",
             rpn=rpn,
-            remediation="Start Flink cluster: $FLINK_HOME/bin/start-cluster.sh",
+            remediation="Run: /health fix --apply  (or: devenv tasks run restart:clean)",
+            diagnostics=diagnostics,
             duration_ms=duration,
         )
     except Exception as e:
