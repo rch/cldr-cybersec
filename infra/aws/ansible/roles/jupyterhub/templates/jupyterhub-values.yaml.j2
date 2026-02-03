@@ -100,6 +100,24 @@ singleuser:
         readOnly: true
 {% endif %}
 
+# Network policy - allow egress to Dask scheduler
+singleuser:
+  networkPolicy:
+    enabled: true
+    egress:
+      # Allow connections to Dask scheduler in dask namespace
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: dask
+        ports:
+          - port: 8786
+            protocol: TCP
+          - port: 8787
+            protocol: TCP
+          - port: 8788
+            protocol: TCP
+
 # Scheduling configuration
 scheduling:
   userScheduler:

@@ -73,8 +73,17 @@ spec:
         - name: scheduler
           image: "{{ dask_image }}"
           imagePullPolicy: "{{ dask_image_pull_policy }}"
+{% if dask_install_requirements | default(true) %}
+          command:
+            - "sh"
+            - "-c"
+            - |
+              pip install --quiet --no-cache-dir -r /requirements/requirements.txt && \
+              dask-scheduler
+{% else %}
           args:
             - dask-scheduler
+{% endif %}
           ports:
             - name: tcp-comm
               containerPort: 8786
@@ -94,6 +103,15 @@ spec:
               path: /health
             initialDelaySeconds: 15
             periodSeconds: 20
+{% if dask_install_requirements | default(true) %}
+          volumeMounts:
+            - name: requirements
+              mountPath: /requirements
+      volumes:
+        - name: requirements
+          configMap:
+            name: {{ dask_requirements_configmap }}
+{% endif %}
     service:
 {% if dask_dashboard_nodeport %}
       type: NodePort
