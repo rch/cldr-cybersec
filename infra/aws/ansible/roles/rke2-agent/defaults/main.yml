@@ -1,0 +1,14 @@
+---
+# RKE2 agent (worker) defaults
+
+rke2_channel: stable
+# Let installer pick latest stable version
+rke2_version: ""
+
+# Token for joining (passed from server)
+rke2_token: ""
+
+# Node labels for Dask scheduling
+# Note: node-role.kubernetes.io labels are restricted in K8s 1.24+
+node_labels:
+  - "dask.org/node-type=worker"

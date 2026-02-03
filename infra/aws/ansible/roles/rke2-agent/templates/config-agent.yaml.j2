@@ -1,0 +1,11 @@
+# RKE2 agent configuration
+server: https://{{ k8s_api_endpoint }}:9345
+token: {{ hostvars[groups['control_plane'][0]]['rke2_cluster_token'] | default(rke2_token) }}
+
+node-label:
+{% for label in node_labels %}
+  - {{ label }}
+{% endfor %}
+
+# Data directory for local volumes
+data-dir: /var/lib/rancher/rke2

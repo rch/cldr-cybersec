@@ -1,0 +1,114 @@
+apiVersion: kubernetes.dask.org/v1
+kind: DaskCluster
+metadata:
+  name: {{ dask_cluster_name }}
+  namespace: {{ dask_namespace }}
+spec:
+  worker:
+    replicas: {{ dask_worker_replicas }}
+    spec:
+      containers:
+        - name: worker
+          image: "{{ dask_image }}"
+          imagePullPolicy: "{{ dask_image_pull_policy }}"
+{% if dask_install_requirements | default(true) %}
+          command:
+            - "sh"
+            - "-c"
+            - |
+              pip install --quiet --no-cache-dir -r /requirements/requirements.txt && \
+              dask-worker \
+                --name $(DASK_WORKER_NAME) \
+                --dashboard \
+                --dashboard-address 8788 \
+                --nthreads {{ dask_worker_threads }} \
+                --memory-limit {{ dask_worker_memory_limit }} \
+                --local-directory {{ dask_local_directory }}
+{% else %}
+          args:
+            - dask-worker
+            - --name
+            - $(DASK_WORKER_NAME)
+            - --dashboard
+            - --dashboard-address
+            - "8788"
+            - --nthreads
+            - "{{ dask_worker_threads }}"
+            - --memory-limit
+            - "{{ dask_worker_memory_limit }}"
+            - --local-directory
+            - "{{ dask_local_directory }}"
+{% endif %}
+          ports:
+            - name: http-dashboard
+              containerPort: 8788
+              protocol: TCP
+          resources:
+            limits:
+              cpu: "{{ dask_worker_cpu_limit }}"
+              memory: {{ dask_worker_memory_request }}
+            requests:
+              cpu: "{{ dask_worker_cpu_request }}"
+              memory: {{ dask_worker_memory_request }}
+          volumeMounts:
+            - mountPath: {{ dask_local_directory }}
+              name: local-data
+{% if dask_install_requirements | default(true) %}
+            - name: requirements
+              mountPath: /requirements
+{% endif %}
+      volumes:
+        - name: local-data
+          hostPath:
+            path: /mnt/data
+            type: DirectoryOrCreate
+{% if dask_install_requirements | default(true) %}
+        - name: requirements
+          configMap:
+            name: {{ dask_requirements_configmap }}
+{% endif %}
+  scheduler:
+    spec:
+      containers:
+        - name: scheduler
+          image: "{{ dask_image }}"
+          imagePullPolicy: "{{ dask_image_pull_policy }}"
+          args:
+            - dask-scheduler
+          ports:
+            - name: tcp-comm
+              containerPort: 8786
+              protocol: TCP
+            - name: http-dashboard
+              containerPort: 8787
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              port: http-dashboard
+              path: /health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              port: http-dashboard
+              path: /health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+    service:
+{% if dask_dashboard_nodeport %}
+      type: NodePort
+{% else %}
+      type: ClusterIP
+{% endif %}
+      selector:
+        dask.org/cluster-name: {{ dask_cluster_name }}
+        dask.org/component: scheduler
+      ports:
+        - name: tcp-comm
+          protocol: TCP
+          port: 8786
+          targetPort: tcp-comm
+        - name: http-dashboard
+          protocol: TCP
+          port: 8787
+          targetPort: http-dashboard

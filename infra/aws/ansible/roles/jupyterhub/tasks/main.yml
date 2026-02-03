@@ -1,0 +1,239 @@
+---
+# JupyterHub deployment with Dask integration
+
+- name: Install pip3
+  ansible.builtin.dnf:
+    name: python3-pip
+    state: present
+  become: true
+
+- name: Install Python dependencies for Kubernetes modules
+  ansible.builtin.pip:
+    name:
+      - kubernetes
+      - PyYAML
+    state: present
+  become: true
+
+- name: Create JupyterHub namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ jupyterhub_namespace }}"
+
+- name: Find notebooks to deploy
+  ansible.builtin.find:
+    paths: "{{ jupyterhub_notebooks_dir }}"
+    patterns: "*.ipynb"
+  register: notebook_files
+  delegate_to: localhost
+  become: false
+  when: jupyterhub_deploy_notebooks | default(false)
+
+- name: Read notebook contents
+  ansible.builtin.set_fact:
+    notebooks_data: "{{ notebooks_data | default({}) | combine({item.path | basename: lookup('file', item.path)}) }}"
+  loop: "{{ notebook_files.files }}"
+  when: jupyterhub_deploy_notebooks | default(false) and notebook_files.files | length > 0
+
+- name: Create notebooks ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: sample-notebooks
+        namespace: "{{ jupyterhub_namespace }}"
+      data: "{{ notebooks_data }}"
+  when: jupyterhub_deploy_notebooks | default(false) and notebooks_data is defined
+
+- name: Add JupyterHub Helm repository
+  kubernetes.core.helm_repository:
+    name: jupyterhub
+    repo_url: https://hub.jupyter.org/helm-chart/
+    force_update: true
+
+- name: Generate proxy secret token
+  ansible.builtin.set_fact:
+    jupyterhub_proxy_secret: "{{ lookup('password', '/dev/null length=64 chars=hexdigits') | lower }}"
+
+- name: Check for existing proxy secret
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Secret
+    namespace: "{{ jupyterhub_namespace }}"
+    name: hub
+  register: existing_hub_secret
+
+- name: Use existing proxy secret if available
+  ansible.builtin.set_fact:
+    jupyterhub_proxy_secret: "{{ existing_hub_secret.resources[0].data['hub.config.JupyterHub.cookie_secret'] | b64decode }}"
+  when: existing_hub_secret.resources | length > 0 and 'hub.config.JupyterHub.cookie_secret' in (existing_hub_secret.resources[0].data | default({}))
+  ignore_errors: true
+
+- name: Template Helm values
+  ansible.builtin.template:
+    src: jupyterhub-values.yaml.j2
+    dest: /tmp/jupyterhub-values.yaml
+    mode: '0600'
+
+- name: Install JupyterHub via Helm
+  kubernetes.core.helm:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    name: jupyterhub
+    chart_ref: jupyterhub/jupyterhub
+    chart_version: "{{ jupyterhub_chart_version }}"
+    release_namespace: "{{ jupyterhub_namespace }}"
+    create_namespace: true
+    wait: true
+    wait_timeout: "10m"
+    values_files:
+      - /tmp/jupyterhub-values.yaml
+
+- name: Wait for hub pod to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Pod
+    namespace: "{{ jupyterhub_namespace }}"
+    label_selectors:
+      - "component=hub"
+  register: hub_pod
+  until: >
+    hub_pod.resources | length > 0 and
+    hub_pod.resources[0].status.phase == "Running"
+  retries: 30
+  delay: 10
+
+- name: Wait for proxy pod to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Pod
+    namespace: "{{ jupyterhub_namespace }}"
+    label_selectors:
+      - "component=proxy"
+  register: proxy_pod
+  until: >
+    proxy_pod.resources | length > 0 and
+    proxy_pod.resources[0].status.phase == "Running"
+  retries: 30
+  delay: 10
+
+- name: Get JupyterHub proxy service info
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Service
+    namespace: "{{ jupyterhub_namespace }}"
+    name: proxy-public
+  register: proxy_service
+
+# ngrok integration (optional)
+- name: Create ngrok Domain for JupyterHub
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: ingress.k8s.ngrok.com/v1alpha1
+      kind: Domain
+      metadata:
+        name: "{{ jupyterhub_ngrok_domain | replace('.', '-') }}"
+        namespace: "{{ ngrok_namespace }}"
+      spec:
+        domain: "{{ jupyterhub_ngrok_domain }}"
+  when: jupyterhub_ngrok_enabled | bool
+
+- name: Wait for ngrok domain to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Domain
+    api_version: ingress.k8s.ngrok.com/v1alpha1
+    namespace: "{{ ngrok_namespace }}"
+    name: "{{ jupyterhub_ngrok_domain | replace('.', '-') }}"
+  register: jupyterhub_domain
+  until: >
+    jupyterhub_domain.resources | length > 0 and
+    jupyterhub_domain.resources[0].status.cnameTarget is defined
+  retries: 30
+  delay: 10
+  when: jupyterhub_ngrok_enabled | bool
+
+- name: Extract JupyterHub domain CNAME target
+  set_fact:
+    jupyterhub_cname_target: "{{ jupyterhub_domain.resources[0].status.cnameTarget }}"
+  when: jupyterhub_ngrok_enabled | bool
+
+- name: Create Cloudflare CNAME for JupyterHub
+  community.general.cloudflare_dns:
+    zone: "{{ jupyterhub_ngrok_domain.split('.')[-2:] | join('.') }}"
+    record: "{{ jupyterhub_ngrok_domain.split('.')[0] }}"
+    type: CNAME
+    value: "{{ jupyterhub_cname_target }}"
+    proxied: false
+    api_token: "{{ cloudflare_api_token }}"
+    state: present
+  when: jupyterhub_ngrok_enabled | bool
+
+- name: Apply Google OAuth traffic policy to JupyterHub namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: ngrok.k8s.ngrok.com/v1alpha1
+      kind: NgrokTrafficPolicy
+      metadata:
+        name: "{{ ngrok_oauth_policy_name }}"
+        namespace: "{{ jupyterhub_namespace }}"
+      spec:
+        policy:
+          on_http_request:
+            - name: "Google OAuth"
+              actions:
+                - type: oauth
+                  config:
+                    provider: google
+  when: jupyterhub_ngrok_enabled | bool and ngrok_oauth_enabled | default(false) | bool
+
+- name: Apply JupyterHub ngrok ingress
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'jupyterhub-ingress.yaml.j2') | from_yaml }}"
+  when: jupyterhub_ngrok_enabled | bool
+
+- name: Display JupyterHub info
+  debug:
+    msg: |
+      JupyterHub deployed successfully!
+
+      Internal Access:
+        Service: proxy-public.{{ jupyterhub_namespace }}.svc.cluster.local:80
+        Port-forward: kubectl port-forward svc/proxy-public 8000:80 -n {{ jupyterhub_namespace }}
+        Then open: http://localhost:8000
+
+      Authentication: {{ jupyterhub_auth_type }}
+      {% if jupyterhub_auth_type == 'dummy' %}
+        - Use any username and password to log in
+      {% endif %}
+
+      Dask Integration:
+        - Scheduler: {{ jupyterhub_dask_scheduler }}
+        - Environment variable DASK_SCHEDULER_ADDRESS is pre-configured
+        - In notebooks, use:
+            from dask.distributed import Client
+            import os
+            client = Client(os.environ['DASK_SCHEDULER_ADDRESS'])
+
+      {% if jupyterhub_ngrok_enabled %}
+      External Access (ngrok):
+        URL: https://{{ jupyterhub_ngrok_domain }}
+        OAuth: Google ({{ ngrok_allowed_email | default('any') }})
+      {% endif %}
+
+      Verify:
+        kubectl get pods -n {{ jupyterhub_namespace }}
+        kubectl get svc -n {{ jupyterhub_namespace }}

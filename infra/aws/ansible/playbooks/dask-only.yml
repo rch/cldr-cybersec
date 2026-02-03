@@ -1,0 +1,9 @@
+---
+# Deploy Dask operator only (assumes cluster exists)
+# Usage: ansible-playbook playbooks/dask-only.yml
+
+- name: Deploy Dask operator
+  hosts: control_plane[0]
+  become: true
+  roles:
+    - dask

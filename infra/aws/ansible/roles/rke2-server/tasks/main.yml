@@ -1,0 +1,86 @@
+---
+# RKE2 server (control plane) installation
+
+- name: Download RKE2 installer
+  get_url:
+    url: https://get.rke2.io
+    dest: /tmp/rke2-install.sh
+    mode: '0755'
+
+- name: Install RKE2 server
+  environment:
+    INSTALL_RKE2_CHANNEL: "{{ rke2_channel }}"
+    INSTALL_RKE2_TYPE: server
+  command: /tmp/rke2-install.sh
+  args:
+    creates: /usr/local/bin/rke2
+
+- name: Create RKE2 config for first server
+  template:
+    src: config-first-server.yaml.j2
+    dest: /etc/rancher/rke2/config.yaml
+    mode: '0600'
+  when: rke2_is_first_server | default(false)
+
+- name: Create RKE2 config for additional servers
+  template:
+    src: config-server.yaml.j2
+    dest: /etc/rancher/rke2/config.yaml
+    mode: '0600'
+  when: not (rke2_is_first_server | default(false))
+
+- name: Enable and start RKE2 server
+  systemd:
+    name: rke2-server
+    enabled: yes
+    state: started
+
+- name: Wait for RKE2 server to be ready
+  wait_for:
+    path: /var/lib/rancher/rke2/server/node-token
+    state: present
+    timeout: 300
+  when: rke2_is_first_server | default(false)
+
+- name: Read node token
+  slurp:
+    src: /var/lib/rancher/rke2/server/node-token
+  register: node_token
+  when: rke2_is_first_server | default(false)
+
+- name: Set token fact for cluster
+  set_fact:
+    rke2_cluster_token: "{{ node_token.content | b64decode | trim }}"
+  when: rke2_is_first_server | default(false)
+  delegate_facts: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups['rke2'] }}"
+
+- name: Create kubectl symlink
+  file:
+    src: /var/lib/rancher/rke2/bin/kubectl
+    dest: /usr/local/bin/kubectl
+    state: link
+
+- name: Create kubeconfig directory
+  file:
+    path: /root/.kube
+    state: directory
+    mode: '0700'
+
+- name: Copy kubeconfig
+  copy:
+    src: /etc/rancher/rke2/rke2.yaml
+    dest: /root/.kube/config
+    remote_src: yes
+    mode: '0600'
+  when: rke2_is_first_server | default(false)
+
+- name: Wait for all nodes to be ready
+  command: kubectl get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}'
+  register: node_status
+  until: "'False' not in node_status.stdout and node_status.stdout != ''"
+  retries: 30
+  delay: 10
+  changed_when: false
+  when: rke2_is_first_server | default(false)

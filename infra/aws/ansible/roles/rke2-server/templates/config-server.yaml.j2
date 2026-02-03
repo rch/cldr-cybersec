@@ -1,0 +1,20 @@
+# RKE2 additional server configuration
+server: https://{{ k8s_api_endpoint }}:9345
+token: {{ hostvars[groups['control_plane'][0]]['rke2_cluster_token'] | default(rke2_token) }}
+
+write-kubeconfig-mode: "0644"
+cni: {{ rke2_cni }}
+
+tls-san:
+{% for san in rke2_tls_san %}
+  - {{ san }}
+{% endfor %}
+  - {{ ansible_default_ipv4.address }}
+  - {{ node_name }}
+
+{% if rke2_disable %}
+disable:
+{% for component in rke2_disable %}
+  - {{ component }}
+{% endfor %}
+{% endif %}

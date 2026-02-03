@@ -1,0 +1,125 @@
+---
+# Dask operator and cluster deployment
+
+- name: Read trimmed requirements file
+  ansible.builtin.set_fact:
+    dask_requirements_content: "{{ lookup('file', role_path + '/files/requirements-dask.txt') }}"
+  when: dask_install_requirements | default(true)
+
+- name: Create Dask namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ dask_namespace }}"
+
+- name: Create Dask requirements ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ dask_requirements_configmap }}"
+        namespace: "{{ dask_namespace }}"
+      data:
+        requirements.txt: "{{ dask_requirements_content }}"
+  when: dask_install_requirements | default(true)
+
+- name: Ensure JupyterHub namespace exists for requirements ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: jupyterhub
+  when: dask_install_requirements | default(true)
+
+- name: Create requirements ConfigMap in JupyterHub namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ dask_requirements_configmap }}"
+        namespace: jupyterhub
+      data:
+        requirements.txt: "{{ dask_requirements_content }}"
+  when: dask_install_requirements | default(true)
+
+- name: Add Dask Helm repository
+  kubernetes.core.helm_repository:
+    name: dask
+    repo_url: https://helm.dask.org
+
+- name: Install Dask operator
+  kubernetes.core.helm:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    name: dask-operator
+    chart_ref: dask/dask-kubernetes-operator
+    chart_version: "{{ dask_operator_version }}"
+    release_namespace: "{{ dask_namespace }}"
+    create_namespace: true
+    wait: true
+    wait_timeout: "5m"
+
+- name: Wait for Dask operator to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Deployment
+    namespace: "{{ dask_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/name=dask-kubernetes-operator"
+  register: operator_status
+  until: >
+    operator_status.resources | length > 0 and
+    operator_status.resources[0].status.readyReplicas | default(0) > 0
+  retries: 30
+  delay: 10
+
+- name: Deploy Dask cluster
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'dask-cluster.yaml.j2') | from_yaml }}"
+
+- name: Wait for Dask scheduler to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Pod
+    namespace: "{{ dask_namespace }}"
+    label_selectors:
+      - "dask.org/cluster-name={{ dask_cluster_name }}"
+      - "dask.org/component=scheduler"
+  register: scheduler_pod
+  until: >
+    scheduler_pod.resources | length > 0 and
+    scheduler_pod.resources[0].status.phase == "Running"
+  retries: 30
+  delay: 10
+
+- name: Get Dask scheduler service info
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Service
+    namespace: "{{ dask_namespace }}"
+    label_selectors:
+      - "dask.org/cluster-name={{ dask_cluster_name }}"
+  register: dask_service
+
+- name: Display Dask cluster info
+  debug:
+    msg: |
+      Dask cluster '{{ dask_cluster_name }}' deployed successfully!
+
+      Scheduler: {{ dask_cluster_name }}-scheduler.{{ dask_namespace }}.svc.cluster.local:8786
+      Dashboard: {{ dask_cluster_name }}-scheduler.{{ dask_namespace }}.svc.cluster.local:8787
+      Workers: {{ dask_worker_replicas }}

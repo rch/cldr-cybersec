@@ -1,3 +1,4 @@
+.env
 thirdparty
 .vscode
 target/
@@ -181,3 +182,14 @@ local-ui/node_modules/*
 
 # Runtime artifacts
 org.apache.nifi.bootstrap.config.log.dir_IS_UNDEFINED/
+
+# Terraform/OpenTofu
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+.terraform.lock.hcl
+
+# Ansible
+.ansible_cache/
+*.retry

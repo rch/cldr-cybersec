@@ -1,0 +1,20 @@
+---
+# RKE2 server defaults
+
+rke2_channel: stable
+# Let installer pick latest stable version
+rke2_version: ""
+
+# Token for joining nodes (generated on first server)
+rke2_token: ""
+
+# CNI plugin
+rke2_cni: canal
+
+# Disable default components if needed
+rke2_disable:
+  - rke2-ingress-nginx  # We'll use our own ingress
+
+# TLS SAN for API server
+rke2_tls_san:
+  - "{{ k8s_api_endpoint }}"

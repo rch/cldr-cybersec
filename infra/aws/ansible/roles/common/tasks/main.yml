@@ -1,0 +1,101 @@
+---
+# Common setup for all RKE2 nodes
+
+- name: Set hostname
+  hostname:
+    name: "{{ node_name }}"
+
+- name: Update /etc/hosts
+  lineinfile:
+    path: /etc/hosts
+    line: "{{ ansible_default_ipv4.address }} {{ node_name }}"
+    state: present
+
+- name: Install required packages
+  dnf:
+    name:
+      - wget
+      - tar
+      - unzip
+      - iptables
+      - iscsi-initiator-utils
+    state: present
+
+- name: Disable swap
+  command: swapoff -a
+  changed_when: false
+
+- name: Remove swap from fstab
+  lineinfile:
+    path: /etc/fstab
+    regexp: '\sswap\s'
+    state: absent
+
+- name: Apply sysctl settings
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_set: yes
+    state: present
+    reload: yes
+  loop: "{{ sysctl_settings | dict2items }}"
+
+- name: Enable required kernel modules
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - br_netfilter
+    - overlay
+
+- name: Persist kernel modules
+  copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      br_netfilter
+      overlay
+    mode: '0644'
+
+- name: Configure sysctl for bridged traffic
+  copy:
+    dest: /etc/sysctl.d/k8s.conf
+    content: |
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward = 1
+    mode: '0644'
+  notify: reload sysctl
+
+- name: Create data directory
+  file:
+    path: "{{ data_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Format and mount data volume (workers only)
+  when: rke2_type == 'agent'
+  block:
+    - name: Check if data disk is formatted
+      command: blkid /dev/nvme1n1
+      register: blkid_result
+      ignore_errors: true
+      changed_when: false
+
+    - name: Format data disk
+      filesystem:
+        fstype: xfs
+        dev: /dev/nvme1n1
+      when: blkid_result.rc != 0
+
+    - name: Mount data volume
+      mount:
+        path: "{{ data_dir }}"
+        src: /dev/nvme1n1
+        fstype: xfs
+        state: mounted
+
+- name: Create RKE2 config directory
+  file:
+    path: /etc/rancher/rke2
+    state: directory
+    mode: '0755'

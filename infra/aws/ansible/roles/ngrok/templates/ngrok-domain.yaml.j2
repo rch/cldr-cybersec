@@ -1,0 +1,7 @@
+apiVersion: ingress.k8s.ngrok.com/v1alpha1
+kind: Domain
+metadata:
+  name: {{ domain_name | replace('.', '-') }}
+  namespace: {{ ngrok_namespace }}
+spec:
+  domain: {{ domain_name }}

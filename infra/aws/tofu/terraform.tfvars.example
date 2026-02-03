@@ -1,0 +1,31 @@
+# Example tfvars for cybersec-dask cluster
+# Copy to terraform.tfvars and customize
+
+aws_region  = "us-east-1"
+environment = "dev"
+project     = "cybersec-dask"
+
+# Required: SSH key name (must exist in AWS)
+ssh_key_name = "my-ssh-key"
+
+# Network
+vpc_cidr = "10.100.0.0/16"
+
+# Cluster sizing (defaults shown)
+control_plane_count         = 3
+control_plane_instance_type = "m6i.xlarge"
+worker_count                = 3
+worker_instance_type        = "m6i.2xlarge"
+
+# Storage
+root_volume_size = 100
+data_volume_size = 500
+
+# Access (restrict in production)
+allowed_ssh_cidrs = ["0.0.0.0/0"]
+
+# Additional tags
+tags = {
+  Owner = "your-team"
+  CostCenter = "your-cost-center"
+}

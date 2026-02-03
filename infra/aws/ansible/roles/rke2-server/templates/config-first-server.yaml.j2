@@ -1,0 +1,24 @@
+# RKE2 first server configuration
+write-kubeconfig-mode: "0644"
+cni: {{ rke2_cni }}
+
+tls-san:
+{% for san in rke2_tls_san %}
+  - {{ san }}
+{% endfor %}
+  - {{ ansible_default_ipv4.address }}
+  - {{ node_name }}
+
+{% if rke2_disable %}
+disable:
+{% for component in rke2_disable %}
+  - {{ component }}
+{% endfor %}
+{% endif %}
+
+# Cluster CIDR for pods
+cluster-cidr: "10.42.0.0/16"
+service-cidr: "10.43.0.0/16"
+
+# Enable audit logging
+audit-policy-file: /etc/rancher/rke2/audit-policy.yaml

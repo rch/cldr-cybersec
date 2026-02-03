@@ -1,0 +1,29 @@
+---
+# Deploy JupyterHub with Dask integration
+#
+# Usage:
+#   # Basic deployment (internal access only)
+#   ansible-playbook playbooks/jupyterhub.yml -i inventory/hosts
+#
+#   # With external ngrok access
+#   ansible-playbook playbooks/jupyterhub.yml -i inventory/hosts \
+#     -e jupyterhub_ngrok_enabled=true
+#
+#   # Custom Dask scheduler (if different from default)
+#   ansible-playbook playbooks/jupyterhub.yml -i inventory/hosts \
+#     -e jupyterhub_dask_scheduler="my-scheduler.dask.svc.cluster.local:8786"
+#
+# Prerequisites:
+#   - RKE2 cluster running
+#   - Dask cluster deployed (playbooks/dask-only.yml)
+#   - For ngrok: ngrok operator deployed (playbooks/ngrok.yml)
+#
+# Access:
+#   kubectl port-forward svc/proxy-public 8000:80 -n jupyterhub
+#   Open http://localhost:8000 (any username/password with dummy auth)
+
+- name: Deploy JupyterHub
+  hosts: control_plane[0]
+  become: true
+  roles:
+    - jupyterhub

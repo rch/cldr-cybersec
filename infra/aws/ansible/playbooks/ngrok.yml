@@ -1,0 +1,15 @@
+---
+# Deploy ngrok operator with OAuth-protected ingresses
+# Requires: NGROK_AUTHTOKEN and NGROK_API_KEY environment variables
+#
+# Usage:
+#   ansible-playbook playbooks/ngrok.yml
+#
+# Optional overrides:
+#   ansible-playbook playbooks/ngrok.yml -e ngrok_allowed_email=user@example.com
+
+- name: Deploy ngrok operator with OAuth
+  hosts: control_plane[0]
+  become: true
+  roles:
+    - ngrok

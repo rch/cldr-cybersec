@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jupyterhub-ngrok
+  namespace: {{ jupyterhub_namespace }}
+  labels:
+    app.kubernetes.io/managed-by: ngrok-operator
+    app.kubernetes.io/name: jupyterhub
+{% if ngrok_oauth_enabled | default(false) | bool %}
+  annotations:
+    k8s.ngrok.com/traffic-policy: "{{ ngrok_oauth_policy_name }}"
+{% endif %}
+spec:
+  ingressClassName: ngrok
+  rules:
+    - host: "{{ jupyterhub_ngrok_domain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: proxy-public
+                port:
+                  number: 80

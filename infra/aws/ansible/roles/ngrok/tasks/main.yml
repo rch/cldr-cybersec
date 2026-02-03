@@ -1,0 +1,248 @@
+---
+# ngrok Kubernetes Operator deployment with Google OAuth
+
+- name: Install pip3
+  ansible.builtin.dnf:
+    name: python3-pip
+    state: present
+  become: true
+
+- name: Install Python dependencies for Kubernetes modules
+  ansible.builtin.pip:
+    name:
+      - kubernetes
+      - PyYAML
+    state: present
+  become: true
+
+- name: Validate ngrok credentials
+  ansible.builtin.assert:
+    that:
+      - ngrok_authtoken | length > 0
+      - ngrok_api_key | length > 0
+    fail_msg: "NGROK_AUTH_TOKEN and NGROK_API_KEY environment variables must be set"
+    success_msg: "ngrok credentials validated"
+
+- name: Validate Cloudflare credentials
+  ansible.builtin.assert:
+    that:
+      - cloudflare_api_token | length > 0
+      - cloudflare_zone_id | length > 0
+    fail_msg: "CLOUDFLARE_API_TOKEN and CLOUDFLARE_ZONE_ID environment variables must be set"
+    success_msg: "Cloudflare credentials validated"
+  when: ngrok_dask_domain | length > 0 or ngrok_k8s_dashboard_domain | length > 0
+
+- name: Create ngrok namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ngrok_namespace }}"
+
+- name: Create ngrok credentials secret
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: ngrok-operator-credentials
+        namespace: "{{ ngrok_namespace }}"
+      type: Opaque
+      stringData:
+        AUTHTOKEN: "{{ ngrok_authtoken }}"
+        API_KEY: "{{ ngrok_api_key }}"
+
+- name: Add ngrok Helm repository
+  kubernetes.core.helm_repository:
+    name: ngrok
+    repo_url: https://charts.ngrok.com
+    force_update: true
+
+- name: Install ngrok operator
+  kubernetes.core.helm:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    name: ngrok-operator
+    chart_ref: ngrok/ngrok-operator
+    chart_version: "{{ ngrok_operator_version }}"
+    release_namespace: "{{ ngrok_namespace }}"
+    create_namespace: true
+    wait: true
+    wait_timeout: "5m"
+    values:
+      credentials:
+        secret:
+          name: ngrok-operator-credentials
+
+- name: Wait for ngrok operator to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Deployment
+    namespace: "{{ ngrok_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/name=ngrok-operator"
+  register: operator_status
+  until: >
+    operator_status.resources | length > 0 and
+    operator_status.resources[0].status.readyReplicas | default(0) > 0
+  retries: 30
+  delay: 10
+
+- name: Apply Google OAuth traffic policy to ngrok namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'oauth-policy.yaml.j2') | from_yaml }}"
+  vars:
+    _ngrok_policy_namespace: "{{ ngrok_namespace }}"
+  when: ngrok_oauth_enabled | bool
+
+- name: Apply Google OAuth traffic policy to Dask namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'oauth-policy.yaml.j2') | from_yaml }}"
+  vars:
+    _ngrok_policy_namespace: "{{ dask_dashboard_service_namespace }}"
+  when: ngrok_oauth_enabled | bool and ngrok_dask_domain | length > 0
+
+- name: Apply Google OAuth traffic policy to K8s Dashboard namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'oauth-policy.yaml.j2') | from_yaml }}"
+  vars:
+    _ngrok_policy_namespace: "{{ k8s_dashboard_service_namespace }}"
+  when: ngrok_oauth_enabled | bool and ngrok_k8s_dashboard_domain | length > 0
+
+# Custom domain setup
+- name: Create ngrok Domain for Dask Dashboard
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: ingress.k8s.ngrok.com/v1alpha1
+      kind: Domain
+      metadata:
+        name: "{{ ngrok_dask_domain | replace('.', '-') }}"
+        namespace: "{{ ngrok_namespace }}"
+      spec:
+        domain: "{{ ngrok_dask_domain }}"
+  when: ngrok_dask_domain | length > 0
+
+- name: Create ngrok Domain for K8s Dashboard
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: ingress.k8s.ngrok.com/v1alpha1
+      kind: Domain
+      metadata:
+        name: "{{ ngrok_k8s_dashboard_domain | replace('.', '-') }}"
+        namespace: "{{ ngrok_namespace }}"
+      spec:
+        domain: "{{ ngrok_k8s_dashboard_domain }}"
+  when: ngrok_k8s_dashboard_domain | length > 0
+
+- name: Wait for ngrok domains to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Domain
+    api_version: ingress.k8s.ngrok.com/v1alpha1
+    namespace: "{{ ngrok_namespace }}"
+  register: ngrok_domains
+  until: >
+    ngrok_domains.resources | length >= 2 and
+    ngrok_domains.resources | selectattr('status.cnameTarget', 'defined') | list | length >= 2
+  retries: 30
+  delay: 10
+  when: ngrok_dask_domain | length > 0 and ngrok_k8s_dashboard_domain | length > 0
+
+- name: Extract Dask domain CNAME target
+  set_fact:
+    dask_cname_target: "{{ ngrok_domains.resources | selectattr('spec.domain', 'equalto', ngrok_dask_domain) | map(attribute='status.cnameTarget') | first }}"
+  when: ngrok_dask_domain | length > 0
+
+- name: Extract K8s domain CNAME target
+  set_fact:
+    k8s_cname_target: "{{ ngrok_domains.resources | selectattr('spec.domain', 'equalto', ngrok_k8s_dashboard_domain) | map(attribute='status.cnameTarget') | first }}"
+  when: ngrok_k8s_dashboard_domain | length > 0
+
+- name: Create Cloudflare CNAME for Dask Dashboard
+  community.general.cloudflare_dns:
+    zone: "{{ ngrok_dask_domain.split('.')[-2:] | join('.') }}"
+    record: "{{ ngrok_dask_domain.split('.')[0] }}"
+    type: CNAME
+    value: "{{ dask_cname_target }}"
+    proxied: false
+    api_token: "{{ cloudflare_api_token }}"
+    state: present
+  when: ngrok_dask_domain | length > 0
+
+- name: Create Cloudflare CNAME for K8s Dashboard
+  community.general.cloudflare_dns:
+    zone: "{{ ngrok_k8s_dashboard_domain.split('.')[-2:] | join('.') }}"
+    record: "{{ ngrok_k8s_dashboard_domain.split('.')[0] }}"
+    type: CNAME
+    value: "{{ k8s_cname_target }}"
+    proxied: false
+    api_token: "{{ cloudflare_api_token }}"
+    state: present
+  when: ngrok_k8s_dashboard_domain | length > 0
+
+- name: Apply K8s Dashboard ingress
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'k8s-dashboard-ingress.yaml.j2') | from_yaml }}"
+
+- name: Apply Dask Dashboard ingress
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'dask-dashboard-ingress.yaml.j2') | from_yaml }}"
+
+- name: Wait for ngrok tunnels to be established
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Ingress
+    namespace: "{{ k8s_dashboard_service_namespace }}"
+    name: k8s-dashboard-ngrok
+  register: k8s_ingress
+  until: >
+    k8s_ingress.resources | length > 0 and
+    k8s_ingress.resources[0].status.loadBalancer.ingress | default([]) | length > 0
+  retries: 30
+  delay: 10
+  ignore_errors: true
+
+- name: Get all ngrok ingresses
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Ingress
+    label_selectors:
+      - "app.kubernetes.io/managed-by=ngrok-operator"
+  register: ngrok_ingresses
+
+- name: Display ngrok tunnel URLs
+  debug:
+    msg: |
+      ngrok tunnels deployed successfully!
+
+      Access URLs (requires Google OAuth login as {{ ngrok_allowed_email }}):
+      - Dask Dashboard: https://{{ ngrok_dask_domain }}
+      - K8s Dashboard:  https://{{ ngrok_k8s_dashboard_domain }}
+
+      DNS records created in Cloudflare (zndx.org):
+      - {{ ngrok_dask_domain }} -> {{ ngrok_dask_domain }}.ngrok-cname.com
+      - {{ ngrok_k8s_dashboard_domain }} -> {{ ngrok_k8s_dashboard_domain }}.ngrok-cname.com
+
+      Check ngrok dashboard for real-time status: https://dashboard.ngrok.com/tunnels
+
+      Verify with:
+        kubectl get domains -n {{ ngrok_namespace }}
+        kubectl get ingress -A -l app.kubernetes.io/managed-by=ngrok-operator

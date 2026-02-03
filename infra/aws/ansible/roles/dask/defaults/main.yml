@@ -1,0 +1,31 @@
+---
+# Dask operator defaults
+
+# Dask operator version
+dask_operator_version: "2024.1.0"
+
+# Namespace for Dask workloads
+dask_namespace: dask
+
+# Dask cluster configuration
+dask_cluster_name: simple
+dask_worker_replicas: 64
+dask_worker_memory_limit: "8GB"
+dask_worker_memory_request: "12Gi"
+dask_worker_cpu_limit: "1"
+dask_worker_cpu_request: "1"
+dask_worker_threads: 1
+
+# Image configuration
+dask_image: "ghcr.io/dask/dask:latest"
+dask_image_pull_policy: "IfNotPresent"
+
+# Local storage path on workers
+dask_local_directory: "/mnt/data"
+
+# Enable scheduler dashboard NodePort
+dask_dashboard_nodeport: true
+
+# Requirements for Dask workers (must match JupyterHub)
+dask_install_requirements: true
+dask_requirements_configmap: "dask-requirements"

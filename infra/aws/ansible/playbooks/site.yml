@@ -1,0 +1,42 @@
+---
+# Main playbook for RKE2 cluster with Dask
+# Usage: ansible-playbook playbooks/site.yml
+
+- name: Prepare all nodes
+  hosts: rke2
+  become: true
+  roles:
+    - common
+
+- name: Install RKE2 server (first control plane)
+  hosts: control_plane[0]
+  become: true
+  vars:
+    rke2_role: server
+    rke2_is_first_server: true
+  roles:
+    - rke2-server
+
+- name: Install RKE2 server (additional control planes)
+  hosts: control_plane[1:]
+  become: true
+  serial: 1
+  vars:
+    rke2_role: server
+    rke2_is_first_server: false
+  roles:
+    - rke2-server
+
+- name: Install RKE2 agent (workers)
+  hosts: workers
+  become: true
+  vars:
+    rke2_role: agent
+  roles:
+    - rke2-agent
+
+- name: Deploy Dask operator
+  hosts: control_plane[0]
+  become: true
+  roles:
+    - dask

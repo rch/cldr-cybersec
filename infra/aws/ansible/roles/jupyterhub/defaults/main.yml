@@ -1,0 +1,64 @@
+---
+# JupyterHub defaults
+
+# JupyterHub Helm chart version
+jupyterhub_chart_version: "4.0.0"
+
+# Namespace for JupyterHub
+jupyterhub_namespace: jupyterhub
+
+# Existing Dask scheduler address (from dask role)
+jupyterhub_dask_scheduler: "simple-scheduler.dask.svc.cluster.local:8786"
+
+# Authentication type: dummy (dev), google, or github
+jupyterhub_auth_type: "dummy"
+
+# For Google OAuth (when jupyterhub_auth_type: google)
+jupyterhub_google_client_id: "{{ lookup('env', 'JUPYTERHUB_GOOGLE_CLIENT_ID') }}"
+jupyterhub_google_client_secret: "{{ lookup('env', 'JUPYTERHUB_GOOGLE_CLIENT_SECRET') }}"
+jupyterhub_google_allowed_email: "{{ ngrok_allowed_email | default('') }}"
+
+# ngrok integration (optional external access)
+jupyterhub_ngrok_enabled: false
+jupyterhub_ngrok_domain: "jupyter.zndx.org"
+
+# Cloudflare DNS (used when ngrok is enabled)
+cloudflare_api_token: "{{ lookup('env', 'CLOUDFLARE_API_TOKEN') }}"
+cloudflare_zone_id: "{{ lookup('env', 'CLOUDFLARE_ZONE_ID') }}"
+
+# ngrok operator namespace (from ngrok role)
+ngrok_namespace: ngrok-system
+ngrok_oauth_policy_name: google-oauth-policy
+
+# Single-user server configuration
+jupyterhub_singleuser_image: "quay.io/jupyterhub/singleuser:5.2.1"
+jupyterhub_singleuser_memory_limit: "4G"
+jupyterhub_singleuser_memory_guarantee: "2G"
+jupyterhub_singleuser_cpu_limit: 2
+jupyterhub_singleuser_cpu_guarantee: 0.5
+
+# Storage for user notebooks
+jupyterhub_storage_capacity: "10Gi"
+
+# Extra Python packages to install at startup
+# These are from build/Dask_Kub_Viz_Sample_Problem.ipynb
+jupyterhub_extra_packages:
+  - holoviews
+  - datashader
+  - mpire
+  - bokeh
+  - "dask[distributed]"
+  - pandas
+  - numpy
+  - pyarrow
+
+# Hub configuration
+jupyterhub_admin_users: []
+jupyterhub_allowed_users: []  # Empty = allow all (with dummy auth)
+
+# Deploy sample notebooks to users
+jupyterhub_deploy_notebooks: true
+jupyterhub_notebooks_dir: "{{ playbook_dir }}/../build/notebooks"
+
+# Requirements ConfigMap (created by dask role, shared between both)
+jupyterhub_requirements_configmap: "dask-requirements"

@@ -1,0 +1,40 @@
+---
+# ngrok operator defaults
+
+# ngrok operator Helm chart version
+ngrok_operator_version: "0.21.1"
+
+# Namespace for ngrok operator
+ngrok_namespace: ngrok-system
+
+# OAuth configuration
+ngrok_oauth_enabled: false  # Set to true to enable Google OAuth
+ngrok_allowed_email: "rhill@cloudera.com"
+ngrok_session_duration: 3600  # 1 hour in seconds
+ngrok_idle_timeout: 1800      # 30 minutes in seconds
+
+# ngrok credentials (should be set via environment or vault)
+ngrok_authtoken: "{{ lookup('env', 'NGROK_AUTH_TOKEN') | default(lookup('env', 'NGROK_AUTHTOKEN'), true) }}"
+ngrok_api_key: "{{ lookup('env', 'NGROK_API_KEY') }}"
+
+# Cloudflare DNS configuration
+cloudflare_api_token: "{{ lookup('env', 'CLOUDFLARE_API_TOKEN') }}"
+cloudflare_zone_id: "{{ lookup('env', 'CLOUDFLARE_ZONE_ID') }}"
+
+# Custom domains (set to empty string to use ngrok-generated URLs)
+ngrok_dask_domain: "dask.zndx.org"
+ngrok_k8s_dashboard_domain: "k8s.zndx.org"
+
+# Service references
+# K8s Dashboard service (kubernetes-dashboard namespace)
+k8s_dashboard_service_name: kubernetes-dashboard
+k8s_dashboard_service_namespace: kubernetes-dashboard
+k8s_dashboard_service_port: 443
+
+# Dask Dashboard service
+dask_dashboard_service_name: "{{ dask_cluster_name | default('simple') }}-scheduler"
+dask_dashboard_service_namespace: "{{ dask_namespace | default('dask') }}"
+dask_dashboard_service_port: 8787
+
+# Traffic policy name
+ngrok_oauth_policy_name: google-oauth-policy

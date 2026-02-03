@@ -1,0 +1,22 @@
+# Python packages for JupyterHub user environments
+# These packages are installed at pod startup via lifecycleHooks.postStart
+# For production, consider building a custom Docker image with these pre-installed
+
+# Visualization
+holoviews
+datashader
+bokeh
+
+# Parallel processing
+mpire
+dask[distributed]
+
+# Data manipulation
+pandas
+numpy
+pyarrow
+
+# Jupyter extensions (optional, uncomment as needed)
+# jupyterlab-git
+# jupyterlab-lsp
+# python-lsp-server

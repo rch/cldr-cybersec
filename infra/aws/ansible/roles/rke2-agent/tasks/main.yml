@@ -1,0 +1,32 @@
+---
+# RKE2 agent (worker) installation
+
+- name: Download RKE2 installer
+  get_url:
+    url: https://get.rke2.io
+    dest: /tmp/rke2-install.sh
+    mode: '0755'
+
+- name: Install RKE2 agent
+  environment:
+    INSTALL_RKE2_CHANNEL: "{{ rke2_channel }}"
+    INSTALL_RKE2_TYPE: agent
+  command: /tmp/rke2-install.sh
+  args:
+    creates: /usr/local/bin/rke2
+
+- name: Create RKE2 agent config
+  template:
+    src: config-agent.yaml.j2
+    dest: /etc/rancher/rke2/config.yaml
+    mode: '0600'
+
+- name: Enable and start RKE2 agent
+  systemd:
+    name: rke2-agent
+    enabled: yes
+    state: started
+
+- name: Wait for agent to join cluster
+  pause:
+    seconds: 30

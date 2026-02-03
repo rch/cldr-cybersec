@@ -1,0 +1,14 @@
+---
+# Common role defaults
+
+# RKE2 channel (stable, latest, etc)
+rke2_channel: stable
+
+# Data directory for local storage
+data_dir: /mnt/data
+
+# System tuning for Dask workloads
+sysctl_settings:
+  vm.max_map_count: 262144
+  net.core.somaxconn: 65535
+  net.ipv4.ip_local_port_range: "1024 65535"

@@ -1,0 +1,7 @@
+apiVersion: ngrok.k8s.ngrok.com/v1alpha1
+kind: NgrokTrafficPolicy
+metadata:
+  name: {{ ngrok_oauth_policy_name }}
+  namespace: {{ _ngrok_policy_namespace | default(ngrok_namespace) }}
+spec:
+{{ lookup('template', 'oauth-policy-spec.yaml.j2') | indent(2, first=True) }}
