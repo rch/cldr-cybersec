@@ -1,6 +1,8 @@
 { pkgs, lib, config, inputs, ... }:
 
 {
+  dotenv.enable = true;
+
   # MinIO data directory - uses DEVENV_STATE by default
   # Override in .cybersec/config.toml or set MINIO_DATA_DIR env var
   # env.MINIO_DATA_DIR = lib.mkForce "/opt/minio/cybersec";  # Example override
@@ -11,10 +13,12 @@
 
   # Flink home - built from source in thirdparty/flink
   env.FLINK_HOME = "${config.devenv.root}/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1";
+  env.KUBECONFIG = "${config.devenv.root}/.devenv/state/kubeconfig";
 
 
   # https://devenv.sh/packages/
   packages = with pkgs; [
+    awscli2
     conftest
     d2
     dbmate
@@ -26,11 +30,15 @@
     grpcurl
     imagemagick
     jq
+    k3d
+    kubectl
+    kubernetes-helm
     mdbook
     mdbook-d2
     mdbook-katex
     mdbook-mermaid
     opentofu
+    podman
     protobuf
     presenterm
     tilt
@@ -110,6 +118,9 @@
   # NOTE: Heavy operations (git submodule, Flink build) are handled by flink-bootstrap process
   # to avoid blocking shell startup. For first-time setup, run: devenv tasks run restart:clean
   enterShell = ''
+    # Short alias for OpenTofu CLI
+    alias tf="tofu"
+
     # Create Polaris bin wrapper scripts if needed
     POLARIS_HOME="$PWD/thirdparty/polaris/polaris-bin-1.3.0-incubating"
     if [ -d "$POLARIS_HOME" ] && [ ! -x "$POLARIS_HOME/bin/admin" ]; then
@@ -146,7 +157,6 @@ asyncio.run(write_environment_config())
 print('Environment config written to build/environment.json')
 "
 
-      # Run conftest
       echo ""
       echo "Running conftest policies..."
       conftest test build/environment.json --policy policy/environment/ --all-namespaces || {
@@ -448,11 +458,246 @@ asyncio.run(run())
       }
     ];
   };
-
-
-  # Flink local cluster for development
-  # Web UI: http://localhost:8081
+  # Process-compose managed services (Flink, Polaris, Dask, auxiliary tooling)
   processes = {
+    podman-runtime = {
+      exec = ''
+        set -euo pipefail
+
+        if ! command -v podman >/dev/null 2>&1; then
+          echo "❌ podman CLI not found in dev environment"
+          exit 1
+        fi
+
+        echo "Ensuring Podman environment is available for k3d..."
+
+        if podman machine list >/dev/null 2>&1; then
+          MACHINE_JSON=$(podman machine list --format=json 2>/dev/null || echo "[]")
+          MACHINE_NAME=$(echo "$MACHINE_JSON" | jq -r 'map(select(.Name != null)) | map(.Name)[0] // empty')
+          if [ -n "$MACHINE_NAME" ]; then
+            MACHINE_STATE=$(echo "$MACHINE_JSON" | jq -r --arg name "$MACHINE_NAME" '.[] | select(.Name==$name) | .State // ""')
+            if [ "$MACHINE_STATE" != "Running" ]; then
+              echo "Starting Podman machine '$MACHINE_NAME'..."
+              podman machine start "$MACHINE_NAME"
+            else
+              echo "Podman machine '$MACHINE_NAME' already running"
+            fi
+          else
+            echo "No Podman machines defined; assuming native runtime"
+          fi
+        else
+          echo "Podman machine tooling unavailable (likely native Linux runtime)"
+        fi
+
+        while true; do
+          sleep 300
+        done
+      '';
+      process-compose = {
+        availability = {
+          restart = "always";
+        };
+      };
+    };
+
+    k3d-cluster = {
+      exec = ''
+        set -euo pipefail
+
+        CLUSTER_NAME=''${K3D_CLUSTER_NAME:-cybersec}
+        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+
+        export K3D_FIX_DNS=1
+
+        if ! command -v k3d >/dev/null 2>&1; then
+          echo "❌ k3d CLI not found"
+          exit 1
+        fi
+
+        if ! command -v kubectl >/dev/null 2>&1; then
+          echo "❌ kubectl CLI not found"
+          exit 1
+        fi
+
+        if [ -z "''${DOCKER_HOST:-}" ]; then
+          if command -v podman >/dev/null 2>&1 && podman machine list >/dev/null 2>&1; then
+            MACHINE_JSON=$(podman machine list --format=json 2>/dev/null || echo "[]")
+            MACHINE_NAME=$(echo "$MACHINE_JSON" | jq -r 'map(select(.Name != null)) | map(.Name)[0] // empty')
+            if [ -n "$MACHINE_NAME" ]; then
+              SOCKET_PATH=$(podman machine inspect "$MACHINE_NAME" 2>/dev/null | jq -r '.[0].ConnectionInfo.PodmanSocket.Path // empty')
+              if [ -n "$SOCKET_PATH" ] && [ -S "$SOCKET_PATH" ]; then
+                export DOCKER_HOST="unix://$SOCKET_PATH"
+                export K3D_HIDE_WARNING_ROOTLESS=1
+                echo "Using Podman machine socket at $SOCKET_PATH for k3d"
+              fi
+            fi
+          fi
+        fi
+
+        mkdir -p "$(dirname "$KUBECONFIG_PATH")"
+
+        if ! k3d cluster list | awk 'NR>1 {print $1}' | grep -qx "$CLUSTER_NAME"; then
+          echo "Creating k3d cluster '$CLUSTER_NAME'..."
+          k3d cluster create "$CLUSTER_NAME" \
+            --servers 1 \
+            --agents 1 \
+            --k3s-arg '--disable=traefik@server:0' \
+            --k3s-arg '--disable=servicelb@server:0' \
+            --port '8786:30086@server:0' \
+            --port '8787:30087@server:0' \
+            --wait --timeout 300s
+        else
+          echo "k3d cluster '$CLUSTER_NAME' already exists; ensuring it is started..."
+          k3d cluster start "$CLUSTER_NAME" || true
+        fi
+
+        TMP_KUBECONFIG="$KUBECONFIG_PATH.tmp"
+        k3d kubeconfig get "$CLUSTER_NAME" > "$TMP_KUBECONFIG"
+        mv "$TMP_KUBECONFIG" "$KUBECONFIG_PATH"
+        chmod 600 "$KUBECONFIG_PATH"
+        export KUBECONFIG="$KUBECONFIG_PATH"
+
+        echo "Waiting for Kubernetes API..."
+        for _ in $(seq 1 60); do
+          if kubectl get nodes >/dev/null 2>&1; then
+            break
+          fi
+          sleep 2
+        done
+
+        kubectl wait --for=condition=Ready node --all --timeout=300s
+
+        echo "✅ k3d cluster '$CLUSTER_NAME' is ready"
+
+        while true; do
+          if ! kubectl get nodes >/dev/null 2>&1; then
+            echo "Lost connection to cluster; exiting for restart"
+            exit 1
+          fi
+          sleep 30
+        done
+      '';
+      process-compose = {
+        depends_on = {
+          podman-runtime = {
+            condition = "process_started";
+          };
+        };
+      };
+    };
+
+    dask-operator = {
+      exec = ''
+        set -euo pipefail
+
+        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        export KUBECONFIG="$KUBECONFIG_PATH"
+
+        if [ ! -f "$KUBECONFIG_PATH" ]; then
+          echo "❌ kubeconfig not found at $KUBECONFIG_PATH"
+          exit 1
+        fi
+
+        echo "Waiting for Kubernetes control plane before installing Dask operator..."
+        for _ in $(seq 1 60); do
+          if kubectl get namespace kube-system >/dev/null 2>&1; then
+            break
+          fi
+          sleep 2
+        done
+
+        helm repo add dask https://helm.dask.org >/dev/null 2>&1 || true
+        helm repo update dask >/dev/null 2>&1 || true
+
+        echo "Installing/Updating Dask Kubernetes operator via Helm..."
+        helm upgrade --install dask-operator dask/dask-kubernetes-operator \
+          --namespace dask-operator \
+          --create-namespace \
+          --wait \
+          --timeout 5m
+
+        kubectl wait --for=condition=Established crd/daskclusters.kubernetes.dask.org --timeout=120s
+        kubectl wait --for=condition=Established crd/daskworkergroups.kubernetes.dask.org --timeout=120s
+
+        echo "✅ Dask operator installed"
+
+        while true; do
+          if ! kubectl get pods -n dask-operator >/dev/null 2>&1; then
+            echo "Unable to query Dask operator pods; exiting for restart"
+            exit 1
+          fi
+          sleep 30
+        done
+      '';
+      process-compose = {
+        depends_on = {
+          k3d-cluster = {
+            condition = "process_started";
+          };
+        };
+        readiness_probe = {
+          exec = {
+            command = "KUBECONFIG=$PWD/.devenv/state/kubeconfig kubectl get deploy -n dask-operator dask-kubernetes-operator >/dev/null";
+          };
+          initial_delay_seconds = 10;
+          period_seconds = 10;
+          failure_threshold = 6;
+        };
+      };
+    };
+
+    dask-cluster = {
+      exec = ''
+        set -euo pipefail
+
+        MANIFEST="$PWD/infra/dask/dask-cluster.yaml"
+        if [ ! -f "$MANIFEST" ]; then
+          echo "❌ Dask manifest not found at $MANIFEST"
+          exit 1
+        fi
+
+        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        export KUBECONFIG="$KUBECONFIG_PATH"
+
+        kubectl apply -f "$MANIFEST"
+
+        echo "Waiting for Dask cluster to reach Running phase..."
+        STATUS=""
+        for _ in $(seq 1 120); do
+          STATUS=$(kubectl get daskcluster cybersec-dask -n dask -o jsonpath='{.status.phase}' 2>/dev/null || true)
+          if [ "$STATUS" = "Running" ]; then
+            break
+          fi
+          sleep 5
+        done
+
+        if [ "$STATUS" != "Running" ]; then
+          echo "❌ Dask cluster did not reach Running status (last status: ''${STATUS:-unknown})"
+          kubectl get daskclusters -n dask || true
+          exit 1
+        fi
+
+        echo "✅ Dask cluster is running"
+        kubectl get svc -n dask cybersec-dask-scheduler || true
+
+        while true; do
+          CURRENT=$(kubectl get daskcluster cybersec-dask -n dask -o jsonpath='{.status.phase}' 2>/dev/null || true)
+          if [ "$CURRENT" != "Running" ]; then
+            echo "Dask cluster status is '$CURRENT'; exiting for restart"
+            exit 1
+          fi
+          sleep 30
+        done
+      '';
+      process-compose = {
+        depends_on = {
+          dask-operator = {
+            condition = "process_healthy";
+          };
+        };
+      };
+    };
+
     # Bootstrap check - runs on startup to verify environment
     bootstrap-check = {
       exec = ''
