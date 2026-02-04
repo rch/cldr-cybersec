@@ -106,6 +106,8 @@ cybersec "/health flink --json"
 | Prometheus | http://localhost:9090 | Metrics |
 | NiFi | http://localhost:8450 | Data flow visualization |
 | OTEL Collector | localhost:4317/4318 | Telemetry (gRPC/HTTP) |
+| Dask Scheduler | tcp://localhost:8786 | Distributed compute scheduler on k3d |
+| Dask Dashboard | http://localhost:8787 | Dask cluster dashboard |
 
 ### Key Tasks
 
@@ -114,6 +116,14 @@ devenv tasks run restart:clean  # Clean restart (auto-bootstraps on fresh clone)
 devenv tasks run polaris:check  # Verify Polaris configuration
 devenv tasks run docs:build     # Build documentation
 ```
+
+### Dask on k3d
+
+- `devenv up` boots the Podman runtime, provisions a k3d cluster, installs the Dask operator, and applies infra/dask/dask-cluster.yaml
+- Scheduler TCP endpoint: tcp://localhost:8786 (forwarded from NodePort 30086)
+- Dashboard UI: http://localhost:8787 (forwarded from NodePort 30087)
+- Customize replicas, resources, or images by editing infra/dask/dask-cluster.yaml and re-running `kubectl apply -f`
+- kubeconfig is written to .devenv/state/kubeconfig and exported as KUBECONFIG for convenience
 
 ### MCP Integration
 

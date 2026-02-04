@@ -1,5 +1,6 @@
 .env
 thirdparty
+.DS_Store
 .vscode
 target/
 pom.xml.tag
@@ -204,3 +205,9 @@ build/cluster.yaml
 
 # Error screenshots
 error.png
+
+# k3d local state
+kube-state
+kubeconfig
+kubeconfig-dashboard
+process-compose-postgress-err.txt

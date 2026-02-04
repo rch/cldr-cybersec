@@ -27,6 +27,9 @@ dependencies = [
     "ty>=0.0.13",
     "ortools>=9.12.4544",
     "pyhocon>=0.3.61",
+    "ansible>=13.3.0",
+    "ansible-navigator>=26.1.2",
+    "dask-kubernetes>=2025.7.0",
 ]
 
 [project.optional-dependencies]
