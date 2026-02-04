@@ -3,7 +3,7 @@
 	url = https://github.com/simonellistonball/flink-solr-log-indexer.git
 [submodule "thirdparty/flink"]
 	path = thirdparty/flink
-	url = https://github.com/apache/flink.git
+	url = git@github.com:rch/asf-flink.git
 [submodule "thirdparty/iceberg"]
 	path = thirdparty/iceberg
 	url = https://github.com/apache/iceberg.git
