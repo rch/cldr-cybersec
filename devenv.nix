@@ -159,19 +159,22 @@
 
     # Kubernetes target detection
     # Detects RKE2 vs k3d from KUBECONFIG for conditional behavior
-    DETECTED_K8S_TARGET="none"
-    if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
-      if grep -qE "rancher|rke2" "$KUBECONFIG" 2>/dev/null; then
-        DETECTED_K8S_TARGET="rke2"
-      elif grep -qE "k3d|k3s" "$KUBECONFIG" 2>/dev/null; then
+    # Priority: 1) Explicit CYBERSEC_K8S_TARGET, 2) KUBECONFIG contents, 3) Platform default
+    if [ -z "''${CYBERSEC_K8S_TARGET:-}" ]; then
+      DETECTED_K8S_TARGET="none"
+      if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+        if grep -qE "rancher|rke2" "$KUBECONFIG" 2>/dev/null; then
+          DETECTED_K8S_TARGET="rke2"
+        elif grep -qE "k3d|k3s" "$KUBECONFIG" 2>/dev/null; then
+          DETECTED_K8S_TARGET="k3d"
+        fi
+      fi
+      # When ENABLE_K8S is set but no target detected, default to k3d for local provisioning
+      if [ "$DETECTED_K8S_TARGET" = "none" ] && [ "''${ENABLE_K8S:-false}" = "true" ]; then
         DETECTED_K8S_TARGET="k3d"
       fi
+      export CYBERSEC_K8S_TARGET="$DETECTED_K8S_TARGET"
     fi
-    # macOS defaults to k3d when no target detected and ENABLE_K3D is set
-    if [ "$(uname -s)" = "Darwin" ] && [ "$DETECTED_K8S_TARGET" = "none" ] && [ "''${ENABLE_K3D:-false}" = "true" ]; then
-      DETECTED_K8S_TARGET="k3d"
-    fi
-    export CYBERSEC_K8S_TARGET="$DETECTED_K8S_TARGET"
   '';
   
   languages.typescript = {
@@ -983,9 +986,14 @@ asyncio.run(run())
       exec = ''
         set -euo pipefail
 
-        # K3d stack is opt-in via ENABLE_K3D=true
-        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
-          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+        # Podman is only needed for k3d provisioning (not for RKE2)
+        # Requires: ENABLE_K8S=true AND target=k3d
+        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
+          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
+          exit 0
+        fi
+        if [ "''${CYBERSEC_K8S_TARGET:-none}" != "k3d" ]; then
+          echo "K8s target is ''${CYBERSEC_K8S_TARGET:-none}, not k3d - skipping podman"
           exit 0
         fi
 
@@ -1030,9 +1038,14 @@ asyncio.run(run())
       exec = ''
         set -euo pipefail
 
-        # K3d stack is opt-in via ENABLE_K3D=true
-        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
-          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+        # k3d cluster provisioning - only for local k3d target (not RKE2)
+        # Requires: ENABLE_K8S=true AND target=k3d
+        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
+          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
+          exit 0
+        fi
+        if [ "''${CYBERSEC_K8S_TARGET:-none}" != "k3d" ]; then
+          echo "K8s target is ''${CYBERSEC_K8S_TARGET:-none}, not k3d - skipping k3d cluster provisioning"
           exit 0
         fi
 
@@ -1246,13 +1259,18 @@ EOF
       exec = ''
         set -euo pipefail
 
-        # K3d stack is opt-in via ENABLE_K3D=true
-        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
-          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+        # Dask operator runs on any K8s target (k3d or RKE2)
+        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
+          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
           exit 0
         fi
 
-        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          KUBECONFIG_PATH="$KUBECONFIG"
+        else
+          KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        fi
         export KUBECONFIG="$KUBECONFIG_PATH"
 
         if [ ! -f "$KUBECONFIG_PATH" ]; then
@@ -1314,9 +1332,9 @@ EOF
       exec = ''
         set -euo pipefail
 
-        # K3d stack is opt-in via ENABLE_K3D=true
-        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
-          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+        # Dask cluster runs on any K8s target (k3d or RKE2)
+        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
+          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
           exit 0
         fi
 
@@ -1326,7 +1344,12 @@ EOF
           exit 1
         fi
 
-        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          KUBECONFIG_PATH="$KUBECONFIG"
+        else
+          KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        fi
         export KUBECONFIG="$KUBECONFIG_PATH"
 
         echo "Waiting for Dask operator CRDs..."
@@ -1381,13 +1404,18 @@ EOF
       exec = ''
         set -euo pipefail
 
-        # K3d stack is opt-in via ENABLE_K3D=true
-        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
-          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+        # K8s dashboard runs on any K8s target (k3d or RKE2)
+        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
+          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
           exit 0
         fi
 
-        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          KUBECONFIG_PATH="$KUBECONFIG"
+        else
+          KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        fi
         export KUBECONFIG="$KUBECONFIG_PATH"
 
         echo "Waiting for Kubernetes API..."
@@ -1473,13 +1501,18 @@ EOF
       exec = ''
         set -euo pipefail
 
-        # K3d stack is opt-in via ENABLE_K3D=true
-        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
-          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+        # JupyterHub runs on any K8s target (k3d or RKE2)
+        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
+          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
           exit 0
         fi
 
-        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          KUBECONFIG_PATH="$KUBECONFIG"
+        else
+          KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        fi
         export KUBECONFIG="$KUBECONFIG_PATH"
 
         if [ ! -f "$KUBECONFIG_PATH" ]; then
@@ -1546,13 +1579,18 @@ EOF
       exec = ''
         set -euo pipefail
 
-        # K3d stack is opt-in via ENABLE_K3D=true
-        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
-          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+        # Dask UI runs on any K8s target (k3d or RKE2)
+        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
+          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
           exit 0
         fi
 
-        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          KUBECONFIG_PATH="$KUBECONFIG"
+        else
+          KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        fi
         export KUBECONFIG="$KUBECONFIG_PATH"
 
         echo "Waiting for Dask scheduler pod..."

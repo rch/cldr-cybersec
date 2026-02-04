@@ -28,7 +28,8 @@ The project uses [devenv](https://devenv.sh/) for local development:
 
 ```bash
 devenv up                      # Start core services (Flink, Iceberg, Prometheus)
-ENABLE_K3D=true devenv up      # Start with k3d/Dask/JupyterHub stack
+ENABLE_K8S=true devenv up      # Start with Dask/JupyterHub (auto-provisions k3d)
+KUBECONFIG=~/.kube/rke2.yaml ENABLE_K8S=true devenv up  # Use existing RKE2 cluster
 devenv tasks run polaris:check # Verify Polaris configuration
 devenv tasks run restart:clean # Clean restart all services
 devenv tasks run docs:build    # Build mdbook documentation
@@ -45,12 +46,12 @@ devenv tasks run docs:build    # Build mdbook documentation
 - NiFi Web UI: http://localhost:8450
 - NiFi OTLP Receiver: port 4319 (receives traces from OTEL Collector)
 
-### K3d Stack Ports (ENABLE_K3D=true)
+### K8s Stack Ports (ENABLE_K8S=true)
 - Dask Dashboard: http://localhost:8787
 - Dask Scheduler: port 8786
 - JupyterHub: http://localhost:8000
 - Kubernetes Dashboard: https://localhost:10443
-- K3d API Server: port 6550
+- K3d API Server: port 6550 (only when target=k3d)
 
 ## Architecture
 

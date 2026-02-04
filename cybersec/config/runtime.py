@@ -182,16 +182,18 @@ def _detect_kubernetes_target() -> dict[str, Any]:
 
     Returns:
         Dictionary with kubernetes configuration state:
+        - enabled: Whether ENABLE_K8S is set (master switch)
         - target: "none", "k3d", or "rke2"
-        - k3d_enabled: Whether ENABLE_K3D is set
+        - needs_k3d_provisioning: Whether k3d cluster needs to be created
         - kubeconfig_exists: Whether KUBECONFIG file exists
         - cluster_type: Detected cluster type from kubeconfig
         - kubectl_available: Whether kubectl is on PATH
         - kubectl_connected: Whether kubectl can reach the cluster
     """
     result: dict[str, Any] = {
+        "enabled": False,
         "target": "none",
-        "k3d_enabled": False,
+        "needs_k3d_provisioning": False,
         "kubeconfig_exists": False,
         "kubeconfig_path": "",
         "cluster_type": "none",
@@ -199,12 +201,12 @@ def _detect_kubernetes_target() -> dict[str, Any]:
         "kubectl_connected": False,
     }
 
-    # Check ENABLE_K3D environment variable
-    enable_k3d = os.environ.get("ENABLE_K3D", "false").lower()
-    result["k3d_enabled"] = enable_k3d == "true"
+    # Check ENABLE_K8S environment variable (master switch)
+    enable_k8s = os.environ.get("ENABLE_K8S", "false").lower()
+    result["enabled"] = enable_k8s == "true"
 
-    # Check CYBERSEC_K8S_TARGET (set by enterShell)
-    k8s_target = os.environ.get("CYBERSEC_K8S_TARGET", "none")
+    # Check CYBERSEC_K8S_TARGET (set by enterShell or explicitly)
+    k8s_target = os.environ.get("CYBERSEC_K8S_TARGET", "auto")
     if k8s_target in ("k3d", "rke2"):
         result["target"] = k8s_target
 
@@ -219,11 +221,11 @@ def _detect_kubernetes_target() -> dict[str, Any]:
                 content = kubeconfig_file.read_text()
                 if "rancher" in content or "rke2" in content:
                     result["cluster_type"] = "rke2"
-                    if result["target"] == "none":
+                    if result["target"] in ("none", "auto"):
                         result["target"] = "rke2"
                 elif "k3d" in content or "k3s" in content:
                     result["cluster_type"] = "k3d"
-                    if result["target"] == "none":
+                    if result["target"] in ("none", "auto"):
                         result["target"] = "k3d"
             except Exception:
                 pass
@@ -252,13 +254,17 @@ def _detect_kubernetes_target() -> dict[str, Any]:
     except Exception:
         pass
 
-    # macOS defaults to k3d when ENABLE_K3D is set and no target detected
-    if (
-        platform.system() == "Darwin"
-        and result["target"] == "none"
-        and result["k3d_enabled"]
-    ):
+    # When ENABLE_K8S is set but no target detected, default to k3d
+    if result["enabled"] and result["target"] in ("none", "auto"):
         result["target"] = "k3d"
+
+    # Determine if k3d provisioning is needed
+    # k3d provisioning runs when: enabled + target=k3d + no existing kubeconfig
+    result["needs_k3d_provisioning"] = (
+        result["enabled"]
+        and result["target"] == "k3d"
+        and not result["kubeconfig_exists"]
+    )
 
     return result
 
