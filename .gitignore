@@ -1,5 +1,6 @@
 .env
 thirdparty
+.DS_Store
 .vscode
 target/
 pom.xml.tag
@@ -182,3 +183,7 @@ local-ui/node_modules/*
 
 # Runtime artifacts
 org.apache.nifi.bootstrap.config.log.dir_IS_UNDEFINED/
+kube-state
+kubeconfig
+kubeconfig-dashboard
+process-compose-postgress-err.txt
