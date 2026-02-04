@@ -7,3 +7,9 @@
 [submodule "thirdparty/iceberg"]
 	path = thirdparty/iceberg
 	url = https://github.com/apache/iceberg.git
+[submodule "thirdparty/nifi"]
+	path = thirdparty/nifi
+	url = https://github.com/apache/nifi.git
+[submodule "thirdparty/polaris"]
+	path = thirdparty/polaris
+	url = https://github.com/apache/polaris.git
