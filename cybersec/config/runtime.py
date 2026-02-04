@@ -23,6 +23,7 @@ async def gather_runtime_config() -> dict[str, Any]:
     - Path existence checks
     - Service health probes
     - Process state (Flink TaskManager, etc.)
+    - Kubernetes target detection
 
     Returns:
         Runtime configuration dict
@@ -33,6 +34,7 @@ async def gather_runtime_config() -> dict[str, Any]:
         "python": {},
         "services": {},
         "flink": {},
+        "kubernetes": {},
     }
 
     # Platform detection
@@ -169,7 +171,96 @@ async def gather_runtime_config() -> dict[str, Any]:
         "otel_collector": await _check_tcp("localhost", 4317),
     }
 
+    # Kubernetes target detection
+    runtime["kubernetes"] = _detect_kubernetes_target()
+
     return runtime
+
+
+def _detect_kubernetes_target() -> dict[str, Any]:
+    """Detect Kubernetes target type from environment and kubeconfig.
+
+    Returns:
+        Dictionary with kubernetes configuration state:
+        - target: "none", "k3d", or "rke2"
+        - k3d_enabled: Whether ENABLE_K3D is set
+        - kubeconfig_exists: Whether KUBECONFIG file exists
+        - cluster_type: Detected cluster type from kubeconfig
+        - kubectl_available: Whether kubectl is on PATH
+        - kubectl_connected: Whether kubectl can reach the cluster
+    """
+    result: dict[str, Any] = {
+        "target": "none",
+        "k3d_enabled": False,
+        "kubeconfig_exists": False,
+        "kubeconfig_path": "",
+        "cluster_type": "none",
+        "kubectl_available": False,
+        "kubectl_connected": False,
+    }
+
+    # Check ENABLE_K3D environment variable
+    enable_k3d = os.environ.get("ENABLE_K3D", "false").lower()
+    result["k3d_enabled"] = enable_k3d == "true"
+
+    # Check CYBERSEC_K8S_TARGET (set by enterShell)
+    k8s_target = os.environ.get("CYBERSEC_K8S_TARGET", "none")
+    if k8s_target in ("k3d", "rke2"):
+        result["target"] = k8s_target
+
+    # Check kubeconfig
+    kubeconfig_path = os.environ.get("KUBECONFIG", "")
+    if kubeconfig_path:
+        result["kubeconfig_path"] = kubeconfig_path
+        kubeconfig_file = Path(kubeconfig_path)
+        if kubeconfig_file.exists():
+            result["kubeconfig_exists"] = True
+            try:
+                content = kubeconfig_file.read_text()
+                if "rancher" in content or "rke2" in content:
+                    result["cluster_type"] = "rke2"
+                    if result["target"] == "none":
+                        result["target"] = "rke2"
+                elif "k3d" in content or "k3s" in content:
+                    result["cluster_type"] = "k3d"
+                    if result["target"] == "none":
+                        result["target"] = "k3d"
+            except Exception:
+                pass
+
+    # Check kubectl availability
+    try:
+        subprocess.run(
+            ["kubectl", "version", "--client", "--short"],
+            capture_output=True,
+            timeout=5,
+        )
+        result["kubectl_available"] = True
+
+        # Check cluster connectivity if kubeconfig exists
+        if result["kubeconfig_exists"]:
+            try:
+                conn_result = subprocess.run(
+                    ["kubectl", "get", "nodes", "-o", "name"],
+                    capture_output=True,
+                    timeout=10,
+                    env={**os.environ, "KUBECONFIG": kubeconfig_path},
+                )
+                result["kubectl_connected"] = conn_result.returncode == 0
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # macOS defaults to k3d when ENABLE_K3D is set and no target detected
+    if (
+        platform.system() == "Darwin"
+        and result["target"] == "none"
+        and result["k3d_enabled"]
+    ):
+        result["target"] = "k3d"
+
+    return result
 
 
 async def _check_tcp(host: str, port: int) -> dict[str, Any]:
@@ -293,6 +384,11 @@ def merge_runtime_config(
                 **services_config.get("iceberg_browser", {}),
                 **runtime_config.get("services", {}).get("iceberg_browser", {}),
             },
+        },
+
+        "kubernetes": {
+            **cybersec.get("kubernetes", {}),
+            **runtime_config.get("kubernetes", {}),
         },
     }
 

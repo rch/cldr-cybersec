@@ -96,6 +96,10 @@
     package = pkgs.python312;
     uv.enable = true;
     uv.sync.enable = true;
+    # Install flink extra by default (for local PyFlink development).
+    # The k8s extra (dask) conflicts with flink and must be installed separately.
+    uv.sync.allExtras = false;
+    uv.sync.extras = ["flink" "dev"];
     venv.enable = true;
   };
 
@@ -152,6 +156,22 @@
       echo "This initializes submodules and builds Flink (~15 min on first run)"
       echo ""
     fi
+
+    # Kubernetes target detection
+    # Detects RKE2 vs k3d from KUBECONFIG for conditional behavior
+    DETECTED_K8S_TARGET="none"
+    if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+      if grep -qE "rancher|rke2" "$KUBECONFIG" 2>/dev/null; then
+        DETECTED_K8S_TARGET="rke2"
+      elif grep -qE "k3d|k3s" "$KUBECONFIG" 2>/dev/null; then
+        DETECTED_K8S_TARGET="k3d"
+      fi
+    fi
+    # macOS defaults to k3d when no target detected and ENABLE_K3D is set
+    if [ "$(uname -s)" = "Darwin" ] && [ "$DETECTED_K8S_TARGET" = "none" ] && [ "''${ENABLE_K3D:-false}" = "true" ]; then
+      DETECTED_K8S_TARGET="k3d"
+    fi
+    export CYBERSEC_K8S_TARGET="$DETECTED_K8S_TARGET"
   '';
   
   languages.typescript = {
@@ -963,6 +983,12 @@ asyncio.run(run())
       exec = ''
         set -euo pipefail
 
+        # K3d stack is opt-in via ENABLE_K3D=true
+        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
+          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+          exit 0
+        fi
+
         if ! command -v podman >/dev/null 2>&1; then
           echo "podman CLI not found in dev environment"
           exit 1
@@ -1003,6 +1029,12 @@ asyncio.run(run())
     k3d-cluster = {
       exec = ''
         set -euo pipefail
+
+        # K3d stack is opt-in via ENABLE_K3D=true
+        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
+          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+          exit 0
+        fi
 
         CLUSTER_NAME=''${K3D_CLUSTER_NAME:-cybersec}
         KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
@@ -1214,6 +1246,12 @@ EOF
       exec = ''
         set -euo pipefail
 
+        # K3d stack is opt-in via ENABLE_K3D=true
+        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
+          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+          exit 0
+        fi
+
         KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
         export KUBECONFIG="$KUBECONFIG_PATH"
 
@@ -1276,6 +1314,12 @@ EOF
       exec = ''
         set -euo pipefail
 
+        # K3d stack is opt-in via ENABLE_K3D=true
+        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
+          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+          exit 0
+        fi
+
         MANIFEST="$PWD/infra/dask/dask-cluster.yaml"
         if [ ! -f "$MANIFEST" ]; then
           echo "Dask manifest not found at $MANIFEST"
@@ -1336,6 +1380,12 @@ EOF
     k8s-dashboard = {
       exec = ''
         set -euo pipefail
+
+        # K3d stack is opt-in via ENABLE_K3D=true
+        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
+          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+          exit 0
+        fi
 
         KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
         export KUBECONFIG="$KUBECONFIG_PATH"
@@ -1423,6 +1473,12 @@ EOF
       exec = ''
         set -euo pipefail
 
+        # K3d stack is opt-in via ENABLE_K3D=true
+        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
+          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+          exit 0
+        fi
+
         KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
         export KUBECONFIG="$KUBECONFIG_PATH"
 
@@ -1489,6 +1545,12 @@ EOF
     dask-ui = {
       exec = ''
         set -euo pipefail
+
+        # K3d stack is opt-in via ENABLE_K3D=true
+        if [ "''${ENABLE_K3D:-false}" != "true" ]; then
+          echo "k3d stack disabled (set ENABLE_K3D=true to enable)"
+          exit 0
+        fi
 
         KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
         export KUBECONFIG="$KUBECONFIG_PATH"

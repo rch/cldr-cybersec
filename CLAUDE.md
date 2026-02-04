@@ -27,13 +27,14 @@ uv run python <script.py>      # Run Python scripts
 The project uses [devenv](https://devenv.sh/) for local development:
 
 ```bash
-devenv up                      # Start all services
+devenv up                      # Start core services (Flink, Iceberg, Prometheus)
+ENABLE_K3D=true devenv up      # Start with k3d/Dask/JupyterHub stack
 devenv tasks run polaris:check # Verify Polaris configuration
 devenv tasks run restart:clean # Clean restart all services
 devenv tasks run docs:build    # Build mdbook documentation
 ```
 
-### Service Ports
+### Service Ports (Core Stack - always started)
 - Flink Web UI: http://localhost:8081
 - Iceberg Browser: http://localhost:5050
 - MinIO Console: http://localhost:9011 (minioadmin/minioadmin)
@@ -43,6 +44,13 @@ devenv tasks run docs:build    # Build mdbook documentation
 - Prometheus: http://localhost:9090
 - NiFi Web UI: http://localhost:8450
 - NiFi OTLP Receiver: port 4319 (receives traces from OTEL Collector)
+
+### K3d Stack Ports (ENABLE_K3D=true)
+- Dask Dashboard: http://localhost:8787
+- Dask Scheduler: port 8786
+- JupyterHub: http://localhost:8000
+- Kubernetes Dashboard: https://localhost:10443
+- K3d API Server: port 6550
 
 ## Architecture
 

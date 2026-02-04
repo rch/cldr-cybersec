@@ -10,7 +10,6 @@ dependencies = [
     "psycopg2-binary>=2.9.9",
     "boto3>=1.34.0",
     "pyiceberg[s3fs,sql-postgres,pyiceberg-core]>=0.10.0",
-    "apache-flink>=2.2.0",
     "kafka-python>=2.0.2",
     "flask>=3.0.0",
     # Bootstrap CLI dependencies
@@ -29,7 +28,6 @@ dependencies = [
     "pyhocon>=0.3.61",
     "ansible>=13.3.0",
     "ansible-navigator>=26.1.2",
-    "dask-kubernetes>=2025.7.0",
 ]
 
 [project.optional-dependencies]
@@ -39,10 +37,24 @@ dev = [
     "ruff>=0.2.0",
 ]
 
-observability = [
-    # Dask for out-of-core processing
+# Flink extra - install with: uv sync --extra flink
+# For local Flink/PyFlink development. This is the default for devenv up.
+# Note: Conflicts with k8s extra due to cloudpickle version mismatch.
+flink = [
+    "apache-flink>=2.2.0",
+]
+
+# K8s/Dask stack - install with: uv sync --extra k8s
+# Only needed when connecting to Dask clusters running in Kubernetes.
+# Dask itself runs in K8s (deployed via Helm), not locally.
+# Note: Conflicts with flink extra due to cloudpickle versions.
+k8s = [
+    "dask-kubernetes>=2025.7.0",
     "dask[complete]>=2025.2.0",
     "distributed>=2025.2.0",
+]
+
+observability = [
     # HoloViews visualization stack
     "holoviews>=1.18.0",
     "datashader>=0.16.0",
@@ -72,3 +84,14 @@ include = ["cybersec*"]
 
 [tool.uv]
 package = true
+
+# Declare conflicting extras - k8s (dask) and flink have incompatible cloudpickle versions.
+# Users cannot install both simultaneously, but each can be resolved independently.
+# - apache-flink requires apache-beam which needs cloudpickle>=2.2.1,<2.3
+# - dask requires cloudpickle>=3.0.0
+conflicts = [
+    [
+        { extra = "k8s" },
+        { extra = "flink" },
+    ],
+]
