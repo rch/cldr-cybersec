@@ -18,12 +18,20 @@ Example:
     # Metrics visualizations
     metrics_viz = MetricsVisualizer(dataset)
     timeseries = metrics_viz.timeseries(metric_name="http_request_duration")
+
+    # Hierarchical drill-down (zoom-triggered aggregation)
+    from cybersec.observability.viz import create_temporal_drilldown
+    drilldown = create_temporal_drilldown(ddf)
 """
 
 __all__ = [
     "TraceVisualizer",
     "MetricsVisualizer",
     "TopologyVisualizer",
+    "DrilldownHeatmap",
+    "OverviewDetailView",
+    "ServiceLatencyExplorer",
+    "create_temporal_drilldown",
 ]
 
 
@@ -38,4 +46,16 @@ def __getattr__(name: str):
     if name == "TopologyVisualizer":
         from cybersec.observability.viz.topology import TopologyVisualizer
         return TopologyVisualizer
+    if name == "DrilldownHeatmap":
+        from cybersec.observability.viz.drilldown import DrilldownHeatmap
+        return DrilldownHeatmap
+    if name == "OverviewDetailView":
+        from cybersec.observability.viz.drilldown import OverviewDetailView
+        return OverviewDetailView
+    if name == "ServiceLatencyExplorer":
+        from cybersec.observability.viz.drilldown import ServiceLatencyExplorer
+        return ServiceLatencyExplorer
+    if name == "create_temporal_drilldown":
+        from cybersec.observability.viz.drilldown import create_temporal_drilldown
+        return create_temporal_drilldown
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
