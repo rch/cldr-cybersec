@@ -284,6 +284,125 @@ print('Environment config written to build/environment.json')
       fi
     '';
 
+    # Complete teardown - empties S3 bucket and destroys all infrastructure
+    # Use this to avoid overnight AWS costs
+    "aws:teardown".exec = ''
+      echo "🗑️  COMPLETE AWS TEARDOWN"
+      echo "========================="
+      echo ""
+      echo "This will:"
+      echo "  1. Delete ALL data from the S3 bucket (including all versions)"
+      echo "  2. Destroy ALL AWS infrastructure (EC2, VPC, IAM, etc.)"
+      echo ""
+      echo "⚠️  THIS CANNOT BE UNDONE!"
+      echo ""
+
+      cd infra/aws/tofu
+
+      # Get bucket name from Tofu state
+      BUCKET_NAME=$(tofu output -raw s3_bucket_name 2>/dev/null || echo "")
+
+      if [ -z "$BUCKET_NAME" ]; then
+        echo "No S3 bucket found in Tofu state."
+        echo "Proceeding with infrastructure destroy only..."
+      else
+        echo "S3 Bucket: $BUCKET_NAME"
+
+        # Check bucket contents
+        OBJECT_COUNT=$(aws s3 ls "s3://$BUCKET_NAME" --recursive 2>/dev/null | wc -l || echo "0")
+        echo "Objects in bucket: ~$OBJECT_COUNT"
+        echo ""
+      fi
+
+      read -p "Proceed with complete teardown? [y/N] " -n 1 -r
+      echo
+      if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 0
+      fi
+
+      # Step 1: Empty S3 bucket (required before Tofu can delete it)
+      if [ -n "$BUCKET_NAME" ]; then
+        echo ""
+        echo "Step 1/2: Emptying S3 bucket..."
+
+        # Delete all object versions (required for versioned buckets)
+        echo "  Deleting all object versions..."
+        aws s3api list-object-versions --bucket "$BUCKET_NAME" --output json 2>/dev/null | \
+          jq -r '.Versions[]? | "\(.Key) \(.VersionId)"' | \
+          while read key version; do
+            [ -n "$key" ] && aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" 2>/dev/null
+          done
+
+        # Delete all delete markers
+        echo "  Deleting delete markers..."
+        aws s3api list-object-versions --bucket "$BUCKET_NAME" --output json 2>/dev/null | \
+          jq -r '.DeleteMarkers[]? | "\(.Key) \(.VersionId)"' | \
+          while read key version; do
+            [ -n "$key" ] && aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" 2>/dev/null
+          done
+
+        # Final cleanup with aws s3 rm (catches anything missed)
+        aws s3 rm "s3://$BUCKET_NAME" --recursive 2>/dev/null || true
+
+        echo "  ✅ S3 bucket emptied"
+      fi
+
+      # Step 2: Destroy infrastructure
+      echo ""
+      echo "Step 2/2: Destroying infrastructure with Tofu..."
+      tofu destroy -auto-approve
+
+      echo ""
+      echo "✅ TEARDOWN COMPLETE"
+      echo ""
+      echo "All AWS resources have been destroyed."
+      echo "No further charges will be incurred for this infrastructure."
+    '';
+
+    # Just clean S3 data without destroying infrastructure
+    "aws:s3:clean".exec = ''
+      echo "🧹 Cleaning S3 validation data..."
+      cd infra/aws/tofu
+
+      BUCKET_NAME=$(tofu output -raw s3_bucket_name 2>/dev/null || echo "")
+
+      if [ -z "$BUCKET_NAME" ]; then
+        echo "❌ No S3 bucket found in Tofu state."
+        exit 1
+      fi
+
+      echo "Bucket: $BUCKET_NAME"
+      echo ""
+      echo "Listing data directories..."
+      aws s3 ls "s3://$BUCKET_NAME/" 2>/dev/null || true
+      echo ""
+
+      read -p "Delete all data in s3://$BUCKET_NAME? [y/N] " -n 1 -r
+      echo
+      if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo "Deleting objects (this may take a while for large datasets)..."
+
+        # Delete all object versions
+        aws s3api list-object-versions --bucket "$BUCKET_NAME" --output json 2>/dev/null | \
+          jq -r '.Versions[]? | "\(.Key)\t\(.VersionId)"' | \
+          while IFS=$'\t' read key version; do
+            [ -n "$key" ] && aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" 2>/dev/null
+          done
+
+        # Delete delete markers
+        aws s3api list-object-versions --bucket "$BUCKET_NAME" --output json 2>/dev/null | \
+          jq -r '.DeleteMarkers[]? | "\(.Key)\t\(.VersionId)"' | \
+          while IFS=$'\t' read key version; do
+            [ -n "$key" ] && aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" 2>/dev/null
+          done
+
+        echo "✅ S3 bucket cleaned"
+      else
+        echo "Aborted."
+      fi
+    '';
+
     "aws:inventory".exec = ''
       echo "📋 Generating Ansible inventory from Tofu outputs..."
       cd infra/aws/tofu

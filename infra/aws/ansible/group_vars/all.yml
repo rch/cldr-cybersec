@@ -1,6 +1,10 @@
 ---
 # Group variables for all hosts
 
+# Project identification (must match Tofu var.project)
+project: "cybersec-dask"
+aws_region: "us-east-1"
+
 # RKE2 version
 rke2_version: "v1.29.0+rke2r1"
 

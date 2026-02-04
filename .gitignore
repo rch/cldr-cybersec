@@ -169,7 +169,10 @@ __pycache__/
 *.egg-info/
 .eggs/
 dist/
-build/
+# Python build directory (egg-info, wheel, etc)
+build/*.egg-info
+build/lib/
+build/bdist*/
 
 # Local dev state
 .cybersec/
@@ -193,3 +196,11 @@ org.apache.nifi.bootstrap.config.log.dir_IS_UNDEFINED/
 # Ansible
 .ansible_cache/
 *.retry
+
+# Build artifacts with local paths
+build/config.json
+build/environment.json
+build/cluster.yaml
+
+# Error screenshots
+error.png

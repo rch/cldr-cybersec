@@ -27,3 +27,12 @@ xarray>=2024.1.0
 # Utilities
 tqdm>=4.66.0
 fsspec>=2024.2.0
+
+# S3 Storage (for AWS)
+s3fs>=2024.2.0
+aiobotocore>=2.7.0
+
+# OTel Observability
+networkx>=3.0
+opentelemetry-proto>=1.20.0
+param>=2.0.0

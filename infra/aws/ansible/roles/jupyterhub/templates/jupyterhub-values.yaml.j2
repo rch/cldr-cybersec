@@ -41,6 +41,10 @@ singleuser:
     tag: "{{ jupyterhub_singleuser_image.split(':')[1] }}"
     pullPolicy: IfNotPresent
 
+  # Allow access to EC2 instance metadata for IAM role credentials
+  cloudMetadata:
+    blockWithIptables: false
+
   # Resource limits
   memory:
     limit: "{{ jupyterhub_singleuser_memory_limit }}"
@@ -54,6 +58,9 @@ singleuser:
     DASK_SCHEDULER_ADDRESS: "{{ jupyterhub_dask_scheduler }}"
     # Dask configuration for better defaults
     DASK_DISTRIBUTED__DASHBOARD__LINK: "http://{{ jupyterhub_dask_scheduler.split(':')[0] }}:8787"
+    # S3 storage configuration (uses IAM role for credentials)
+    OTEL_DATA_PATH: "s3://{{ jupyterhub_s3_bucket }}/otel/"
+    AWS_DEFAULT_REGION: "{{ jupyterhub_aws_region }}"
 
   # Install requirements from ConfigMap at startup
   # This adds ~1-2 min to pod startup but avoids custom image builds
@@ -65,8 +72,11 @@ singleuser:
           - "-c"
           - |
             pip install --quiet --user -r /requirements/requirements.txt 2>/dev/null || true
-            # Copy sample notebooks to writable location
-            cp -rn /home/jovyan/sample-notebooks/* /home/jovyan/ 2>/dev/null || true
+            # Copy sample notebooks to home directory (editable)
+            # -L follows symlinks (ConfigMap uses symlinks)
+            # -n no-clobber (don't overwrite user edits)
+            # Original stays in sample-notebooks/ as read-only reference
+            cp -rLn /home/jovyan/sample-notebooks/*.ipynb /home/jovyan/ 2>/dev/null || true
 
   # Default URL to open JupyterLab instead of classic notebook
   defaultUrl: "/lab"
@@ -100,8 +110,7 @@ singleuser:
         readOnly: true
 {% endif %}
 
-# Network policy - allow egress to Dask scheduler
-singleuser:
+  # Network policy - allow egress to Dask scheduler
   networkPolicy:
     enabled: true
     egress:

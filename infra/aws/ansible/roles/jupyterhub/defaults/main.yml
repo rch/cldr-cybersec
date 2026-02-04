@@ -8,7 +8,8 @@ jupyterhub_chart_version: "4.0.0"
 jupyterhub_namespace: jupyterhub
 
 # Existing Dask scheduler address (from dask role)
-jupyterhub_dask_scheduler: "simple-scheduler.dask.svc.cluster.local:8786"
+# Uses variables from dask role defaults
+jupyterhub_dask_scheduler: "{{ dask_cluster_name | default('simple') }}-scheduler.{{ dask_namespace | default('dask') }}.svc.cluster.local:8786"
 
 # Authentication type: dummy (dev), google, or github
 jupyterhub_auth_type: "dummy"
@@ -41,7 +42,7 @@ jupyterhub_singleuser_cpu_guarantee: 0.5
 jupyterhub_storage_capacity: "10Gi"
 
 # Extra Python packages to install at startup
-# These are from build/Dask_Kub_Viz_Sample_Problem.ipynb
+# Matches Dask worker requirements for compatibility
 jupyterhub_extra_packages:
   - holoviews
   - datashader
@@ -51,6 +52,14 @@ jupyterhub_extra_packages:
   - pandas
   - numpy
   - pyarrow
+  - s3fs
+  - networkx
+  - param
+
+# S3 bucket for OTel data storage
+# Pattern: {project}-data (must match Tofu s3.tf and IAM policy)
+jupyterhub_s3_bucket: "{{ project }}-data"
+jupyterhub_aws_region: "{{ aws_region | default('us-east-1') }}"
 
 # Hub configuration
 jupyterhub_admin_users: []

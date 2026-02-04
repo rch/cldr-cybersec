@@ -53,18 +53,35 @@ resource "aws_iam_role_policy" "s3_access" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "s3:GetObject",
-        "s3:ListBucket",
-        "s3:PutObject"
-      ]
-      Resource = [
-        "arn:aws:s3:::${var.project}-*",
-        "arn:aws:s3:::${var.project}-*/*"
-      ]
-    }]
+    Statement = [
+      {
+        Sid    = "S3BucketManagement"
+        Effect = "Allow"
+        Action = [
+          "s3:CreateBucket",
+          "s3:DeleteBucket",
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+          "s3:GetBucketVersioning",
+          "s3:PutBucketVersioning"
+        ]
+        Resource = "arn:aws:s3:::${var.project}-*"
+      },
+      {
+        Sid    = "S3ObjectAccess"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::${var.project}-*",
+          "arn:aws:s3:::${var.project}-*/*"
+        ]
+      }
+    ]
   })
 }
 

@@ -47,6 +47,16 @@ output "rke2_server_url" {
   value       = "https://${aws_lb.k8s_api.dns_name}:9345"
 }
 
+output "s3_bucket_name" {
+  description = "S3 bucket name for data storage"
+  value       = aws_s3_bucket.cybersec.id
+}
+
+output "s3_bucket_arn" {
+  description = "S3 bucket ARN"
+  value       = aws_s3_bucket.cybersec.arn
+}
+
 # Generate Ansible inventory
 output "ansible_inventory" {
   description = "Ansible inventory in INI format"
@@ -86,6 +96,11 @@ output "cluster_info" {
     endpoints = {
       k8s_api        = "https://${aws_lb.k8s_api.dns_name}:6443"
       rke2_server    = "https://${aws_lb.k8s_api.dns_name}:9345"
+    }
+    s3 = {
+      bucket_name = aws_s3_bucket.cybersec.id
+      bucket_arn  = aws_s3_bucket.cybersec.arn
+      region      = var.aws_region
     }
   }
 }

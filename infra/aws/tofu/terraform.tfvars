@@ -23,5 +23,5 @@ data_volume_size = 100
 allowed_ssh_cidrs = ["0.0.0.0/0"]
 
 tags = {
-  Owner = "gaius"
+  Owner = "cybersec-team"
 }

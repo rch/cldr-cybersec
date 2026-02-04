@@ -9,7 +9,7 @@ ngrok_namespace: ngrok-system
 
 # OAuth configuration
 ngrok_oauth_enabled: false  # Set to true to enable Google OAuth
-ngrok_allowed_email: "rhill@cloudera.com"
+ngrok_allowed_email: "{{ lookup('env', 'NGROK_ALLOWED_EMAIL') | default('') }}"
 ngrok_session_duration: 3600  # 1 hour in seconds
 ngrok_idle_timeout: 1800      # 30 minutes in seconds
 

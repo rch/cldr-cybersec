@@ -1,0 +1,49 @@
+---
+# S3 Data Bucket Setup
+# Idempotent: creates bucket if not exists, updates configuration
+
+- name: Check if S3 bucket exists
+  command: >
+    aws s3api head-bucket --bucket {{ s3_bucket_name }}
+  register: bucket_check
+  changed_when: false
+  failed_when: false
+
+- name: Create S3 bucket
+  command: >
+    aws s3 mb s3://{{ s3_bucket_name }} --region {{ s3_region }}
+  when: bucket_check.rc != 0
+  register: bucket_created
+
+- name: Enable bucket versioning
+  command: >
+    aws s3api put-bucket-versioning
+    --bucket {{ s3_bucket_name }}
+    --versioning-configuration Status=Enabled
+  when: s3_versioning_enabled | bool
+  changed_when: false
+
+- name: Block public access
+  command: >
+    aws s3api put-public-access-block
+    --bucket {{ s3_bucket_name }}
+    --public-access-block-configuration
+    'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
+  when: s3_block_public_access | bool
+  changed_when: false
+
+- name: Create folder prefixes
+  command: >
+    aws s3api put-object --bucket {{ s3_bucket_name }} --key {{ item }}
+  loop: "{{ s3_prefixes }}"
+  register: prefix_result
+  changed_when: prefix_result.rc == 0
+  failed_when: false
+
+- name: Display bucket info
+  debug:
+    msg: |
+      S3 Bucket: {{ s3_bucket_name }}
+      Region: {{ s3_region }}
+      Versioning: {{ s3_versioning_enabled }}
+      Prefixes: {{ s3_prefixes | join(', ') }}

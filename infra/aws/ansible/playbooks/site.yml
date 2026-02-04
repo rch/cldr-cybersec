@@ -35,8 +35,29 @@
   roles:
     - rke2-agent
 
+- name: Setup S3 data bucket
+  hosts: bastion
+  become: false
+  roles:
+    - role: s3-data
+      tags: [s3, storage]
+
 - name: Deploy Dask operator
   hosts: control_plane[0]
   become: true
   roles:
     - dask
+
+- name: Deploy JupyterHub
+  hosts: control_plane[0]
+  become: true
+  roles:
+    - role: jupyterhub
+      tags: [jupyterhub]
+
+- name: Configure ngrok tunnels
+  hosts: control_plane[0]
+  become: true
+  roles:
+    - role: ngrok
+      tags: [ngrok]

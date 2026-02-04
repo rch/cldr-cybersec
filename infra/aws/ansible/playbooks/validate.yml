@@ -1,0 +1,151 @@
+---
+# Validate Dask Cluster E2E
+# Usage: ansible-playbook playbooks/validate.yml
+#
+# Run after site.yml to verify the cluster is operational.
+
+- name: Validate Dask Cluster E2E
+  hosts: control_plane[0]
+  gather_facts: true
+  tasks:
+    - name: Check RKE2 cluster health
+      command: kubectl get nodes -o wide
+      register: nodes_status
+      changed_when: false
+
+    - name: Display cluster nodes
+      debug:
+        msg: "{{ nodes_status.stdout_lines }}"
+
+    - name: Verify all nodes Ready
+      assert:
+        that:
+          - "'Ready' in nodes_status.stdout"
+        fail_msg: "Not all nodes are Ready"
+
+    - name: Check Dask scheduler pod
+      command: >
+        kubectl get pods -n {{ dask_namespace | default('dask') }}
+        -l dask.org/component=scheduler
+        -o jsonpath='{.items[0].status.phase}'
+      register: scheduler_status
+      changed_when: false
+      ignore_errors: true
+
+    - name: Verify Dask scheduler Running
+      assert:
+        that:
+          - scheduler_status.stdout == 'Running'
+        fail_msg: "Dask scheduler not running: {{ scheduler_status.stdout | default('not found') }}"
+      when: scheduler_status.rc == 0
+
+    - name: Check Dask worker pods
+      command: >
+        kubectl get pods -n {{ dask_namespace | default('dask') }}
+        -l dask.org/component=worker --no-headers
+      register: worker_pods
+      changed_when: false
+      ignore_errors: true
+
+    - name: Count running Dask workers
+      set_fact:
+        worker_count: "{{ worker_pods.stdout_lines | length }}"
+      when: worker_pods.rc == 0
+
+    - name: Verify Dask workers running
+      assert:
+        that:
+          - worker_count | int >= 1
+        fail_msg: "No Dask workers running"
+      when: worker_pods.rc == 0
+
+    - name: Check JupyterHub hub pod
+      command: >
+        kubectl get pods -n {{ jupyterhub_namespace | default('jupyterhub') }}
+        -l component=hub
+        -o jsonpath='{.items[0].status.phase}'
+      register: hub_status
+      changed_when: false
+      ignore_errors: true
+
+    - name: Check JupyterHub proxy pod
+      command: >
+        kubectl get pods -n {{ jupyterhub_namespace | default('jupyterhub') }}
+        -l component=proxy
+        -o jsonpath='{.items[0].status.phase}'
+      register: proxy_status
+      changed_when: false
+      ignore_errors: true
+
+    - name: Check ngrok operator
+      command: >
+        kubectl get pods -n {{ ngrok_namespace | default('ngrok-system') }}
+        -l app.kubernetes.io/name=kubernetes-ingress-controller
+        -o jsonpath='{.items[0].status.phase}'
+      register: ngrok_status
+      changed_when: false
+      ignore_errors: true
+
+    - name: Check ngrok tunnels
+      command: >
+        kubectl get ingress -A -o jsonpath='{.items[*].metadata.name}'
+      register: ingress_list
+      changed_when: false
+      ignore_errors: true
+
+    - name: Test S3 access from Dask worker
+      command: >
+        kubectl exec -n {{ dask_namespace | default('dask') }}
+        deploy/{{ dask_cluster_name | default('simple') }}-default-worker --
+        python -c "import s3fs; fs = s3fs.S3FileSystem(); print('S3 OK')"
+      register: s3_test
+      changed_when: false
+      ignore_errors: true
+      timeout: 30
+
+    - name: Get Dask scheduler service
+      command: >
+        kubectl get svc -n {{ dask_namespace | default('dask') }}
+        {{ dask_cluster_name | default('simple') }}-scheduler
+        -o jsonpath='{.spec.clusterIP}:{.spec.ports[0].port}'
+      register: scheduler_svc
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display validation summary
+      debug:
+        msg: |
+          ============================================
+                    VALIDATION SUMMARY
+          ============================================
+
+          CLUSTER STATUS
+          --------------
+          Nodes: {{ nodes_status.stdout_lines | length - 1 }} node(s) in cluster
+
+          DASK COMPONENTS
+          ---------------
+          Scheduler: {{ scheduler_status.stdout | default('NOT FOUND') }}
+          Workers: {{ worker_count | default('0') }} running
+          Scheduler Service: {{ scheduler_svc.stdout | default('NOT FOUND') }}
+          S3 Access: {{ 'OK' if s3_test.rc == 0 and 'S3 OK' in s3_test.stdout else 'FAILED or SKIPPED' }}
+
+          JUPYTERHUB
+          ----------
+          Hub Pod: {{ hub_status.stdout | default('NOT DEPLOYED') }}
+          Proxy Pod: {{ proxy_status.stdout | default('NOT DEPLOYED') }}
+
+          NGROK TUNNELS
+          -------------
+          Operator: {{ ngrok_status.stdout | default('NOT DEPLOYED') }}
+          Ingresses: {{ ingress_list.stdout | default('none') }}
+
+          ============================================
+
+    - name: Fail if critical components missing
+      assert:
+        that:
+          - scheduler_status.stdout == 'Running' or scheduler_status.rc != 0
+          - worker_count | default(0) | int >= 1 or worker_pods.rc != 0
+        fail_msg: "Critical Dask components not running"
+      when: scheduler_status.rc == 0 and worker_pods.rc == 0

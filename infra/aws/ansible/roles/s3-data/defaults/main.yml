@@ -1,0 +1,19 @@
+---
+# S3 Data Bucket Configuration
+
+# Bucket name (must match IAM policy pattern)
+s3_bucket_name: "{{ project }}-data"
+
+# Folder prefixes to create
+s3_prefixes:
+  - otel/
+  - otel-validation/
+
+# AWS region
+s3_region: "{{ aws_region | default('us-east-1') }}"
+
+# Enable versioning
+s3_versioning_enabled: true
+
+# Block all public access
+s3_block_public_access: true
