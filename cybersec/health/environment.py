@@ -174,6 +174,10 @@ async def gather_environment_config() -> dict[str, Any]:
     # Kubernetes configuration
     config["kubernetes"] = _detect_kubernetes_target()
 
+    # ngrok and Cloudflare credentials (required for AWS deployments)
+    config["services"]["ngrok"] = _check_ngrok_credentials()
+    config["services"]["cloudflare"] = _check_cloudflare_credentials()
+
     return config
 
 
@@ -248,6 +252,45 @@ async def _check_http(url: str, port: int) -> dict[str, Any]:
     except Exception as e:
         result["error"] = str(e)
     return result
+
+
+def _check_ngrok_credentials() -> dict[str, Any]:
+    """Check ngrok credential availability.
+
+    ngrok credentials are required for AWS deployments to expose
+    services externally via tunnels.
+    """
+    auth_token = os.environ.get("NGROK_AUTH_TOKEN") or os.environ.get("NGROK_AUTHTOKEN", "")
+    api_key = os.environ.get("NGROK_API_KEY", "")
+
+    return {
+        # Only expose boolean flags, not actual credentials
+        "auth_token_set": bool(auth_token),
+        "api_key_set": bool(api_key),
+        "credentials_complete": bool(auth_token) and bool(api_key),
+        "domains": {
+            "dask": os.environ.get("NGROK_DASK_DOMAIN", "dask.zndx.org"),
+            "jupyterhub": os.environ.get("NGROK_JUPYTERHUB_DOMAIN", "jupyter.zndx.org"),
+            "k8s_dashboard": os.environ.get("NGROK_K8S_DOMAIN", "k8s.zndx.org"),
+        },
+    }
+
+
+def _check_cloudflare_credentials() -> dict[str, Any]:
+    """Check Cloudflare credential availability.
+
+    Cloudflare credentials are required for custom domain DNS management
+    when using ngrok with custom domains.
+    """
+    api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+    zone_id = os.environ.get("CLOUDFLARE_ZONE_ID", "")
+
+    return {
+        # Only expose boolean flags, not actual credentials
+        "api_token_set": bool(api_token),
+        "zone_id_set": bool(zone_id),
+        "credentials_complete": bool(api_token),  # zone_id optional for some operations
+    }
 
 
 async def write_environment_config(output_path: Path | None = None) -> Path:
