@@ -23,12 +23,14 @@ async def gather_environment_config() -> dict[str, Any]:
         Environment config dict suitable for conftest validation.
     """
     from ..bootstrap import BootstrapService
+    from ..config.runtime import _detect_kubernetes_target
 
     config: dict[str, Any] = {
         "platform": {},
         "python": {},
         "flink": {},
         "services": {},
+        "kubernetes": {},
     }
 
     # Platform info
@@ -168,6 +170,9 @@ async def gather_environment_config() -> dict[str, Any]:
             bootstrap_config.iceberg_browser_port or 5050
         ),
     }
+
+    # Kubernetes configuration
+    config["kubernetes"] = _detect_kubernetes_target()
 
     return config
 
