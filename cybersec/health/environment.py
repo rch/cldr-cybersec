@@ -178,6 +178,9 @@ async def gather_environment_config() -> dict[str, Any]:
     config["services"]["ngrok"] = _check_ngrok_credentials()
     config["services"]["cloudflare"] = _check_cloudflare_credentials()
 
+    # AWS credentials and IAM permissions
+    config["aws"] = _check_aws_credentials()
+
     return config
 
 
@@ -291,6 +294,77 @@ def _check_cloudflare_credentials() -> dict[str, Any]:
         "zone_id_set": bool(zone_id),
         "credentials_complete": bool(api_token),  # zone_id optional for some operations
     }
+
+
+def _check_aws_credentials() -> dict[str, Any]:
+    """Check AWS credentials and IAM permissions.
+
+    Validates that AWS credentials are configured and have the required
+    permissions for AWS deployments (S3, EC2, IAM operations).
+    """
+    import json
+    import subprocess
+
+    result = {
+        "credentials_configured": False,
+        "caller_identity": None,
+        "account_id": None,
+        "arn": None,
+        "permissions": {
+            "s3_access": False,
+            "ec2_describe": False,
+        },
+        "error": None,
+    }
+
+    # Check if AWS CLI is available
+    try:
+        # Get caller identity to verify credentials
+        identity_proc = subprocess.run(
+            ["aws", "sts", "get-caller-identity", "--output", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        if identity_proc.returncode == 0:
+            identity = json.loads(identity_proc.stdout)
+            result["credentials_configured"] = True
+            result["account_id"] = identity.get("Account")
+            result["arn"] = identity.get("Arn")
+            result["caller_identity"] = identity.get("UserId")
+
+            # Check S3 access by listing buckets (minimal permission test)
+            s3_proc = subprocess.run(
+                ["aws", "s3", "ls", "--output", "json"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            result["permissions"]["s3_access"] = s3_proc.returncode == 0
+
+            # Check EC2 describe (for deployment verification)
+            ec2_proc = subprocess.run(
+                ["aws", "ec2", "describe-regions", "--output", "json"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            result["permissions"]["ec2_describe"] = ec2_proc.returncode == 0
+
+        else:
+            result["error"] = identity_proc.stderr.strip() or "AWS credentials not configured"
+
+    except FileNotFoundError:
+        result["error"] = "AWS CLI not installed"
+    except subprocess.TimeoutExpired:
+        result["error"] = "AWS CLI timeout - check network connectivity"
+    except json.JSONDecodeError as e:
+        result["error"] = f"Failed to parse AWS response: {e}"
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
 
 
 async def write_environment_config(output_path: Path | None = None) -> Path:

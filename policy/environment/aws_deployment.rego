@@ -71,3 +71,47 @@ info contains msg if {
     ngrok.auth_token_set
     msg := sprintf("ngrok domains: dask=%s, jupyterhub=%s", [ngrok.domains.dask, ngrok.domains.jupyterhub])
 }
+
+# ==========================================================================
+# AWS Credential Validation
+# ==========================================================================
+
+# Get AWS config from effective input
+aws := eff.aws
+
+# Deny if AWS credentials are not configured (for K8s/AWS deployments)
+deny contains msg if {
+    k8s.enabled
+    not aws.credentials_configured
+    aws.error != null
+    msg := sprintf("AWS credentials not configured: %s", [aws.error])
+}
+
+# Deny if S3 access is required but not available
+deny contains msg if {
+    k8s.enabled
+    aws.credentials_configured
+    not aws.permissions.s3_access
+    msg := "AWS S3 access not available. Check IAM permissions for s3:ListBuckets"
+}
+
+# Warn if EC2 describe permission missing (needed for deployment verification)
+warn contains msg if {
+    k8s.enabled
+    aws.credentials_configured
+    not aws.permissions.ec2_describe
+    msg := "AWS EC2 describe permission not available. Some verification features may not work."
+}
+
+# Info: AWS credentials configured
+info contains msg if {
+    aws.credentials_configured
+    msg := sprintf("AWS credentials configured (account: %s)", [aws.account_id])
+}
+
+# Info: AWS IAM role/user info
+info contains msg if {
+    aws.credentials_configured
+    aws.arn != null
+    msg := sprintf("AWS identity: %s", [aws.arn])
+}
