@@ -21,19 +21,19 @@ cloudflare := eff.services.cloudflare
 k8s := eff.kubernetes
 
 # ==========================================================================
-# ngrok Credential Validation (Required for AWS deployments)
+# ngrok Credential Validation (Always required)
 # ==========================================================================
+# ngrok is required for all deployments to expose services externally.
+# K8s disabled state is temporary (dependency conflict being resolved).
 
-# Deny if ngrok auth token is not set (required for all ngrok functionality)
+# Deny if ngrok auth token is not set
 deny contains msg if {
-    k8s.enabled
     not ngrok.auth_token_set
-    msg := "NGROK_AUTH_TOKEN not set. Required for AWS deployments. Get from: https://dashboard.ngrok.com/get-started/your-authtoken"
+    msg := "NGROK_AUTH_TOKEN not set. Required for deployments. Get from: https://dashboard.ngrok.com/get-started/your-authtoken"
 }
 
-# Deny if ngrok API key is not set (required for ngrok operator)
+# Deny if ngrok API key is not set
 deny contains msg if {
-    k8s.enabled
     not ngrok.api_key_set
     msg := "NGROK_API_KEY not set. Required for ngrok operator. Get from: https://dashboard.ngrok.com/api"
 }
@@ -44,7 +44,6 @@ deny contains msg if {
 
 # Warn if Cloudflare token is not set when using custom domains
 warn contains msg if {
-    k8s.enabled
     ngrok.credentials_complete
     not cloudflare.api_token_set
     msg := "CLOUDFLARE_API_TOKEN not set. Custom domains (dask.zndx.org, etc.) will not work without it."
@@ -73,23 +72,21 @@ info contains msg if {
 }
 
 # ==========================================================================
-# AWS Credential Validation
+# AWS Credential Validation (Always required for deployments)
 # ==========================================================================
 
 # Get AWS config from effective input
 aws := eff.aws
 
-# Deny if AWS credentials are not configured (for K8s/AWS deployments)
+# Deny if AWS credentials are not configured
 deny contains msg if {
-    k8s.enabled
     not aws.credentials_configured
     aws.error != null
     msg := sprintf("AWS credentials not configured: %s", [aws.error])
 }
 
-# Deny if S3 access is required but not available
+# Deny if S3 access is not available
 deny contains msg if {
-    k8s.enabled
     aws.credentials_configured
     not aws.permissions.s3_access
     msg := "AWS S3 access not available. Check IAM permissions for s3:ListBuckets"
@@ -97,7 +94,6 @@ deny contains msg if {
 
 # Warn if EC2 describe permission missing (needed for deployment verification)
 warn contains msg if {
-    k8s.enabled
     aws.credentials_configured
     not aws.permissions.ec2_describe
     msg := "AWS EC2 describe permission not available. Some verification features may not work."
