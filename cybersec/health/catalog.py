@@ -543,6 +543,28 @@ INFRA_004 = FailureMode(
     solution_level=AutomationLevel.A,
 )
 
+INFRA_005 = FailureMode(
+    failure_mode_id="INFRA_005",
+    category="infra",
+    name="AWS Credentials Invalid",
+    description="AWS credentials are missing, expired, or blocked by stale environment variables",
+    base_severity=9,   # Critical - AWS deployment impossible
+    base_occurrence=5,  # Common - tokens expire, env vars get stale
+    base_detection=1,   # Very easy - aws sts get-caller-identity
+    symptom="AWS CLI returns InvalidClientTokenId or 'credentials not configured'",
+    cause="Stale env vars, expired session tokens, or missing credentials file",
+    detection_method="aws sts get-caller-identity fails, but --profile default may work",
+    remediation_steps=[
+        "Check for stale env vars: echo $AWS_ACCESS_KEY_ID",
+        "Test with profile: aws sts get-caller-identity --profile default",
+        "If profile works: unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY",
+        "Or add to .envrc.local: export AWS_PROFILE=default",
+        "If profile fails: aws sso login or aws configure",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.B,  # Manual env fix needed
+)
+
 # NiFi failure modes
 NIFI_001 = FailureMode(
     failure_mode_id="NIFI_001",
@@ -654,6 +676,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "INFRA_002": INFRA_002,
     "INFRA_003": INFRA_003,
     "INFRA_004": INFRA_004,
+    "INFRA_005": INFRA_005,
     "NIFI_001": NIFI_001,
     "NIFI_002": NIFI_002,
     "NIFI_003": NIFI_003,
@@ -682,6 +705,7 @@ CATEGORIES: dict[str, list[str]] = {
     # Infrastructure
     "postgres": ["INFRA_001"],
     "system": ["INFRA_004"],     # OS-level: shm, eBPF, nvidia-smi
+    "aws": ["INFRA_005"],        # AWS credentials and IAM
     "data": ["DATA_001"],
 }
 

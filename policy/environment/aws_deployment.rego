@@ -77,11 +77,20 @@ info contains msg if {
 # Get AWS config from input
 aws := input.aws
 
-# Deny if AWS credentials are not configured
+# Deny if AWS credentials are not configured (no remediation available)
 deny contains msg if {
     not aws.credentials_configured
     aws.error != null
+    aws.remediation == null
     msg := sprintf("AWS credentials not configured: %s", [aws.error])
+}
+
+# Deny if AWS credentials are not configured (with remediation guidance)
+deny contains msg if {
+    not aws.credentials_configured
+    aws.error != null
+    aws.remediation != null
+    msg := sprintf("AWS credentials: %s\n\nRemediation:\n%s", [aws.error, aws.remediation])
 }
 
 # Deny if S3 access is not available

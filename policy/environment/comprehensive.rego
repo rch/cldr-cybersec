@@ -160,7 +160,16 @@ deny contains msg if {
 deny contains msg if {
     not aws.credentials_configured
     aws.error != null
+    aws.remediation == null
     msg := sprintf("AWS credentials not configured: %s. Required for AWS deployments.", [aws.error])
+}
+
+# AWS credentials with remediation guidance
+deny contains msg if {
+    not aws.credentials_configured
+    aws.error != null
+    aws.remediation != null
+    msg := sprintf("AWS credentials not configured: %s\n\nRemediation:\n%s", [aws.error, aws.remediation])
 }
 
 # AWS S3 access is required

@@ -5,6 +5,7 @@ Checks for:
 - INFRA_002: MinIO unhealthy
 - INFRA_003: Polaris degraded
 - INFRA_004: macOS Shared Memory Exhaustion
+- INFRA_005: AWS Credentials Invalid
 """
 
 import os
@@ -16,7 +17,7 @@ from typing import Any
 import httpx
 
 from ..models import CheckResult, HealthContext
-from ..catalog import INFRA_001, INFRA_002, INFRA_003, INFRA_004
+from ..catalog import INFRA_001, INFRA_002, INFRA_003, INFRA_004, INFRA_005
 
 
 async def check_postgres(ctx: HealthContext) -> CheckResult:
@@ -244,10 +245,110 @@ async def check_shared_memory(ctx: HealthContext) -> CheckResult:
         return CheckResult.error(f"Failed to check shared memory: {e}", duration_ms=duration)
 
 
+async def check_aws_credentials(ctx: HealthContext) -> CheckResult:
+    """INFRA_005: Check AWS credentials validity.
+
+    Detects:
+    - Missing AWS credentials
+    - Expired session tokens
+    - Stale environment variables blocking valid profile credentials
+    """
+    import json
+    import subprocess
+
+    start = time.monotonic()
+
+    try:
+        # Check if AWS CLI is available
+        which_result = subprocess.run(
+            ["which", "aws"],
+            capture_output=True,
+            timeout=5,
+        )
+        if which_result.returncode != 0:
+            duration = int((time.monotonic() - start) * 1000)
+            return CheckResult.skipped("AWS CLI not installed")
+
+        # Check for environment variables
+        env_key_set = bool(os.environ.get("AWS_ACCESS_KEY_ID"))
+        env_secret_set = bool(os.environ.get("AWS_SECRET_ACCESS_KEY"))
+        creds_file = Path.home() / ".aws" / "credentials"
+        creds_file_exists = creds_file.exists()
+
+        # Try default credential chain
+        identity_proc = subprocess.run(
+            ["aws", "sts", "get-caller-identity", "--output", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        duration = int((time.monotonic() - start) * 1000)
+
+        if identity_proc.returncode == 0:
+            identity = json.loads(identity_proc.stdout)
+            result = CheckResult.ok(
+                f"AWS credentials OK (account: {identity.get('Account')}, "
+                f"identity: {identity.get('Arn', 'unknown')})"
+            )
+            result.duration_ms = duration
+            return result
+
+        # Default chain failed - check if stale env vars are the issue
+        if env_key_set and env_secret_set and creds_file_exists:
+            # Try with explicit default profile
+            profile_proc = subprocess.run(
+                ["aws", "sts", "get-caller-identity", "--profile", "default", "--output", "json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            if profile_proc.returncode == 0:
+                # Stale env vars are blocking valid profile credentials
+                rpn = INFRA_005.calculate_rpn()
+                return CheckResult.critical(
+                    "Stale AWS environment variables blocking valid profile credentials",
+                    failure_mode_id="INFRA_005",
+                    rpn=rpn,
+                    remediation=(
+                        "Fix with one of:\n"
+                        "  1. unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY\n"
+                        "  2. export AWS_PROFILE=default\n"
+                        "  3. Add 'export AWS_PROFILE=default' to .envrc.local"
+                    ),
+                    duration_ms=duration,
+                )
+
+        # Credentials truly invalid
+        error_msg = identity_proc.stderr.strip()
+        rpn = INFRA_005.calculate_rpn()
+        return CheckResult.critical(
+            f"AWS credentials invalid: {error_msg[:100]}",
+            failure_mode_id="INFRA_005",
+            rpn=rpn,
+            remediation=(
+                "Configure AWS credentials:\n"
+                "  1. aws configure (create new credentials)\n"
+                "  2. aws sso login (if using SSO)\n"
+                "  3. Check ~/.aws/credentials file"
+            ),
+            duration_ms=duration,
+        )
+
+    except subprocess.TimeoutExpired:
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.error("AWS CLI timeout - check network", duration_ms=duration)
+    except Exception as e:
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.error(f"Failed to check AWS credentials: {e}", duration_ms=duration)
+
+
 # Registry of all infra checks
 CHECKS: dict[str, Any] = {
     "INFRA_001": check_postgres,
     "INFRA_002": check_minio,
     "INFRA_003": check_polaris,
     "INFRA_004": check_shared_memory,
+    "INFRA_005": check_aws_credentials,
 }

@@ -311,64 +311,134 @@ def _check_aws_credentials() -> dict[str, Any]:
 
     Validates that AWS credentials are configured and have the required
     permissions for AWS deployments (S3, EC2, IAM operations).
+
+    Handles common credential chain issues:
+    - Stale environment variables overriding valid profile credentials
+    - Missing AWS_PROFILE when credentials file has named profiles
     """
     import json
+    import os
     import subprocess
+    from pathlib import Path
 
     result = {
         "credentials_configured": False,
         "caller_identity": None,
         "account_id": None,
         "arn": None,
+        "credential_source": None,
         "permissions": {
             "s3_access": False,
             "ec2_describe": False,
         },
         "error": None,
+        "remediation": None,
     }
 
-    # Check if AWS CLI is available
-    try:
-        # Get caller identity to verify credentials
-        identity_proc = subprocess.run(
-            ["aws", "sts", "get-caller-identity", "--output", "json"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+    # Detect credential sources
+    env_key_set = bool(os.environ.get("AWS_ACCESS_KEY_ID"))
+    env_secret_set = bool(os.environ.get("AWS_SECRET_ACCESS_KEY"))
+    env_profile = os.environ.get("AWS_PROFILE")
+    creds_file = Path.home() / ".aws" / "credentials"
+    creds_file_exists = creds_file.exists()
 
-        if identity_proc.returncode == 0:
-            identity = json.loads(identity_proc.stdout)
+    def try_get_identity(extra_args: list[str] | None = None) -> tuple[bool, dict | None, str | None]:
+        """Try to get caller identity with optional extra args."""
+        cmd = ["aws", "sts", "get-caller-identity", "--output", "json"]
+        if extra_args:
+            cmd.extend(extra_args)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if proc.returncode == 0:
+                return True, json.loads(proc.stdout), None
+            return False, None, proc.stderr.strip()
+        except Exception as e:
+            return False, None, str(e)
+
+    def check_permissions(extra_args: list[str] | None = None) -> dict[str, bool]:
+        """Check S3 and EC2 permissions."""
+        perms = {"s3_access": False, "ec2_describe": False}
+
+        s3_cmd = ["aws", "s3", "ls"]
+        if extra_args:
+            s3_cmd.extend(extra_args)
+        try:
+            s3_proc = subprocess.run(s3_cmd, capture_output=True, text=True, timeout=15)
+            perms["s3_access"] = s3_proc.returncode == 0
+        except Exception:
+            pass
+
+        ec2_cmd = ["aws", "ec2", "describe-regions", "--output", "json"]
+        if extra_args:
+            ec2_cmd.extend(extra_args)
+        try:
+            ec2_proc = subprocess.run(ec2_cmd, capture_output=True, text=True, timeout=15)
+            perms["ec2_describe"] = ec2_proc.returncode == 0
+        except Exception:
+            pass
+
+        return perms
+
+    try:
+        # First, try default credential chain
+        success, identity, error = try_get_identity()
+
+        if success and identity:
             result["credentials_configured"] = True
             result["account_id"] = identity.get("Account")
             result["arn"] = identity.get("Arn")
             result["caller_identity"] = identity.get("UserId")
+            result["credential_source"] = "env_vars" if env_key_set else ("profile" if env_profile else "default")
+            result["permissions"] = check_permissions()
+            return result
 
-            # Check S3 access by listing buckets (minimal permission test)
-            s3_proc = subprocess.run(
-                ["aws", "s3", "ls", "--output", "json"],
-                capture_output=True,
-                text=True,
-                timeout=15,
+        # Default chain failed - check if stale env vars are the issue
+        if env_key_set and env_secret_set and creds_file_exists:
+            # Try with explicit default profile (bypasses env vars)
+            success_profile, identity_profile, _ = try_get_identity(["--profile", "default"])
+
+            if success_profile and identity_profile:
+                # Stale env vars are blocking valid profile credentials
+                result["credentials_configured"] = False
+                result["error"] = "Stale AWS environment variables blocking valid profile credentials"
+                result["remediation"] = (
+                    "Stale AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY environment variables are set but invalid. "
+                    "Your ~/.aws/credentials file has valid credentials. Fix with one of:\n"
+                    "  1. unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY\n"
+                    "  2. export AWS_PROFILE=default\n"
+                    "  3. Add 'export AWS_PROFILE=default' to .envrc.local"
+                )
+                # Still capture what would work for reference
+                result["account_id"] = identity_profile.get("Account")
+                result["arn"] = identity_profile.get("Arn")
+                result["caller_identity"] = identity_profile.get("UserId")
+                result["credential_source"] = "profile_blocked_by_env"
+                return result
+
+        # No valid credentials found anywhere
+        if not creds_file_exists:
+            result["error"] = "AWS credentials not configured"
+            result["remediation"] = (
+                "No AWS credentials found. Configure with one of:\n"
+                "  1. aws configure (creates ~/.aws/credentials)\n"
+                "  2. aws sso configure (for SSO-based auth)\n"
+                "  3. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables"
             )
-            result["permissions"]["s3_access"] = s3_proc.returncode == 0
-
-            # Check EC2 describe (for deployment verification)
-            ec2_proc = subprocess.run(
-                ["aws", "ec2", "describe-regions", "--output", "json"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            result["permissions"]["ec2_describe"] = ec2_proc.returncode == 0
-
         else:
-            result["error"] = identity_proc.stderr.strip() or "AWS credentials not configured"
+            result["error"] = error or "AWS credentials invalid or expired"
+            result["remediation"] = (
+                "AWS credentials exist but are invalid. Try:\n"
+                "  1. aws sts get-caller-identity --profile default (test profile)\n"
+                "  2. aws sso login (if using SSO)\n"
+                "  3. aws configure (update credentials)"
+            )
 
     except FileNotFoundError:
         result["error"] = "AWS CLI not installed"
+        result["remediation"] = "Install AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
     except subprocess.TimeoutExpired:
         result["error"] = "AWS CLI timeout - check network connectivity"
+        result["remediation"] = "Check network connectivity and try again"
     except json.JSONDecodeError as e:
         result["error"] = f"Failed to parse AWS response: {e}"
     except Exception as e:
