@@ -10,6 +10,7 @@
 - name: Install RKE2 agent
   environment:
     INSTALL_RKE2_CHANNEL: "{{ rke2_channel }}"
+    INSTALL_RKE2_VERSION: "{{ rke2_version }}"
     INSTALL_RKE2_TYPE: agent
   command: /tmp/rke2-install.sh
   args:

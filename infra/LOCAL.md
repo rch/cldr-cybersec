@@ -240,6 +240,43 @@ sudo iptables -L -n | grep 6443
 
 ---
 
+## YuniKorn Scheduler (Optional)
+
+[Apache YuniKorn](https://yunikorn.apache.org/) is a gang-scheduling capable batch scheduler for Kubernetes. When enabled, Dask pods are scheduled through YuniKorn instead of the default Kubernetes scheduler.
+
+### Benefits
+
+- **Gang scheduling**: Ensures all workers for a job start together
+- **Queue management**: Fair sharing and resource quotas across workloads
+- **Preemption**: Priority-based scheduling for mixed workloads
+
+### Enabling YuniKorn
+
+```bash
+# Enable with K8s stack
+ENABLE_K8S=true ENABLE_YUNIKORN=true devenv up
+
+# Verify YuniKorn is running
+kubectl get pods -n yunikorn
+# Expected: yunikorn-scheduler-xxx Running
+
+# Verify Dask uses YuniKorn
+kubectl get daskcluster cybersec-dask -n dask -o jsonpath='{.spec.worker.spec.schedulerName}'
+# Expected: yunikorn
+```
+
+### YuniKorn Web UI
+
+YuniKorn provides a web UI for queue management (not exposed by default):
+
+```bash
+# Port-forward to access YuniKorn UI
+kubectl port-forward svc/yunikorn-service -n yunikorn 9889:9889
+# Access at http://localhost:9889
+```
+
+---
+
 ## Common Configuration
 
 ### Key Files
@@ -260,6 +297,7 @@ sudo iptables -L -n | grep 6443
 | `ENABLE_K8S` | Master switch for K8s stack | `true` |
 | `CYBERSEC_K8S_TARGET` | Target type (`k3d`, `rke2`, `auto`, `none`) | `rke2` |
 | `KUBECONFIG` | Path to kubeconfig file | `/etc/rancher/rke2/rke2.yaml` |
+| `ENABLE_YUNIKORN` | Enable YuniKorn scheduler for Dask | `true` |
 
 ### Service Ports
 

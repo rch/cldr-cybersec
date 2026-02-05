@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dask
+---
+apiVersion: kubernetes.dask.org/v1
+kind: DaskCluster
+metadata:
+  name: cybersec-dask
+  namespace: dask
+spec:
+  scheduler:
+    service:
+      type: NodePort
+      selector:
+        dask.org/cluster-name: cybersec-dask
+        dask.org/component: scheduler
+      ports:
+        - name: tcp-comm
+          port: 8786
+          targetPort: "tcp-comm"
+          nodePort: 30086
+        - name: tcp-dashboard
+          port: 8787
+          targetPort: "tcp-dashboard"
+          nodePort: 30087
+    spec:
+      schedulerName: yunikorn
+      restartPolicy: Always
+      containers:
+        - name: scheduler
+          image: ghcr.io/dask/dask:2024.8.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - dask-scheduler
+          ports:
+            - containerPort: 8786
+              name: tcp-comm
+            - containerPort: 8787
+              name: tcp-dashboard
+          readinessProbe:
+            tcpSocket:
+              port: "tcp-comm"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: "tcp-comm"
+            initialDelaySeconds: 15
+            periodSeconds: 30
+  worker:
+    replicas: 1
+    spec:
+      schedulerName: yunikorn
+      restartPolicy: Always
+      containers:
+        - name: worker
+          image: ghcr.io/dask/dask:2024.8.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - dask-worker
+            - --nthreads
+            - "2"
+            - --memory-limit
+            - 2Gi
+          env:
+            - name: DASK_DASHBOARD_ADDRESS
+              value: ":8787"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 256Mi
+            limits:
+              cpu: "500m"
+              memory: 512Mi

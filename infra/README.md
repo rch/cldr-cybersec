@@ -70,6 +70,7 @@ ENABLE_K8S=true CYBERSEC_K8S_TARGET=rke2 KUBECONFIG=/etc/rancher/rke2/rke2.yaml 
 | `ENABLE_K8S` | `true`/`false` | `false` | Enable Kubernetes stack |
 | `CYBERSEC_K8S_TARGET` | `k3d`/`rke2`/`auto`/`none` | `auto` | Target cluster type |
 | `KUBECONFIG` | path | varies | Kubeconfig file path |
+| `ENABLE_YUNIKORN` | `true`/`false` | `false` | Enable YuniKorn scheduler for gang scheduling |
 
 ### Target Detection Logic
 

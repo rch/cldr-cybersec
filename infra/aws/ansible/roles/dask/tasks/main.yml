@@ -55,6 +55,38 @@
         requirements.txt: "{{ dask_requirements_content }}"
   when: dask_install_requirements | default(true)
 
+- name: Add YuniKorn Helm repository
+  kubernetes.core.helm_repository:
+    name: yunikorn
+    repo_url: https://apache.github.io/yunikorn-release
+  when: dask_enable_yunikorn | default(false)
+
+- name: Install YuniKorn scheduler
+  kubernetes.core.helm:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    name: yunikorn
+    chart_ref: yunikorn/yunikorn
+    chart_version: "{{ dask_yunikorn_version }}"
+    release_namespace: yunikorn
+    create_namespace: true
+    wait: true
+    wait_timeout: "5m"
+  when: dask_enable_yunikorn | default(false)
+
+- name: Wait for YuniKorn scheduler to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Deployment
+    namespace: yunikorn
+    name: yunikorn-scheduler
+  register: yunikorn_status
+  until: >
+    yunikorn_status.resources | length > 0 and
+    yunikorn_status.resources[0].status.readyReplicas | default(0) > 0
+  retries: 30
+  delay: 10
+  when: dask_enable_yunikorn | default(false)
+
 - name: Add Dask Helm repository
   kubernetes.core.helm_repository:
     name: dask

@@ -7,6 +7,9 @@ spec:
   worker:
     replicas: {{ dask_worker_replicas }}
     spec:
+{% if dask_enable_yunikorn | default(false) %}
+      schedulerName: yunikorn
+{% endif %}
       containers:
         - name: worker
           image: "{{ dask_image }}"
@@ -69,6 +72,9 @@ spec:
 {% endif %}
   scheduler:
     spec:
+{% if dask_enable_yunikorn | default(false) %}
+      schedulerName: yunikorn
+{% endif %}
       containers:
         - name: scheduler
           image: "{{ dask_image }}"

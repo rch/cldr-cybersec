@@ -29,3 +29,7 @@ dask_dashboard_nodeport: true
 # Requirements for Dask workers (must match JupyterHub)
 dask_install_requirements: true
 dask_requirements_configmap: "dask-requirements"
+
+# YuniKorn scheduler (optional)
+dask_enable_yunikorn: false
+dask_yunikorn_version: "1.8.0"

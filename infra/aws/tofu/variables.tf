@@ -55,7 +55,7 @@ variable "public_subnet_cidrs" {
 variable "rke2_version" {
   description = "RKE2 version to install"
   type        = string
-  default     = "v1.29.0+rke2r1"
+  default     = "v1.31.0+rke2r1"
 }
 
 variable "control_plane_count" {

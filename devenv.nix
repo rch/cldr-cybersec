@@ -1185,6 +1185,7 @@ apiVersion: k3d.io/v1alpha5
 kind: Simple
 metadata:
   name: $CLUSTER_NAME
+image: rancher/k3s:v1.31.6-k3s1
 servers: 1
 agents: 0
 options:
@@ -1328,6 +1329,82 @@ EOF
       };
     };
 
+    yunikorn = {
+      exec = ''
+        set -euo pipefail
+
+        if [ "''${ENABLE_YUNIKORN:-false}" != "true" ]; then
+          echo "YuniKorn disabled (set ENABLE_YUNIKORN=true to enable)"
+          exit 0
+        fi
+        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
+          echo "K8s stack disabled"
+          exit 0
+        fi
+
+        # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          KUBECONFIG_PATH="$KUBECONFIG"
+        else
+          KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        fi
+        export KUBECONFIG="$KUBECONFIG_PATH"
+
+        if [ ! -f "$KUBECONFIG_PATH" ]; then
+          echo "Waiting for kubeconfig at $KUBECONFIG_PATH..."
+          for _ in $(seq 1 60); do
+            if [ -f "$KUBECONFIG_PATH" ]; then
+              break
+            fi
+            sleep 2
+          done
+        fi
+
+        if [ ! -f "$KUBECONFIG_PATH" ]; then
+          echo "kubeconfig not found at $KUBECONFIG_PATH"
+          exit 1
+        fi
+
+        echo "Waiting for Kubernetes control plane before installing YuniKorn..."
+        for _ in $(seq 1 60); do
+          if kubectl get namespace kube-system >/dev/null 2>&1; then
+            break
+          fi
+          sleep 2
+        done
+
+        helm repo add yunikorn https://apache.github.io/yunikorn-release >/dev/null 2>&1 || true
+        helm repo update yunikorn >/dev/null 2>&1 || true
+
+        echo "Installing/Updating YuniKorn scheduler via Helm..."
+        helm upgrade --install yunikorn yunikorn/yunikorn \
+          --namespace yunikorn \
+          --create-namespace \
+          --version 1.8.0 \
+          --wait \
+          --timeout 5m
+
+        kubectl wait --for=condition=Available deployment/yunikorn-scheduler -n yunikorn --timeout=120s
+
+        echo "YuniKorn scheduler installed"
+
+        while true; do
+          if ! kubectl get pods -n yunikorn >/dev/null 2>&1; then
+            echo "Unable to query YuniKorn pods; exiting for restart"
+            exit 1
+          fi
+          sleep 30
+        done
+      '';
+      process-compose = {
+        depends_on = {
+          dask-operator = {
+            condition = "process_started";
+          };
+        };
+      };
+    };
+
     dask-cluster = {
       exec = ''
         set -euo pipefail
@@ -1338,7 +1415,11 @@ EOF
           exit 0
         fi
 
-        MANIFEST="$PWD/infra/dask/dask-cluster.yaml"
+        if [ "''${ENABLE_YUNIKORN:-false}" = "true" ]; then
+          MANIFEST="$PWD/infra/dask/dask-cluster-yunikorn.yaml"
+        else
+          MANIFEST="$PWD/infra/dask/dask-cluster.yaml"
+        fi
         if [ ! -f "$MANIFEST" ]; then
           echo "Dask manifest not found at $MANIFEST"
           exit 1
