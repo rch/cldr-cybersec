@@ -1,5 +1,6 @@
 # RKE2 agent configuration
-server: https://{{ k8s_api_endpoint }}:9345
+# Connect directly to control plane for joining (not via load balancer)
+server: https://{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}:9345
 token: {{ hostvars[groups['control_plane'][0]]['rke2_cluster_token'] | default(rke2_token) }}
 
 node-label:
