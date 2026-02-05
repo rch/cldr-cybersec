@@ -14,11 +14,10 @@ package environment.aws_deployment
 
 import rego.v1
 
-# Use effective config (merged static + runtime)
-eff := input.effective
-ngrok := eff.services.ngrok
-cloudflare := eff.services.cloudflare
-k8s := eff.kubernetes
+# Use input directly (environment.json places data at root level)
+ngrok := input.services.ngrok
+cloudflare := input.services.cloudflare
+k8s := input.kubernetes
 
 # ==========================================================================
 # ngrok Credential Validation (Always required)
@@ -75,8 +74,8 @@ info contains msg if {
 # AWS Credential Validation (Always required for deployments)
 # ==========================================================================
 
-# Get AWS config from effective input
-aws := eff.aws
+# Get AWS config from input
+aws := input.aws
 
 # Deny if AWS credentials are not configured
 deny contains msg if {

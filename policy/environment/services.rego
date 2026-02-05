@@ -12,9 +12,9 @@ package environment.services
 
 import rego.v1
 
-# Use effective config (merged static + runtime)
-eff := input.effective
-svc := eff.services
+# Use input directly (environment.json places data at root level)
+svc := input.services
+flink := input.flink
 
 # Deny if PostgreSQL is not reachable
 deny contains msg if {
@@ -37,7 +37,7 @@ deny contains msg if {
 
 # Deny if Flink JobManager is not reachable
 deny contains msg if {
-    eff.flink.home_exists
+    flink.home_exists
     not svc.flink.jobmanager_healthy
     msg := "Flink JobManager not reachable. Run: devenv tasks run restart:clean"
 }

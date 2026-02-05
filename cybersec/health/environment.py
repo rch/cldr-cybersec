@@ -169,6 +169,10 @@ async def gather_environment_config() -> dict[str, Any]:
             "http://localhost:5050/health",
             bootstrap_config.iceberg_browser_port or 5050
         ),
+        # Additional observability services
+        "nifi": await _check_http("http://localhost:8450/nifi-api/system-diagnostics", 8450),
+        "otel_collector": await _check_otel_collector(),
+        "prometheus": await _check_http("http://localhost:9090/-/healthy", 9090),
     }
 
     # Kubernetes configuration
@@ -180,6 +184,12 @@ async def gather_environment_config() -> dict[str, Any]:
 
     # AWS credentials and IAM permissions
     config["aws"] = _check_aws_credentials()
+
+    # Deployment tools availability
+    config["tools"] = _check_deployment_tools()
+
+    # Python packages
+    config["python"]["packages"] = _check_python_packages()
 
     return config
 
@@ -365,6 +375,125 @@ def _check_aws_credentials() -> dict[str, Any]:
         result["error"] = str(e)
 
     return result
+
+
+async def _check_otel_collector() -> dict[str, Any]:
+    """Check OpenTelemetry Collector health."""
+    result = {"healthy": False, "grpc_port": 4317, "http_port": 4318, "prometheus_port": 8889}
+    try:
+        # Check the prometheus metrics endpoint (most reliable)
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get("http://localhost:8889/metrics")
+            result["healthy"] = resp.status_code == 200
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def _check_deployment_tools() -> dict[str, Any]:
+    """Check availability of deployment tools (CLI binaries)."""
+    import shutil
+
+    tools = {
+        # Local K8s tools
+        "kubectl": shutil.which("kubectl") is not None,
+        "helm": shutil.which("helm") is not None,
+        "k3d": shutil.which("k3d") is not None,
+        # AWS deployment tools
+        "tofu": shutil.which("tofu") is not None,
+        "terraform": shutil.which("terraform") is not None,
+        "ansible": shutil.which("ansible") is not None,
+        "ansible_playbook": shutil.which("ansible-playbook") is not None,
+        "aws_cli": shutil.which("aws") is not None,
+        # Validation tools
+        "conftest": shutil.which("conftest") is not None,
+    }
+
+    # Check for SSH key (required for AWS deployments)
+    ssh_key_paths = [
+        Path.home() / ".ssh" / "cybersec-dask.pem",
+        Path.home() / ".ssh" / "id_rsa",
+        Path.home() / ".ssh" / "id_ed25519",
+    ]
+    tools["ssh_key_exists"] = any(p.exists() for p in ssh_key_paths)
+    tools["ssh_key_path"] = next((str(p) for p in ssh_key_paths if p.exists()), None)
+
+    # Check for Ansible inventory (indicates AWS deployment is configured)
+    ansible_inventory = Path("infra/aws/ansible/inventory/hosts")
+    tools["ansible_inventory_exists"] = ansible_inventory.exists()
+
+    # Check for Tofu state (indicates infrastructure exists)
+    tofu_state = Path("infra/aws/tofu/terraform.tfstate")
+    tools["tofu_state_exists"] = tofu_state.exists()
+
+    # Infrastructure-as-code tool (prefer tofu over terraform)
+    tools["iac_tool"] = "tofu" if tools["tofu"] else ("terraform" if tools["terraform"] else None)
+
+    return tools
+
+
+def _check_python_packages() -> dict[str, Any]:
+    """Check required Python packages are installed."""
+    packages = {
+        "apache_flink": False,
+        "pyiceberg": False,
+        "httpx": False,
+        "dask": False,
+        "distributed": False,
+        "kubernetes": False,
+    }
+
+    # Check each package
+    try:
+        import pyflink
+        packages["apache_flink"] = True
+    except ImportError:
+        pass
+
+    try:
+        import pyiceberg
+        packages["pyiceberg"] = True
+    except ImportError:
+        pass
+
+    try:
+        import httpx
+        packages["httpx"] = True
+    except ImportError:
+        pass
+
+    try:
+        import dask
+        packages["dask"] = True
+    except ImportError:
+        pass
+
+    try:
+        import distributed
+        packages["distributed"] = True
+    except ImportError:
+        pass
+
+    try:
+        import kubernetes
+        packages["kubernetes"] = True
+    except ImportError:
+        pass
+
+    # Core packages required for local Flink stack
+    packages["flink_stack_complete"] = all([
+        packages["apache_flink"],
+        packages["pyiceberg"],
+        packages["httpx"],
+    ])
+
+    # Packages required for Dask integration
+    packages["dask_stack_complete"] = all([
+        packages["dask"],
+        packages["distributed"],
+    ])
+
+    return packages
 
 
 async def write_environment_config(output_path: Path | None = None) -> Path:
