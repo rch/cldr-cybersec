@@ -12,6 +12,14 @@ The cybersec toolkit supports three Kubernetes deployment modes:
 | **Local RKE2** | Linux workstation | System RKE2 | [LOCAL.md](LOCAL.md#rke2-on-linux) |
 | **AWS RKE2** | Production/scale testing | OpenTofu + Ansible | [aws/README.md](aws/README.md) |
 
+### AWS Stack Components
+
+The AWS deployment includes:
+- **Dask**: Distributed computing with auto-scaling workers
+- **JupyterHub**: Interactive notebooks with Dask integration
+- **ngrok**: HTTPS ingress with GitHub/Google OAuth
+- **S3**: Data lake storage for OTel telemetry
+
 ## Architecture
 
 ```mermaid
@@ -60,6 +68,24 @@ ENABLE_K8S=true CYBERSEC_K8S_TARGET=k3d devenv up
 # Explicit RKE2 (requires existing cluster)
 ENABLE_K8S=true CYBERSEC_K8S_TARGET=rke2 KUBECONFIG=/etc/rancher/rke2/rke2.yaml devenv up
 ```
+
+### AWS Deployment (Production)
+
+```bash
+# Deploy infrastructure with OpenTofu
+cd infra/aws/tofu && tofu apply
+
+# Deploy Kubernetes workloads with devenv tasks
+export AWS_PROFILE=default
+export NGROK_AUTH_TOKEN=<token>
+export NGROK_ALLOWED_EMAIL=<email>
+
+devenv tasks run aws:deploy:dask        # Dask operator + cluster
+devenv tasks run aws:deploy:ngrok       # ngrok with OAuth
+devenv tasks run aws:deploy:jupyterhub  # JupyterHub with S3 access
+```
+
+See [aws/README.md](aws/README.md) for detailed deployment guide.
 
 ## Configuration
 

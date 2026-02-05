@@ -1,15 +1,17 @@
 # AWS Infrastructure for Dask on RKE2
 
-This directory contains OpenTofu and Ansible automation for deploying a Dask cluster on RKE2 (Rancher Kubernetes Engine 2) in a soft air-gapped AWS environment.
+This directory contains OpenTofu and Ansible automation for deploying a Dask cluster with JupyterHub on RKE2 (Rancher Kubernetes Engine 2) in a soft air-gapped AWS environment.
 
 ## Overview
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| Infrastructure | OpenTofu | VPC, EC2, IAM, Security Groups |
-| Configuration | Ansible | RKE2 installation, Dask deployment |
+| Infrastructure | OpenTofu | VPC, EC2, IAM, Security Groups, S3 |
+| Configuration | Ansible | RKE2 installation, Dask, JupyterHub |
 | Kubernetes | RKE2 | Production-grade K8s distribution |
 | Compute | Dask | Distributed Python computing |
+| Notebooks | JupyterHub | Interactive notebook environment |
+| External Access | ngrok | HTTPS ingress with OAuth |
 | Validation | Conftest | Policy-based infrastructure checks |
 
 ## Architecture
@@ -110,7 +112,26 @@ cd ../ansible
 ansible-playbook playbooks/site.yml
 ```
 
-### 4. Access the Cluster
+### 4. Deploy JupyterHub with External Access (Optional)
+
+Use devenv tasks for streamlined deployment:
+
+```bash
+# Set required environment variables
+export AWS_PROFILE=default  # AWS credentials for S3 access
+export NGROK_AUTH_TOKEN=<your-token>
+export NGROK_ALLOWED_EMAIL=<your-email@domain.com>
+
+# Deploy ngrok operator (one-time)
+devenv tasks run aws:deploy:ngrok
+
+# Deploy JupyterHub
+devenv tasks run aws:deploy:jupyterhub
+```
+
+JupyterHub will be accessible at the configured ngrok domain (e.g., `https://jupyter.yourdomain.org`).
+
+### 5. Access the Cluster
 
 ```bash
 # SSH to bastion
@@ -181,6 +202,56 @@ ssh -L 8787:simple-scheduler.dask.svc.cluster.local:8787 \
 cd tofu
 tofu destroy
 ```
+
+## JupyterHub + Dask Integration
+
+### Version Compatibility (Critical)
+
+Dask distributed computing requires **exact version matching** between JupyterHub clients and Dask workers for serialization to work. The automation ensures this by:
+
+1. **Same Docker Image**: JupyterHub singleuser pods use `ghcr.io/dask/dask:latest` - the exact same image as Dask workers
+2. **JupyterHub Installed at Startup**: The singleuser container installs `jupyterhub` via pip at startup
+3. **Pinned Package Versions**: Core packages are pinned in `roles/dask/files/requirements-dask.txt`:
+   ```
+   dask[complete]==2025.2.0
+   distributed==2025.2.0
+   pandas==2.2.3
+   numpy==2.1.3
+   pyarrow==18.1.0
+   ```
+
+### AWS Credentials for S3 Access
+
+JupyterHub notebooks need AWS credentials to access S3. The deployment:
+
+1. Reads credentials from your AWS profile (`AWS_PROFILE` env var)
+2. Creates a Kubernetes Secret (`aws-credentials`) in the jupyterhub namespace
+3. Injects credentials into singleuser pods via `valueFrom.secretKeyRef`
+
+```bash
+# Credentials are pulled from your AWS profile automatically
+devenv tasks run aws:deploy:jupyterhub
+```
+
+### External Access via ngrok
+
+For HTTPS access with GitHub OAuth:
+
+1. **ngrok Operator**: Deployed to `ngrok-system` namespace
+2. **Traffic Policy**: OAuth enforced via `NgrokTrafficPolicy` CRD
+3. **Ingress**: Routes traffic to JupyterHub service
+
+Configure in `ansible/group_vars/all.yml`:
+```yaml
+ngrok_domain: "jupyter.yourdomain.org"
+ngrok_allowed_email: "user@company.com"
+```
+
+### Sample Notebooks
+
+Notebooks from `build/notebooks/` are deployed to JupyterHub via ConfigMap:
+- `Dask_S3_Validation.ipynb` - Validates out-of-core S3 processing with 10M spans
+- `OTel_Telemetry_Explorer.ipynb` - Interactive OTel data exploration
 
 ## Security Notes
 
@@ -286,6 +357,23 @@ PASS - build/environment.json - environment/kubernetes
 # - Using existing kubeconfig: /etc/rancher/rke2/rke2.yaml (cluster type: rke2)
 ```
 
+## Devenv Tasks
+
+Streamlined deployment via devenv:
+
+```bash
+# Show available AWS tasks
+devenv tasks list | grep aws
+
+# Deploy individual components
+devenv tasks run aws:deploy:dask        # Dask operator + cluster
+devenv tasks run aws:deploy:ngrok       # ngrok operator with OAuth
+devenv tasks run aws:deploy:jupyterhub  # JupyterHub with notebooks
+
+# Full stack
+devenv tasks run aws:apply              # Apply all configuration
+```
+
 ## Directory Structure
 
 ```
@@ -298,18 +386,28 @@ aws/
 │   ├── vpc.tf          # VPC, subnets, NAT gateway
 │   ├── ec2.tf          # EC2 instances (bastion, control plane, workers)
 │   ├── iam.tf          # IAM roles and policies
+│   ├── s3.tf           # S3 bucket for data storage
 │   ├── security.tf     # Security groups
 │   └── terraform.tfvars.example
 └── ansible/
     ├── playbooks/
-    │   └── site.yml    # Main playbook
+    │   ├── site.yml        # Main playbook (RKE2 + Dask)
+    │   ├── dask-only.yml   # Dask operator only
+    │   └── jupyterhub.yml  # JupyterHub deployment
     ├── roles/
-    │   ├── rke2/       # RKE2 installation
-    │   └── dask/       # Dask operator and cluster
+    │   ├── rke2/           # RKE2 installation
+    │   ├── dask/           # Dask operator and cluster
+    │   │   └── files/
+    │   │       └── requirements-dask.txt  # Pinned package versions
+    │   ├── jupyterhub/     # JupyterHub with Dask integration
+    │   │   ├── defaults/main.yml
+    │   │   ├── tasks/main.yml
+    │   │   └── templates/jupyterhub-values.yaml.j2
+    │   └── ngrok/          # ngrok operator for external access
     ├── inventory/
-    │   └── hosts       # Generated from tofu output
+    │   └── hosts           # Generated from tofu output
     └── group_vars/
-        └── all.yml     # Cluster-wide variables
+        └── all.yml         # Cluster-wide variables
 
 ## Integration with Local Development
 

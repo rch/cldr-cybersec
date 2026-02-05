@@ -8,10 +8,13 @@ ngrok_operator_version: "0.21.1"
 ngrok_namespace: ngrok-system
 
 # OAuth configuration
-ngrok_oauth_enabled: false  # Set to true to enable Google OAuth
+ngrok_oauth_enabled: true  # Enable OAuth authentication
+ngrok_oauth_provider: github  # Options: github, google
 ngrok_allowed_email: "{{ lookup('env', 'NGROK_ALLOWED_EMAIL') | default('') }}"
-ngrok_session_duration: 3600  # 1 hour in seconds
-ngrok_idle_timeout: 1800      # 30 minutes in seconds
+ngrok_github_orgs: []  # List of allowed GitHub orgs, e.g., ['myorg']
+ngrok_github_users: "{{ lookup('env', 'NGROK_ALLOWED_GITHUB_USERS') | default('') }}"  # Comma-separated usernames
+ngrok_session_duration: 86400  # 24 hours in seconds
+ngrok_idle_timeout: 3600       # 1 hour in seconds
 
 # ngrok credentials (should be set via environment or vault)
 ngrok_authtoken: "{{ lookup('env', 'NGROK_AUTH_TOKEN') | default(lookup('env', 'NGROK_AUTHTOKEN'), true) }}"
@@ -43,4 +46,4 @@ jupyterhub_service_namespace: jupyterhub
 jupyterhub_service_port: 80
 
 # Traffic policy name
-ngrok_oauth_policy_name: google-oauth-policy
+ngrok_oauth_policy_name: oauth-policy

@@ -1,12 +1,13 @@
-# Core Dask
+# Core Dask - pinned for serialization compatibility
 dask[complete]==2025.2.0
 distributed==2025.2.0
-cloudpickle>=3.0.0
+cloudpickle==3.1.2
 
-# Data Processing
-pandas>=2.0.0
-numpy>=2.0.0
-pyarrow>=15.0.0
+# Data Processing - MUST be pinned to exact versions for Dask serialization
+# Mismatched versions between client and workers cause deserialization errors
+pandas==2.2.3
+numpy==2.1.3
+pyarrow==18.1.0
 
 # Visualization (HoloViews stack)
 holoviews>=1.18.0

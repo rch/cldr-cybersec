@@ -535,6 +535,13 @@ EOF
 
     "aws:deploy".exec = ''
       echo "🚀 Deploying full RKE2 cluster with Dask..."
+      export PROJECT_ROOT="$PWD"
+
+      # Override MinIO credentials with real AWS credentials from profile
+      export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id --profile ''${AWS_PROFILE:-default})
+      export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
+      export AWS_SESSION_TOKEN=$(aws configure get aws_session_token --profile ''${AWS_PROFILE:-default} 2>/dev/null || echo "")
+
       cd infra/aws/ansible
       ansible-playbook playbooks/site.yml
       echo ""
@@ -581,6 +588,13 @@ EOF
 
     "aws:deploy:jupyterhub".exec = ''
       echo "🚀 Deploying JupyterHub..."
+      export PROJECT_ROOT="$PWD"
+
+      # Override MinIO credentials with real AWS credentials from profile
+      export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id --profile ''${AWS_PROFILE:-default})
+      export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
+      export AWS_SESSION_TOKEN=$(aws configure get aws_session_token --profile ''${AWS_PROFILE:-default} 2>/dev/null || echo "")
+
       cd infra/aws/ansible
       ansible-playbook playbooks/jupyterhub.yml
       echo "✅ JupyterHub deployed"

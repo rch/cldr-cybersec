@@ -25,6 +25,39 @@
       metadata:
         name: "{{ jupyterhub_namespace }}"
 
+- name: Validate AWS credentials for S3 access
+  ansible.builtin.assert:
+    that:
+      - jupyterhub_aws_access_key_id | length > 0
+      - jupyterhub_aws_secret_access_key | length > 0
+    fail_msg: |
+      AWS credentials are required for JupyterHub S3 access.
+
+      Set these environment variables before deployment:
+        export AWS_ACCESS_KEY_ID=<your-access-key>
+        export AWS_SECRET_ACCESS_KEY=<your-secret-key>
+
+      Or add to .envrc.local:
+        export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id --profile default)
+        export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile default)
+    success_msg: "AWS credentials validated"
+
+- name: Create AWS credentials secret for singleuser pods
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: aws-credentials
+        namespace: "{{ jupyterhub_namespace }}"
+      type: Opaque
+      stringData:
+        AWS_ACCESS_KEY_ID: "{{ jupyterhub_aws_access_key_id }}"
+        AWS_SECRET_ACCESS_KEY: "{{ jupyterhub_aws_secret_access_key }}"
+        AWS_SESSION_TOKEN: "{{ jupyterhub_aws_session_token }}"
+
 - name: Find notebooks to deploy
   ansible.builtin.find:
     paths: "{{ jupyterhub_notebooks_dir }}"
@@ -40,7 +73,7 @@
   loop: "{{ notebook_files.files }}"
   when: jupyterhub_deploy_notebooks | default(false) and notebook_files.files | length > 0
 
-- name: Create notebooks ConfigMap
+- name: Create notebooks ConfigMap with data
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
     state: present
@@ -52,6 +85,20 @@
         namespace: "{{ jupyterhub_namespace }}"
       data: "{{ notebooks_data }}"
   when: jupyterhub_deploy_notebooks | default(false) and notebooks_data is defined
+
+- name: Create empty notebooks ConfigMap (if no notebooks found)
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: sample-notebooks
+        namespace: "{{ jupyterhub_namespace }}"
+      data:
+        README.txt: "Sample notebooks directory - add .ipynb files here"
+  when: jupyterhub_deploy_notebooks | default(false) and notebooks_data is not defined
 
 - name: Add JupyterHub Helm repository
   kubernetes.core.helm_repository:

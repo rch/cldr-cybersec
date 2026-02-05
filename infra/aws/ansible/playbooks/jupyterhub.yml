@@ -25,5 +25,7 @@
 - name: Deploy JupyterHub
   hosts: control_plane[0]
   become: true
+  vars_files:
+    - ../group_vars/all.yml
   roles:
     - jupyterhub

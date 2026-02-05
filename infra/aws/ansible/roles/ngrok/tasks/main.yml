@@ -92,7 +92,9 @@
   retries: 30
   delay: 10
 
-- name: Apply Google OAuth traffic policy to ngrok namespace
+# OAuth traffic policies - ngrok operator requires NgrokTrafficPolicy CRDs
+# The ingress annotation references the policy by name
+- name: Apply OAuth traffic policy to ngrok namespace
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
     state: present
@@ -101,7 +103,7 @@
     _ngrok_policy_namespace: "{{ ngrok_namespace }}"
   when: ngrok_oauth_enabled | bool
 
-- name: Apply Google OAuth traffic policy to Dask namespace
+- name: Apply OAuth traffic policy to Dask namespace
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
     state: present
@@ -110,14 +112,14 @@
     _ngrok_policy_namespace: "{{ dask_dashboard_service_namespace }}"
   when: ngrok_oauth_enabled | bool and ngrok_dask_domain | length > 0
 
-- name: Apply Google OAuth traffic policy to K8s Dashboard namespace
+- name: Apply OAuth traffic policy to JupyterHub namespace
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
     state: present
     definition: "{{ lookup('template', 'oauth-policy.yaml.j2') | from_yaml }}"
   vars:
-    _ngrok_policy_namespace: "{{ k8s_dashboard_service_namespace }}"
-  when: ngrok_oauth_enabled | bool and ngrok_k8s_dashboard_domain | length > 0
+    _ngrok_policy_namespace: "{{ jupyterhub_service_namespace }}"
+  when: ngrok_oauth_enabled | bool and ngrok_jupyterhub_domain | length > 0
 
 # Custom domain setup
 - name: Create ngrok Domain for Dask Dashboard

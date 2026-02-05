@@ -41,6 +41,16 @@ singleuser:
     tag: "{{ jupyterhub_singleuser_image.split(':')[1] }}"
     pullPolicy: IfNotPresent
 
+  # Override command to install jupyterhub before starting
+  # This allows using the exact same Dask image for perfect version compatibility
+  cmd:
+    - /bin/bash
+    - -c
+    - |
+      pip install --quiet jupyterhub jupyterlab notebook && \
+      export PATH="$HOME/.local/bin:$PATH" && \
+      exec jupyterhub-singleuser --ip=0.0.0.0 --port=8888
+
   # Allow access to EC2 instance metadata for IAM role credentials
   cloudMetadata:
     blockWithIptables: false
@@ -55,12 +65,34 @@ singleuser:
 
   # Dask integration environment variables
   extraEnv:
-    DASK_SCHEDULER_ADDRESS: "{{ jupyterhub_dask_scheduler }}"
+    DASK_SCHEDULER_ADDRESS:
+      value: "{{ jupyterhub_dask_scheduler }}"
     # Dask configuration for better defaults
-    DASK_DISTRIBUTED__DASHBOARD__LINK: "http://{{ jupyterhub_dask_scheduler.split(':')[0] }}:8787"
-    # S3 storage configuration (uses IAM role for credentials)
-    OTEL_DATA_PATH: "s3://{{ jupyterhub_s3_bucket }}/otel/"
-    AWS_DEFAULT_REGION: "{{ jupyterhub_aws_region }}"
+    DASK_DISTRIBUTED__DASHBOARD__LINK:
+      value: "http://{{ jupyterhub_dask_scheduler.split(':')[0] }}:8787"
+    # S3 storage configuration
+    OTEL_DATA_PATH:
+      value: "s3://{{ jupyterhub_s3_bucket }}/otel/"
+    AWS_DEFAULT_REGION:
+      value: "{{ jupyterhub_aws_region }}"
+    # AWS credentials from secret (for S3 access)
+    AWS_ACCESS_KEY_ID:
+      valueFrom:
+        secretKeyRef:
+          name: aws-credentials
+          key: AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY:
+      valueFrom:
+        secretKeyRef:
+          name: aws-credentials
+          key: AWS_SECRET_ACCESS_KEY
+{% if jupyterhub_aws_session_token %}
+    AWS_SESSION_TOKEN:
+      valueFrom:
+        secretKeyRef:
+          name: aws-credentials
+          key: AWS_SESSION_TOKEN
+{% endif %}
 
   # Install requirements from ConfigMap at startup
   # This adds ~1-2 min to pod startup but avoids custom image builds

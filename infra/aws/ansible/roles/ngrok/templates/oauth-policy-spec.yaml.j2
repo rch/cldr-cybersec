@@ -1,2 +1,9 @@
-# OAuth disabled for testing - will re-enable later
-policy: {}
+# ngrok Traffic Policy with OAuth authentication
+# Uses ngrok's managed OAuth app for {{ ngrok_oauth_provider }}
+# Note: Pay-as-you-go tier doesn't support custom scopes, using defaults
+policy:
+  on_http_request:
+    - actions:
+        - type: oauth
+          config:
+            provider: {{ ngrok_oauth_provider }}

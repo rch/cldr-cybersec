@@ -6,10 +6,10 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: ngrok-operator
   annotations:
+    k8s.ngrok.com/backend-protocol: "HTTPS"
 {% if ngrok_oauth_enabled | default(false) | bool %}
     k8s.ngrok.com/traffic-policy: "{{ ngrok_oauth_policy_name }}"
 {% endif %}
-    k8s.ngrok.com/backend-protocol: "HTTPS"
 spec:
   ingressClassName: ngrok
   rules:
