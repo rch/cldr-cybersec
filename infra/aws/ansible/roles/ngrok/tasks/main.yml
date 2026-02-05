@@ -194,11 +194,19 @@
     state: present
   when: ngrok_k8s_dashboard_domain | length > 0
 
+- name: Check if kubernetes-dashboard namespace exists
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Namespace
+    name: "{{ k8s_dashboard_service_namespace }}"
+  register: k8s_dashboard_ns
+
 - name: Apply K8s Dashboard ingress
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
     state: present
     definition: "{{ lookup('template', 'k8s-dashboard-ingress.yaml.j2') | from_yaml }}"
+  when: k8s_dashboard_ns.resources | length > 0
 
 - name: Apply Dask Dashboard ingress
   kubernetes.core.k8s:
@@ -217,6 +225,7 @@
     k8s_ingress.resources | length > 0 and
     k8s_ingress.resources[0].status.loadBalancer.ingress | default([]) | length > 0
   retries: 30
+  when: k8s_dashboard_ns.resources | length > 0
   delay: 10
   ignore_errors: true
 

@@ -1,6 +1,7 @@
 # RKE2 agent configuration
 # Connect directly to control plane for joining (not via load balancer)
-server: https://{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}:9345
+# groups['control_plane'][0] is the inventory hostname (IP address)
+server: https://{{ groups['control_plane'][0] }}:9345
 token: {{ hostvars[groups['control_plane'][0]]['rke2_cluster_token'] | default(rke2_token) }}
 
 node-label:

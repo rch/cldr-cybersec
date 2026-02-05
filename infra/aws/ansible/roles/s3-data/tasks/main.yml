@@ -31,6 +31,7 @@
     'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
   when: s3_block_public_access | bool
   changed_when: false
+  ignore_errors: true  # May lack IAM permissions; bucket config set by Tofu
 
 - name: Create folder prefixes
   command: >

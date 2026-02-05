@@ -38,6 +38,8 @@
 - name: Setup S3 data bucket
   hosts: bastion
   become: false
+  vars_files:
+    - ../group_vars/all.yml
   roles:
     - role: s3-data
       tags: [s3, storage]
@@ -51,6 +53,8 @@
 - name: Deploy JupyterHub
   hosts: control_plane[0]
   become: true
+  vars_files:
+    - ../group_vars/all.yml
   roles:
     - role: jupyterhub
       tags: [jupyterhub]
@@ -58,6 +62,8 @@
 - name: Configure ngrok tunnels
   hosts: control_plane[0]
   become: true
+  vars_files:
+    - ../group_vars/all.yml
   roles:
     - role: ngrok
       tags: [ngrok]
