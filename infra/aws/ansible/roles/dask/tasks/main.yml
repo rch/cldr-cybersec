@@ -1,6 +1,39 @@
 ---
 # Dask operator and cluster deployment
 
+- name: Install pip for Python kubernetes library
+  ansible.builtin.dnf:
+    name: python3-pip
+    state: present
+  become: true
+
+- name: Install Python kubernetes library for Ansible
+  ansible.builtin.pip:
+    name: kubernetes
+    state: present
+  become: true
+
+- name: Check if Helm is installed
+  ansible.builtin.command: which helm
+  register: helm_check
+  failed_when: false
+  changed_when: false
+
+- name: Download Helm installer
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    dest: /tmp/get_helm.sh
+    mode: '0700'
+  become: true
+  when: helm_check.rc != 0
+
+- name: Install Helm
+  ansible.builtin.command: /tmp/get_helm.sh
+  become: true
+  when: helm_check.rc != 0
+  environment:
+    HELM_INSTALL_DIR: /usr/local/bin
+
 - name: Read trimmed requirements file
   ansible.builtin.set_fact:
     dask_requirements_content: "{{ lookup('file', role_path + '/files/requirements-dask.txt') }}"

@@ -23,6 +23,7 @@ cloudflare_zone_id: "{{ lookup('env', 'CLOUDFLARE_ZONE_ID') }}"
 
 # Custom domains (set to empty string to use ngrok-generated URLs)
 ngrok_dask_domain: "dask.zndx.org"
+ngrok_jupyterhub_domain: "jupyter.zndx.org"
 ngrok_k8s_dashboard_domain: "k8s.zndx.org"
 
 # Service references
@@ -35,6 +36,11 @@ k8s_dashboard_service_port: 443
 dask_dashboard_service_name: "{{ dask_cluster_name | default('simple') }}-scheduler"
 dask_dashboard_service_namespace: "{{ dask_namespace | default('dask') }}"
 dask_dashboard_service_port: 8787
+
+# JupyterHub service
+jupyterhub_service_name: proxy-public
+jupyterhub_service_namespace: jupyterhub
+jupyterhub_service_port: 80
 
 # Traffic policy name
 ngrok_oauth_policy_name: google-oauth-policy

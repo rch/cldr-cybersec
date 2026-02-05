@@ -148,6 +148,20 @@
         domain: "{{ ngrok_k8s_dashboard_domain }}"
   when: ngrok_k8s_dashboard_domain | length > 0
 
+- name: Create ngrok Domain for JupyterHub
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: ingress.k8s.ngrok.com/v1alpha1
+      kind: Domain
+      metadata:
+        name: "{{ ngrok_jupyterhub_domain | replace('.', '-') }}"
+        namespace: "{{ ngrok_namespace }}"
+      spec:
+        domain: "{{ ngrok_jupyterhub_domain }}"
+  when: ngrok_jupyterhub_domain | length > 0
+
 - name: Wait for ngrok domains to be ready
   kubernetes.core.k8s_info:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
@@ -194,6 +208,23 @@
     state: present
   when: ngrok_k8s_dashboard_domain | length > 0
 
+- name: Extract JupyterHub domain CNAME target
+  set_fact:
+    jupyterhub_cname_target: "{{ ngrok_domains.resources | selectattr('spec.domain', 'equalto', ngrok_jupyterhub_domain) | map(attribute='status.cnameTarget') | first }}"
+  when: ngrok_jupyterhub_domain | length > 0
+  ignore_errors: true
+
+- name: Create Cloudflare CNAME for JupyterHub
+  community.general.cloudflare_dns:
+    zone: "{{ ngrok_jupyterhub_domain.split('.')[-2:] | join('.') }}"
+    record: "{{ ngrok_jupyterhub_domain.split('.')[0] }}"
+    type: CNAME
+    value: "{{ jupyterhub_cname_target }}"
+    proxied: false
+    api_token: "{{ cloudflare_api_token }}"
+    state: present
+  when: ngrok_jupyterhub_domain | length > 0 and jupyterhub_cname_target is defined
+
 - name: Check if kubernetes-dashboard namespace exists
   kubernetes.core.k8s_info:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
@@ -213,6 +244,13 @@
     kubeconfig: /etc/rancher/rke2/rke2.yaml
     state: present
     definition: "{{ lookup('template', 'dask-dashboard-ingress.yaml.j2') | from_yaml }}"
+
+- name: Apply JupyterHub ingress
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'jupyterhub-ingress.yaml.j2') | from_yaml }}"
+  when: ngrok_jupyterhub_domain | length > 0
 
 - name: Wait for ngrok tunnels to be established
   kubernetes.core.k8s_info:
