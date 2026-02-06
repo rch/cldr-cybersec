@@ -204,6 +204,7 @@ build/config.json
 build/environment.json
 build/cluster.yaml
 build/benchmarks/
+build/notebooks/
 
 # Terraform plan files
 *.tfplan
