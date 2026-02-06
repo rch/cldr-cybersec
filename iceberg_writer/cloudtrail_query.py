@@ -14,22 +14,36 @@ import os
 
 class CloudTrailQuery:
     """Query interface for CloudTrail events in Iceberg"""
-    
-    def # Configure Iceberg catalog with PostgreSQL (sql-postgres) and S3 (s3fs)
+
+    def __init__(self, catalog_uri: str, warehouse_path: str):
+        """Initialize with catalog connection details.
+
+        Args:
+            catalog_uri: PostgreSQL URI for catalog
+            warehouse_path: S3/MinIO path for Iceberg warehouse
+        """
+        # Configure Iceberg catalog with PostgreSQL (sql-postgres) and S3 (s3fs)
+        # Prefer MINIO_* credentials when S3_ENDPOINT is set (local MinIO)
+        endpoint = os.getenv("S3_ENDPOINT", "http://localhost:9010")
+        if endpoint:
+            access_key = os.getenv("MINIO_ACCESS_KEY") or os.getenv("AWS_ACCESS_KEY_ID", "minioadmin")
+            secret_key = os.getenv("MINIO_SECRET_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY", "minioadmin")
+        else:
+            access_key = os.getenv("AWS_ACCESS_KEY_ID", "minioadmin")
+            secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", "minioadmin")
+
         self.catalog = load_catalog(
             "cybersec",
             **{
                 "type": "sql",
                 "uri": catalog_uri,
                 "warehouse": warehouse_path,
-                "s3.endpoint": os.getenv("S3_ENDPOINT", "http://localhost:9010"),
-                "s3.access-key-id": os.getenv("AWS_ACCESS_KEY_ID", "minioadmin"),
-                "s3.secret-access-key": os.getenv("AWS_SECRET_ACCESS_KEY", "minioadmin"),
+                "s3.endpoint": endpoint,
+                "s3.access-key-id": access_key,
+                "s3.secret-access-key": secret_key,
                 "s3.path-style-access": "true",
                 # Force use of s3fs for S3 operations
-                "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO("AWS_ACCESS_KEY_ID", "minioadmin"),
-                "s3.secret-access-key": os.getenv("AWS_SECRET_ACCESS_KEY", "minioadmin"),
-                "s3.path-style-access": "true"
+                "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO"
             }
         )
     

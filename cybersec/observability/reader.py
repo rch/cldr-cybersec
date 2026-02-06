@@ -643,22 +643,18 @@ def create_dataset_from_env() -> OTelDataset:
 
     Uses:
         - OTEL_DATA_PATH: Base path (default: s3://cybersec/otel/)
-        - AWS_ACCESS_KEY_ID: S3 access key
-        - AWS_SECRET_ACCESS_KEY: S3 secret key
-        - S3_ENDPOINT: S3 endpoint URL
+        - S3_ENDPOINT: S3 endpoint URL (if set, uses MINIO_* credentials)
+        - MINIO_ACCESS_KEY/SECRET: MinIO credentials (when S3_ENDPOINT is set)
+        - AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY: AWS credentials (when no S3_ENDPOINT)
 
     Returns:
         Configured OTelDataset instance
     """
     import os
 
+    from .writer import get_s3_credentials_from_env
+
     base_path = os.getenv("OTEL_DATA_PATH", "s3://cybersec/otel/")
-    storage_options = {
-        "key": os.getenv("AWS_ACCESS_KEY_ID"),
-        "secret": os.getenv("AWS_SECRET_ACCESS_KEY"),
-        "endpoint_url": os.getenv("S3_ENDPOINT"),
-    }
-    # Filter None values
-    storage_options = {k: v for k, v in storage_options.items() if v is not None}
+    storage_options = get_s3_credentials_from_env()
 
     return OTelDataset(base_path, storage_options)

@@ -860,24 +860,46 @@ class OTelWriter:
         return self.write_logs(logs)
 
 
+def get_s3_credentials_from_env() -> dict:
+    """Get S3 credentials from environment, preferring MINIO_* when S3_ENDPOINT is set.
+
+    When S3_ENDPOINT is set (local MinIO), uses MINIO_ACCESS_KEY/SECRET.
+    Otherwise, uses AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY for real AWS.
+    This allows MinIO and AWS CLI to coexist without credential conflicts.
+
+    Returns:
+        Dictionary with key, secret, and endpoint_url (if set)
+    """
+    endpoint = os.getenv("S3_ENDPOINT")
+    if endpoint:
+        # Local MinIO - prefer MINIO_* credentials, fall back to AWS_* for compatibility
+        storage_options = {
+            "key": os.getenv("MINIO_ACCESS_KEY") or os.getenv("AWS_ACCESS_KEY_ID"),
+            "secret": os.getenv("MINIO_SECRET_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY"),
+            "endpoint_url": endpoint,
+        }
+    else:
+        # Real AWS - use standard AWS credentials
+        storage_options = {
+            "key": os.getenv("AWS_ACCESS_KEY_ID"),
+            "secret": os.getenv("AWS_SECRET_ACCESS_KEY"),
+        }
+    return {k: v for k, v in storage_options.items() if v is not None}
+
+
 def create_writer_from_env() -> OTelWriter:
     """Create OTelWriter with configuration from environment variables.
 
     Uses:
         - OTEL_DATA_PATH: Base path (default: s3://cybersec/otel/)
-        - AWS_ACCESS_KEY_ID: S3 access key
-        - AWS_SECRET_ACCESS_KEY: S3 secret key
-        - S3_ENDPOINT: S3 endpoint URL
+        - S3_ENDPOINT: S3 endpoint URL (if set, uses MINIO_* credentials)
+        - MINIO_ACCESS_KEY/SECRET: MinIO credentials (when S3_ENDPOINT is set)
+        - AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY: AWS credentials (when no S3_ENDPOINT)
 
     Returns:
         Configured OTelWriter instance
     """
     base_path = os.getenv("OTEL_DATA_PATH", "s3://cybersec/otel/")
-    storage_options = {
-        "key": os.getenv("AWS_ACCESS_KEY_ID"),
-        "secret": os.getenv("AWS_SECRET_ACCESS_KEY"),
-        "endpoint_url": os.getenv("S3_ENDPOINT"),
-    }
-    storage_options = {k: v for k, v in storage_options.items() if v is not None}
+    storage_options = get_s3_credentials_from_env()
 
     return OTelWriter(base_path, storage_options)
