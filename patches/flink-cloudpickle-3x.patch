@@ -1,0 +1,80 @@
+diff --git a/flink-python/dev/dev-requirements.txt b/flink-python/dev/dev-requirements.txt
+index 0e7d3fadb0c..2f869091ea5 100755
+--- a/flink-python/dev/dev-requirements.txt
++++ b/flink-python/dev/dev-requirements.txt
+@@ -15,20 +15,21 @@
+ pip>=20.3
+ setuptools>=18.0
+ wheel
+-apache-beam>=2.43.0,<2.49.0
++# Updated for cloudpickle 3.x / Dask compatibility
++apache-beam>=2.71.0
+ cython>=0.29.24
+ py4j==0.10.9.7
+ python-dateutil>=2.8.0,<3
+-cloudpickle~=2.2.0
+-avro-python3>=1.8.1,!=1.9.2
+-pandas>=1.3.0
+-pyarrow>=5.0.0
++cloudpickle>=3.0.0
++avro>=1.12.0
++pandas>=1.3.0,<2.3
++pyarrow>=5.0.0,<21.0.0
+ pytz>=2018.3
+-numpy>=1.22.4
++numpy>=1.22.4,<2.5.0
+ fastavro>=1.1.0,!=1.8.0
+-grpcio>=1.29.0,<=1.50.0
+-grpcio-tools>=1.29.0,<=1.50.0
+-pemja==0.4.1; platform_system != 'Windows'
++grpcio>=1.29.0,<1.66.0
++grpcio-tools>=1.29.0,<1.66.0
++pemja>=0.5.6,<0.5.7; platform_system != 'Windows'
+ httplib2>=0.19.0
+ protobuf>=3.19.0
+ pytest~=7.0
+diff --git a/flink-python/pyproject.toml b/flink-python/pyproject.toml
+index c21b2fccd5e..6b5d7d37a8a 100644
+--- a/flink-python/pyproject.toml
++++ b/flink-python/pyproject.toml
+@@ -17,11 +17,12 @@
+ ################################################################################
+ [build-system]
+ # Minimum requirements for the build system to execute.
++# Updated for cloudpickle 3.x / Dask compatibility
+ requires = [
+     "packaging>=20.5; platform_machine=='arm64'",  # macos M1
+-    "setuptools>=18.0",
++    "setuptools>=61.0",  # Updated for Python 3.12
+     "wheel",
+-    "apache-beam>=2.43.0,<2.49.0",
++    "apache-beam>=2.71.0",  # Updated: dropped cloudpickle dep
+     "cython>=0.29.24",
+     "fastavro>=1.1.0,!=1.8.0"
+ ]
+diff --git a/flink-python/setup.py b/flink-python/setup.py
+index e5e1e231b22..0033c4f567d 100644
+--- a/flink-python/setup.py
++++ b/flink-python/setup.py
+@@ -317,14 +317,15 @@ try:
+         'pyflink.bin': ['*']}
+ 
+     install_requires = ['py4j==0.10.9.7', 'python-dateutil>=2.8.0,<3',
+-                        'apache-beam>=2.43.0,<2.49.0',
+-                        'cloudpickle>=2.2.0', 'avro-python3>=1.8.1,!=1.9.2',
++                        # Updated: Beam 2.71.0+ dropped cloudpickle dep, allowing cloudpickle 3.x for Dask compat
++                        'apache-beam>=2.71.0',
++                        'cloudpickle>=3.0.0', 'avro>=1.12.0',  # avro-python3 deprecated
+                         'pytz>=2018.3', 'fastavro>=1.1.0,!=1.8.0', 'requests>=2.26.0',
+                         'protobuf>=3.19.0',
+-                        'numpy>=1.22.4',
+-                        'pandas>=1.3.0',
+-                        'pyarrow>=5.0.0',
+-                        'pemja==0.4.1;platform_system != "Windows"',
++                        'numpy>=1.22.4,<2.5.0',  # Updated for Python 3.12 compat
++                        'pandas>=1.3.0,<2.3',
++                        'pyarrow>=5.0.0,<21.0.0',
++                        'pemja>=0.5.6,<0.5.7;platform_system != "Windows"',  # Updated for Python 3.12
+                         'httplib2>=0.19.0',
+                         'ruamel.yaml>=0.18.4',
+                         apache_flink_libraries_dependency]

@@ -3,7 +3,7 @@ name = "cybersec"
 version = "0.1.0"
 description = "Cybersec toolkit with Flink processing and Iceberg storage"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"  # Pin to 3.12 to avoid Beam envoy-data-plane issues on 3.13+
 dependencies = [
     # NumPy constrained for numba/datashader compatibility
     "numpy>=2.0.0,<2.4",
@@ -42,16 +42,16 @@ dev = [
 ]
 
 # Flink extra - install with: uv sync --extra flink
-# For local Flink/PyFlink development. This is the default for devenv up.
-# Note: Conflicts with k8s extra due to cloudpickle version mismatch.
+# Uses patched thirdparty/flink for cloudpickle 3.x compatibility with Dask.
+# See tool.uv.sources below for local path override.
 flink = [
-    "apache-flink>=2.2.0",
+    "apache-flink>=1.20.0",
 ]
 
 # K8s/Dask stack - install with: uv sync --extra k8s
 # Only needed when connecting to Dask clusters running in Kubernetes.
 # Dask itself runs in K8s (deployed via Helm), not locally.
-# Note: Conflicts with flink extra due to cloudpickle versions.
+# Now compatible with flink extra (patched submodule uses cloudpickle 3.x).
 k8s = [
     "dask-kubernetes>=2025.7.0",
     "dask[complete]>=2025.2.0",
@@ -77,7 +77,7 @@ observability = [
 
 # SC26 Benchmark extra - install with: uv sync --extra benchmark
 # For running Dask/Datashader scaling benchmarks.
-# Note: Conflicts with flink extra due to cloudpickle version mismatch.
+# Now compatible with flink extra (patched submodule uses cloudpickle 3.x).
 benchmark = [
     # Dask distributed computing
     "dask[complete]>=2025.2.0",
@@ -110,17 +110,10 @@ include = ["cybersec*"]
 [tool.uv]
 package = true
 
-# Declare conflicting extras - k8s/benchmark (dask) and flink have incompatible cloudpickle versions.
-# Users cannot install both simultaneously, but each can be resolved independently.
-# - apache-flink requires apache-beam which needs cloudpickle>=2.2.1,<2.3
-# - dask requires cloudpickle>=3.0.0
-conflicts = [
-    [
-        { extra = "k8s" },
-        { extra = "flink" },
-    ],
-    [
-        { extra = "benchmark" },
-        { extra = "flink" },
-    ],
-]
+# Override apache-flink to use patched submodule with cloudpickle 3.x compatibility.
+# The submodule (thirdparty/flink) is patched to use:
+#   - apache-beam>=2.71.0 (which dropped cloudpickle dependency)
+#   - cloudpickle>=3.0.0 (compatible with Dask)
+# This resolves the cloudpickle version conflict between Flink and Dask.
+[tool.uv.sources]
+apache-flink = { path = "thirdparty/flink/flink-python", editable = true }
