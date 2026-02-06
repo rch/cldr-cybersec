@@ -27,12 +27,29 @@ uv run python <script.py>      # Run Python scripts
 The project uses [devenv](https://devenv.sh/) for local development:
 
 ```bash
-devenv up                      # Start core services (Flink, Iceberg, Prometheus)
-ENABLE_K8S=true devenv up      # Start with Dask/JupyterHub (auto-provisions k3d)
-KUBECONFIG=~/.kube/rke2.yaml ENABLE_K8S=true devenv up  # Use existing RKE2 cluster
-devenv tasks run polaris:check # Verify Polaris configuration
-devenv tasks run restart:clean # Clean restart all services
-devenv tasks run docs:build    # Build mdbook documentation
+devenv up                              # Start core services (Flink, Iceberg, Prometheus)
+devenv tasks run polaris:check         # Verify Polaris configuration
+devenv tasks run restart:clean         # Clean restart all services
+devenv tasks run docs:build            # Build mdbook documentation
+```
+
+### K8s Stack (on-demand)
+
+K8s services are provisioned via tasks, not started automatically:
+
+```bash
+devenv tasks run k8s:provision         # Provision k3d cluster
+devenv tasks run k8s:deploy-dask       # Deploy Dask operator + cluster
+devenv tasks run k8s:deploy-jupyter    # Deploy JupyterHub
+devenv tasks run k8s:forward           # Start port-forwards (Dask:8787, JupyterHub:8000)
+devenv tasks run k8s:status            # Check K8s status
+devenv tasks run k8s:destroy           # Delete k3d cluster
+```
+
+For existing RKE2 clusters:
+```bash
+export KUBECONFIG=~/.kube/rke2.yaml
+devenv tasks run k8s:deploy-dask       # Deploy to RKE2
 ```
 
 ### Service Ports (Core Stack - always started)
@@ -46,7 +63,7 @@ devenv tasks run docs:build    # Build mdbook documentation
 - NiFi Web UI: http://localhost:8450
 - NiFi OTLP Receiver: port 4319 (receives traces from OTEL Collector)
 
-### K8s Stack Ports (ENABLE_K8S=true)
+### K8s Stack Ports (after k8s:forward)
 - Dask Dashboard: http://localhost:8787
 - Dask Scheduler: port 8786
 - JupyterHub: http://localhost:8000

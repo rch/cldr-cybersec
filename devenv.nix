@@ -160,9 +160,8 @@
       echo ""
     fi
 
-    # Kubernetes target detection
-    # Detects RKE2 vs k3d from KUBECONFIG for conditional behavior
-    # Priority: 1) Explicit CYBERSEC_K8S_TARGET, 2) KUBECONFIG contents, 3) Platform default
+    # Kubernetes target detection (from KUBECONFIG only, no ENABLE_K8S fallback)
+    # Priority: 1) Explicit CYBERSEC_K8S_TARGET, 2) KUBECONFIG contents
     if [ -z "''${CYBERSEC_K8S_TARGET:-}" ]; then
       DETECTED_K8S_TARGET="none"
       if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
@@ -171,10 +170,6 @@
         elif grep -qE "k3d|k3s" "$KUBECONFIG" 2>/dev/null; then
           DETECTED_K8S_TARGET="k3d"
         fi
-      fi
-      # When ENABLE_K8S is set but no target detected, default to k3d for local provisioning
-      if [ "$DETECTED_K8S_TARGET" = "none" ] && [ "''${ENABLE_K8S:-false}" = "true" ]; then
-        DETECTED_K8S_TARGET="k3d"
       fi
       export CYBERSEC_K8S_TARGET="$DETECTED_K8S_TARGET"
     fi
@@ -785,6 +780,185 @@ EOF
       eval $SSH_CMD "$KUBECTL logs -n ngrok-system deployment/ngrok-operator-manager --tail=$LINES"
     '';
 
+    # ============================================================================
+    # Kubernetes Stack Tasks (on-demand provisioning)
+    # ============================================================================
+
+    "k8s:status".exec = ''
+      echo "Kubernetes Stack Status"
+      echo "========================"
+
+      # Check for kubeconfig
+      KCONFIG="''${KUBECONFIG:-$PWD/.devenv/state/kubeconfig}"
+      if [ -f "$KCONFIG" ]; then
+        echo "Kubeconfig: $KCONFIG"
+        if kubectl --kubeconfig="$KCONFIG" cluster-info >/dev/null 2>&1; then
+          echo "Cluster: Connected"
+          kubectl --kubeconfig="$KCONFIG" get nodes
+          echo ""
+          kubectl --kubeconfig="$KCONFIG" get pods -A | grep -E "dask|jupyter" || echo "No Dask/JupyterHub pods"
+        else
+          echo "Cluster: Not reachable"
+        fi
+      else
+        echo "No kubeconfig found"
+        echo ""
+        echo "To provision k3d:  devenv tasks run k8s:provision"
+        echo "To use RKE2:       export KUBECONFIG=~/.kube/rke2.yaml"
+      fi
+    '';
+
+    "k8s:provision".exec = ''
+      # Provisions local k3d cluster
+      source scripts/polaris_bootstrap_helper.sh
+
+      log_info "Provisioning k3d Kubernetes cluster..."
+
+      # Check podman (macOS)
+      if [ "$(uname -s)" = "Darwin" ]; then
+        if command -v podman >/dev/null 2>&1; then
+          if ! podman machine inspect podman-machine-default >/dev/null 2>&1; then
+            log_info "Creating Podman machine..."
+            podman machine init --cpus 4 --memory 8192
+          fi
+          if ! podman machine inspect podman-machine-default 2>/dev/null | grep -q '"Running": true'; then
+            log_info "Starting Podman machine..."
+            podman machine start podman-machine-default
+          fi
+        fi
+      fi
+
+      # Create k3d cluster
+      CLUSTER_NAME="''${K3D_CLUSTER_NAME:-cybersec}"
+      if k3d cluster list 2>/dev/null | grep -q "$CLUSTER_NAME"; then
+        log_info "Cluster '$CLUSTER_NAME' already exists"
+      else
+        log_info "Creating k3d cluster '$CLUSTER_NAME'..."
+        k3d cluster create "$CLUSTER_NAME" \
+          --api-port 6550 \
+          --servers 1 \
+          --agents 0 \
+          --k3s-arg "--disable=traefik@server:0" \
+          --k3s-arg "--disable=servicelb@server:0"
+      fi
+
+      # Generate kubeconfig
+      KCONFIG="$PWD/.devenv/state/kubeconfig"
+      mkdir -p "$(dirname "$KCONFIG")"
+      k3d kubeconfig get "$CLUSTER_NAME" > "$KCONFIG"
+      # Fix API address for localhost access
+      sed -i.bak "s|server: .*|server: https://localhost:6550|" "$KCONFIG"
+      rm -f "$KCONFIG.bak"
+
+      # Wait for cluster ready
+      log_info "Waiting for cluster to be ready..."
+      kubectl --kubeconfig="$KCONFIG" wait --for=condition=Ready nodes --all --timeout=120s
+
+      log_success "k3d cluster provisioned"
+      echo ""
+      echo "KUBECONFIG=$KCONFIG"
+      echo ""
+      echo "Next: devenv tasks run k8s:deploy-dask"
+    '';
+
+    "k8s:deploy-dask".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      KCONFIG="''${KUBECONFIG:-$PWD/.devenv/state/kubeconfig}"
+
+      if [ ! -f "$KCONFIG" ]; then
+        log_error "No kubeconfig found. Run: devenv tasks run k8s:provision"
+        exit 1
+      fi
+      export KUBECONFIG="$KCONFIG"
+
+      log_info "Deploying Dask operator..."
+      helm repo add dask https://helm.dask.org || true
+      helm repo update dask
+      helm upgrade --install dask-operator dask/dask-kubernetes-operator \
+        --namespace dask-operator --create-namespace \
+        --wait --timeout 5m
+
+      log_info "Waiting for CRDs..."
+      kubectl wait --for=condition=Established crd/daskclusters.kubernetes.dask.org --timeout=60s
+
+      log_info "Deploying Dask cluster..."
+      kubectl apply -f infra/dask/dask-cluster.yaml
+
+      log_info "Waiting for Dask cluster to be Running..."
+      for i in $(seq 1 60); do
+        PHASE=$(kubectl get daskcluster -n dask cybersec-dask -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+        if [ "$PHASE" = "Running" ]; then
+          log_success "Dask cluster is Running"
+          break
+        fi
+        sleep 5
+      done
+
+      echo ""
+      echo "Start port-forward: devenv tasks run k8s:forward"
+    '';
+
+    "k8s:deploy-jupyter".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      KCONFIG="''${KUBECONFIG:-$PWD/.devenv/state/kubeconfig}"
+
+      if [ ! -f "$KCONFIG" ]; then
+        log_error "No kubeconfig found. Run: devenv tasks run k8s:provision"
+        exit 1
+      fi
+      export KUBECONFIG="$KCONFIG"
+
+      log_info "Deploying JupyterHub..."
+      helm repo add jupyterhub https://hub.jupyter.org/helm-chart/ || true
+      helm repo update jupyterhub
+      helm upgrade --install jupyterhub jupyterhub/jupyterhub \
+        --namespace jupyterhub --create-namespace \
+        --version 2.0.0 \
+        --set singleuser.cpu.limit=0.5 \
+        --set singleuser.memory.limit=512Mi \
+        --wait --timeout 10m
+
+      log_success "JupyterHub deployed"
+      echo ""
+      echo "Start port-forward: devenv tasks run k8s:forward"
+    '';
+
+    "k8s:forward".exec = ''
+      KCONFIG="''${KUBECONFIG:-$PWD/.devenv/state/kubeconfig}"
+
+      if [ ! -f "$KCONFIG" ]; then
+        echo "No kubeconfig found. Run: devenv tasks run k8s:provision"
+        exit 1
+      fi
+      export KUBECONFIG="$KCONFIG"
+
+      echo "Starting port-forwards (Ctrl+C to stop)..."
+      echo "  Dask Dashboard:  http://localhost:8787"
+      echo "  JupyterHub:      http://localhost:8000"
+      echo ""
+
+      # Run port-forwards in parallel
+      kubectl port-forward -n dask svc/cybersec-dask-scheduler 8787:8787 &
+      PF1=$!
+      kubectl port-forward -n jupyterhub svc/proxy-public 8000:80 &
+      PF2=$!
+
+      trap "kill $PF1 $PF2 2>/dev/null" EXIT
+      wait
+    '';
+
+    "k8s:destroy".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+
+      log_warn "Destroying k3d cluster..."
+
+      CLUSTER_NAME="''${K3D_CLUSTER_NAME:-cybersec}"
+      k3d cluster delete "$CLUSTER_NAME" 2>/dev/null || true
+      rm -f "$PWD/.devenv/state/kubeconfig"
+
+      log_success "k3d cluster destroyed"
+    '';
+
     "restart:clean".exec = ''
       source scripts/polaris_bootstrap_helper.sh
 
@@ -1069,11 +1243,6 @@ asyncio.run(run())
         set -euo pipefail
 
         # Podman is only needed for k3d provisioning (not for RKE2)
-        # Requires: ENABLE_K8S=true AND target=k3d
-        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
-          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
-          exit 0
-        fi
         if [ "''${CYBERSEC_K8S_TARGET:-none}" != "k3d" ]; then
           echo "K8s target is ''${CYBERSEC_K8S_TARGET:-none}, not k3d - skipping podman"
           exit 0
@@ -1110,6 +1279,7 @@ asyncio.run(run())
         done
       '';
       process-compose = {
+        disabled = true;  # Started via k8s:provision task
         availability = {
           restart = "always";
         };
@@ -1121,11 +1291,6 @@ asyncio.run(run())
         set -euo pipefail
 
         # k3d cluster provisioning - only for local k3d target (not RKE2)
-        # Requires: ENABLE_K8S=true AND target=k3d
-        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
-          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
-          exit 0
-        fi
         if [ "''${CYBERSEC_K8S_TARGET:-none}" != "k3d" ]; then
           echo "K8s target is ''${CYBERSEC_K8S_TARGET:-none}, not k3d - skipping k3d cluster provisioning"
           exit 0
@@ -1330,6 +1495,7 @@ EOF
         done
       '';
       process-compose = {
+        disabled = true;  # Started via k8s:provision task
         depends_on = {
           podman-runtime = {
             condition = "process_started";
@@ -1343,11 +1509,6 @@ EOF
         set -euo pipefail
 
         # Dask operator runs on any K8s target (k3d or RKE2)
-        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
-          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
-          exit 0
-        fi
-
         # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
         if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
           KUBECONFIG_PATH="$KUBECONFIG"
@@ -1403,6 +1564,7 @@ EOF
         done
       '';
       process-compose = {
+        disabled = true;  # Started via k8s:deploy-dask task
         depends_on = {
           k3d-cluster = {
             condition = "process_started";
@@ -1417,10 +1579,6 @@ EOF
 
         if [ "''${ENABLE_YUNIKORN:-false}" != "true" ]; then
           echo "YuniKorn disabled (set ENABLE_YUNIKORN=true to enable)"
-          exit 0
-        fi
-        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
-          echo "K8s stack disabled"
           exit 0
         fi
 
@@ -1479,6 +1637,7 @@ EOF
         done
       '';
       process-compose = {
+        disabled = true;  # Optional, enabled via ENABLE_YUNIKORN
         depends_on = {
           dask-operator = {
             condition = "process_started";
@@ -1492,11 +1651,6 @@ EOF
         set -euo pipefail
 
         # Dask cluster runs on any K8s target (k3d or RKE2)
-        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
-          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
-          exit 0
-        fi
-
         if [ "''${ENABLE_YUNIKORN:-false}" = "true" ]; then
           MANIFEST="$PWD/infra/dask/dask-cluster-yunikorn.yaml"
         else
@@ -1555,6 +1709,7 @@ EOF
         done
       '';
       process-compose = {
+        disabled = true;  # Started via k8s:deploy-dask task
         depends_on = {
           dask-operator = {
             condition = "process_started";
@@ -1568,11 +1723,6 @@ EOF
         set -euo pipefail
 
         # K8s dashboard runs on any K8s target (k3d or RKE2)
-        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
-          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
-          exit 0
-        fi
-
         # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
         if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
           KUBECONFIG_PATH="$KUBECONFIG"
@@ -1652,6 +1802,7 @@ EOF
         kubectl -n kubernetes-dashboard port-forward svc/kubernetes-dashboard 10443:443 --address 127.0.0.1,::1
       '';
       process-compose = {
+        disabled = true;  # Started via k8s:forward task
         depends_on = {
           k3d-cluster = {
             condition = "process_started";
@@ -1665,11 +1816,6 @@ EOF
         set -euo pipefail
 
         # JupyterHub runs on any K8s target (k3d or RKE2)
-        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
-          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
-          exit 0
-        fi
-
         # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
         if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
           KUBECONFIG_PATH="$KUBECONFIG"
@@ -1730,6 +1876,7 @@ EOF
         kubectl -n jupyterhub port-forward svc/proxy-public 8000:80 --address 127.0.0.1,::1
       '';
       process-compose = {
+        disabled = true;  # Started via k8s:deploy-jupyter task
         depends_on = {
           k3d-cluster = {
             condition = "process_started";
@@ -1743,11 +1890,6 @@ EOF
         set -euo pipefail
 
         # Dask UI runs on any K8s target (k3d or RKE2)
-        if [ "''${ENABLE_K8S:-false}" != "true" ]; then
-          echo "K8s stack disabled (set ENABLE_K8S=true to enable)"
-          exit 0
-        fi
-
         # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
         if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
           KUBECONFIG_PATH="$KUBECONFIG"
@@ -1777,6 +1919,7 @@ EOF
         kubectl -n dask port-forward pod/$SCHEDULER_POD 8787:8787 --address 127.0.0.1,::1
       '';
       process-compose = {
+        disabled = true;  # Started via k8s:forward task
         depends_on = {
           dask-cluster = {
             condition = "process_started";
