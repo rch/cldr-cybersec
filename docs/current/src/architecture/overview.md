@@ -1,4 +1,4 @@
-# Architecture Overview
+# System Architecture
 
 ## High-Level Architecture
 
@@ -99,3 +99,8 @@ S3 Tables provide native Iceberg with built-in catalog. We disable S3's automati
 | Ad-hoc investigation | On-prem | Impala | Security analysis |
 | Historical deep dive | On-prem | Spark/Hive | Multi-year correlation |
 | ML training | On-prem | Cloudera AI | Anomaly detection models |
+
+## Subchapters
+
+- [Data Flow](./data-flow.md): Event processing pipeline
+- [Storage Strategy](./storage.md): Tiered storage architecture

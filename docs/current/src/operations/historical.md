@@ -12,7 +12,7 @@ Request: {
   ticket: "Create\nRequest Ticket"
   identify: "Identify\nDate Range"
   estimate: "Estimate\nVolume & Cost"
-  approve: "Approval\n(if > $500)"
+  approve: "Approval\n(if > 500 USD)"
 }
 
 Restore: {

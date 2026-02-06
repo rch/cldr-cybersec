@@ -2,7 +2,10 @@
 authors = ["Ryan Hill"]
 language = "en"
 src = "src"
-title = "Cybersec Toolkit - Roadmap"
+title = "Cybersec Toolkit"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
 
 [preprocessor.d2]
 
