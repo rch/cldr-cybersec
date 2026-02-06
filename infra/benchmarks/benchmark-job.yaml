@@ -1,0 +1,209 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dask-benchmark
+  namespace: dask
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: ghcr.io/dask/dask:2025.2.0
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          set -e
+          echo "Installing benchmark dependencies..."
+          pip install -q s3fs pyarrow datashader pandas numpy colorcet
+
+          echo "Creating benchmark script..."
+          cat > /tmp/benchmark.py << 'EOF'
+          import time
+          import json
+          from datetime import datetime
+          from distributed import Client
+          import dask.dataframe as dd
+          import datashader as ds
+          import colorcet
+
+          # Configuration
+          SCHEDULER = "tcp://simple-scheduler:8786"
+          S3_BUCKET = "cybersec-dask-data"
+          S3_PREFIX = "otel/validation-30gb"
+          WORKER_COUNTS = [2]  # Fixed for current cluster size
+          ZOOM_LEVELS = [("full", 1.0), ("10pct", 0.1)]
+          RUNS_PER_CONFIG = 3
+          WARMUP_RUNS = 1
+          CANVAS_WIDTH = 1920
+          CANVAS_HEIGHT = 1080
+
+          def run_benchmark():
+              print(f"Connecting to Dask scheduler at {SCHEDULER}...")
+              client = Client(SCHEDULER)
+
+              info = client.scheduler_info()
+              n_workers = len(info.get('workers', {}))
+              total_memory = sum(w.get('memory_limit', 0) for w in info['workers'].values())
+              total_memory_gb = total_memory / (1024**3)
+
+              print(f"Connected: {n_workers} workers, {total_memory_gb:.1f} GB total memory")
+              print(f"Dashboard: {client.dashboard_link}")
+
+              # Load data from S3
+              s3_path = f"s3://{S3_BUCKET}/{S3_PREFIX}/*.parquet"
+              print(f"\nLoading data from {s3_path}...")
+
+              # Configure S3 access
+              storage_options = {
+                  "anon": False,
+                  "client_kwargs": {"region_name": "us-east-1"}
+              }
+
+              try:
+                  ddf = dd.read_parquet(s3_path, storage_options=storage_options)
+                  n_partitions = ddf.npartitions
+                  print(f"Loaded {n_partitions} partitions")
+              except Exception as e:
+                  print(f"Warning: Could not load from S3: {e}")
+                  print("Generating synthetic data for benchmark...")
+
+                  # Generate synthetic data
+                  import numpy as np
+                  import pandas as pd
+
+                  n_spans = 100_000  # Small test dataset
+                  rng = np.random.default_rng(42)
+
+                  data = pd.DataFrame({
+                      'timestamp_ns': rng.integers(1704067200000000000, 1704153600000000000, n_spans),
+                      'duration_ns': (rng.lognormal(15.0, 1.5, n_spans)).astype(np.int64),
+                      'service_name': rng.choice(['api-gateway', 'user-service', 'db-service'], n_spans),
+                      'request_size_bytes': rng.integers(100, 10000, n_spans),
+                      'response_size_bytes': rng.integers(100, 50000, n_spans),
+                  })
+                  ddf = dd.from_pandas(data, npartitions=4)
+                  n_partitions = ddf.npartitions
+                  print(f"Generated synthetic data: {len(data)} spans, {n_partitions} partitions")
+
+              # Compute bounds
+              print("\nComputing data bounds...")
+              x_col = 'start_time_unix_nano'
+              y_col = 'duration_ns'
+
+              x_min, x_max = ddf[x_col].min().compute(), ddf[x_col].max().compute()
+              y_min, y_max = ddf[y_col].min().compute(), ddf[y_col].max().compute()
+              print(f"Bounds: x=[{x_min}, {x_max}], y=[{y_min}, {y_max}]")
+
+              # Run benchmarks
+              results = []
+              run_id = 0
+
+              for zoom_name, zoom_fraction in ZOOM_LEVELS:
+                  # Scale bounds for zoom level
+                  x_range = x_max - x_min
+                  y_range = y_max - y_min
+                  x_mid = (x_min + x_max) / 2
+                  y_mid = (y_min + y_max) / 2
+                  x_min_zoom = x_mid - (x_range * zoom_fraction / 2)
+                  x_max_zoom = x_mid + (x_range * zoom_fraction / 2)
+                  y_min_zoom = y_mid - (y_range * zoom_fraction / 2)
+                  y_max_zoom = y_mid + (y_range * zoom_fraction / 2)
+
+                  # Warmup + production runs
+                  for run_type in ['warmup'] * WARMUP_RUNS + ['production'] * RUNS_PER_CONFIG:
+                      is_warmup = run_type == 'warmup'
+                      label = f"{'Warmup' if is_warmup else 'Run'} [{zoom_name}]"
+
+                      # Create canvas
+                      cvs = ds.Canvas(
+                          plot_width=CANVAS_WIDTH,
+                          plot_height=CANVAS_HEIGHT,
+                          x_range=(float(x_min_zoom), float(x_max_zoom)),
+                          y_range=(float(y_min_zoom), float(y_max_zoom)),
+                      )
+
+                      # Time the aggregation
+                      start_ns = time.perf_counter_ns()
+                      agg = cvs.points(ddf, x_col, y_col, agg=ds.count())
+                      agg.values  # Force computation
+                      agg_ns = time.perf_counter_ns()
+
+                      # Time the shading
+                      img = ds.tf.shade(agg, cmap=colorcet.fire, how='log')
+                      shade_ns = time.perf_counter_ns()
+
+                      wall_clock_ns = shade_ns - start_ns
+                      aggregation_ns = agg_ns - start_ns
+                      shading_ns = shade_ns - agg_ns
+                      wall_clock_s = wall_clock_ns / 1e9
+
+                      result = {
+                          'run_id': run_id,
+                          'zoom_level': zoom_name,
+                          'zoom_fraction': zoom_fraction,
+                          'is_warmup': is_warmup,
+                          'worker_count': n_workers,
+                          'wall_clock_s': wall_clock_s,
+                          'aggregation_s': aggregation_ns / 1e9,
+                          'shading_s': shading_ns / 1e9,
+                      }
+
+                      if not is_warmup:
+                          results.append(result)
+
+                      print(f"  {label}: {wall_clock_s:.2f}s (agg: {aggregation_ns/1e9:.2f}s, shade: {shading_ns/1e9:.2f}s)")
+                      run_id += 1
+
+              # Print summary
+              print("\n" + "=" * 60)
+              print("BENCHMARK RESULTS")
+              print("=" * 60)
+
+              for zoom_name, zoom_fraction in ZOOM_LEVELS:
+                  zoom_results = [r for r in results if r['zoom_level'] == zoom_name]
+                  if zoom_results:
+                      times = [r['wall_clock_s'] for r in zoom_results]
+                      mean_time = sum(times) / len(times)
+                      print(f"{zoom_name}: {mean_time:.2f}s (mean of {len(times)} runs)")
+
+              # Save results
+              output = {
+                  'timestamp': datetime.now().isoformat(),
+                  'scheduler': SCHEDULER,
+                  'workers': n_workers,
+                  'partitions': n_partitions,
+                  'results': results,
+              }
+
+              output_file = '/tmp/benchmark_results.json'
+              with open(output_file, 'w') as f:
+                  json.dump(output, f, indent=2)
+              print(f"\nResults saved to {output_file}")
+
+              client.close()
+              return output
+
+          if __name__ == '__main__':
+              run_benchmark()
+          EOF
+
+          echo "Running benchmark..."
+          python -u /tmp/benchmark.py
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "1"
+          limits:
+            memory: "8Gi"
+            cpu: "2"
+        env:
+        - name: AWS_REGION
+          value: "us-east-1"
+        - name: AWS_DEFAULT_REGION
+          value: "us-east-1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+      serviceAccountName: default

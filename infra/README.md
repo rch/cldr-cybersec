@@ -156,6 +156,9 @@ infra/
 │   ├── README.md          # AWS deployment guide
 │   ├── tofu/              # OpenTofu modules (VPC, EC2, IAM, S3)
 │   └── ansible/           # Ansible playbooks (RKE2, Dask, JupyterHub)
+├── benchmarks/
+│   ├── README.md          # Benchmark usage guide
+│   └── benchmark-job.yaml # Kubernetes Job for Dask benchmarks
 └── dask/
     └── dask-cluster.yaml  # Dask cluster manifest for local
 ```
