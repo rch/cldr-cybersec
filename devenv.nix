@@ -7,9 +7,12 @@
   # Override in .cybersec/config.toml or set MINIO_DATA_DIR env var
   # env.MINIO_DATA_DIR = lib.mkForce "/opt/minio/cybersec";  # Example override
 
-  # MinIO/S3 credentials for Metaflow (must override ~/.aws/credentials)
-  env.AWS_ACCESS_KEY_ID = "minioadmin";
-  env.AWS_SECRET_ACCESS_KEY = "minioadmin";
+  # MinIO credentials - separate from AWS to avoid conflicts
+  # Python code checks MINIO_* first when S3_ENDPOINT is set (local MinIO)
+  # AWS CLI uses ~/.aws/credentials (default profile) for real AWS operations
+  env.MINIO_ACCESS_KEY = "minioadmin";
+  env.MINIO_SECRET_KEY = "minioadmin";
+  env.S3_ENDPOINT = "http://localhost:9010";
 
   # Flink home - built from source in thirdparty/flink
   env.FLINK_HOME = "${config.devenv.root}/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1";
@@ -440,6 +443,64 @@ print('Environment config written to build/environment.json')
         echo "✅ S3 bucket cleaned"
       else
         echo "Aborted."
+      fi
+    '';
+
+    # Empty a specific S3 bucket by name - useful when tofu state is destroyed
+    # Usage: S3_BUCKET=bucket-name devenv tasks run aws:s3:empty
+    "aws:s3:empty".exec = ''
+      BUCKET_NAME="''${S3_BUCKET:-cybersec-dask-data}"
+      AWS_REGION="''${AWS_REGION:-us-east-1}"
+
+      echo "🗑️  Emptying S3 bucket: $BUCKET_NAME (region: $AWS_REGION)"
+      echo ""
+
+      # Check if bucket exists
+      if ! aws s3api head-bucket --bucket "$BUCKET_NAME" --region "$AWS_REGION" 2>/dev/null; then
+        echo "❌ Bucket '$BUCKET_NAME' does not exist or is not accessible."
+        exit 1
+      fi
+
+      # Count objects
+      OBJECT_COUNT=$(aws s3 ls "s3://$BUCKET_NAME" --recursive --region "$AWS_REGION" 2>/dev/null | wc -l || echo "0")
+      echo "Objects in bucket: ~$OBJECT_COUNT"
+      echo ""
+
+      read -p "Delete ALL objects from s3://$BUCKET_NAME? [y/N] " -n 1 -r
+      echo
+      if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 0
+      fi
+
+      echo ""
+      echo "Step 1: Deleting all object versions..."
+      aws s3api list-object-versions --bucket "$BUCKET_NAME" --region "$AWS_REGION" --output json 2>/dev/null | \
+        jq -r '.Versions[]? | "\(.Key)\t\(.VersionId)"' | \
+        while IFS=$'\t' read -r key version; do
+          [ -n "$key" ] && [ -n "$version" ] && \
+            aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" --region "$AWS_REGION" 2>/dev/null
+        done
+
+      echo "Step 2: Deleting delete markers..."
+      aws s3api list-object-versions --bucket "$BUCKET_NAME" --region "$AWS_REGION" --output json 2>/dev/null | \
+        jq -r '.DeleteMarkers[]? | "\(.Key)\t\(.VersionId)"' | \
+        while IFS=$'\t' read -r key version; do
+          [ -n "$key" ] && [ -n "$version" ] && \
+            aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" --region "$AWS_REGION" 2>/dev/null
+        done
+
+      echo "Step 3: Final cleanup with aws s3 rm..."
+      aws s3 rm "s3://$BUCKET_NAME" --recursive --region "$AWS_REGION" 2>/dev/null || true
+
+      # Verify bucket is empty
+      REMAINING=$(aws s3 ls "s3://$BUCKET_NAME" --recursive --region "$AWS_REGION" 2>/dev/null | wc -l || echo "0")
+      if [ "$REMAINING" -eq 0 ]; then
+        echo ""
+        echo "✅ S3 bucket emptied successfully"
+      else
+        echo ""
+        echo "⚠️  Warning: $REMAINING objects may remain. Run again if needed."
       fi
     '';
 
@@ -990,6 +1051,13 @@ asyncio.run(run())
         scrape_interval = "1s";  # 1s scraping for real-time ObservePanel
         static_configs = [{
           targets = ["localhost:8889"];
+        }];
+      }
+      {
+        job_name = "cost-monitor";
+        scrape_interval = "60s";  # 1-minute granularity for cost metrics
+        static_configs = [{
+          targets = ["localhost:9876"];
         }];
       }
     ];
@@ -2013,6 +2081,43 @@ except Exception as e:
           initial_delay_seconds = 3;
           period_seconds = 2;
           failure_threshold = 15;
+        };
+      };
+    };
+
+    # ============================================================================
+    # Cost Monitor - AWS Cost Observability
+    # ============================================================================
+    # Polls AWS Cost Explorer and resource inventory, exposes Prometheus metrics.
+    # Metrics endpoint: http://localhost:9876/metrics
+    cost-monitor = {
+      exec = ''
+        echo "Starting AWS cost monitor..."
+        echo "Metrics endpoint: http://localhost:9876/metrics"
+        echo "Poll interval: 300 seconds (5 minutes)"
+
+        # Use real AWS credentials (not MinIO)
+        # AWS_PROFILE reads from ~/.aws/credentials
+        export AWS_PROFILE="''${AWS_PROFILE:-default}"
+        export AWS_REGION="''${AWS_REGION:-us-east-1}"
+
+        # Run the cost monitor (Flask + Prometheus metrics)
+        exec uv run python -m cybersec.cost.monitor
+      '';
+      process-compose = {
+        readiness_probe = {
+          http_get = {
+            host = "localhost";
+            port = 9876;
+            path = "/health";
+          };
+          initial_delay_seconds = 10;
+          period_seconds = 30;
+          failure_threshold = 3;
+        };
+        availability = {
+          restart = "on_failure";
+          max_restarts = 5;
         };
       };
     };

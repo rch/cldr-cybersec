@@ -5,6 +5,8 @@ description = "Cybersec toolkit with Flink processing and Iceberg storage"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    # NumPy constrained for numba/datashader compatibility
+    "numpy>=2.0.0,<2.4",
     "pyarrow>=15.0.0",
     "pandas>=2.2.0",
     "psycopg2-binary>=2.9.9",
@@ -23,6 +25,8 @@ dependencies = [
     "psutil>=5.9.0",
     # TOML writing
     "tomli-w>=1.0.0",
+    # Prometheus metrics export for cost monitoring
+    "prometheus-client>=0.19.0",
     "ty>=0.0.13",
     "ortools>=9.12.4544",
     "pyhocon>=0.3.61",
@@ -71,6 +75,27 @@ observability = [
     "s3fs>=2024.2.0",
 ]
 
+# SC26 Benchmark extra - install with: uv sync --extra benchmark
+# For running Dask/Datashader scaling benchmarks.
+# Note: Conflicts with flink extra due to cloudpickle version mismatch.
+benchmark = [
+    # Dask distributed computing
+    "dask[complete]>=2025.2.0",
+    "distributed>=2025.2.0",
+    # S3 filesystem support
+    "s3fs>=2024.2.0",
+    # Publication figures
+    "matplotlib>=3.8.0",
+    # NumPy constrained for numba compatibility
+    "numpy>=2.0.0,<2.4",
+    # Numba for datashader (must be 0.60+ for Python 3.12)
+    "numba>=0.60.0",
+    # Datashader for out-of-core visualization (0.16.3+ for Python 3.12)
+    "datashader>=0.16.3",
+    # Colorcet for datashader colormaps
+    "colorcet>=3.0.0",
+]
+
 [project.scripts]
 cybersec = "cybersec.cli.main:run"
 cybersec-mcp = "cybersec.mcp.server:run_server"
@@ -85,13 +110,17 @@ include = ["cybersec*"]
 [tool.uv]
 package = true
 
-# Declare conflicting extras - k8s (dask) and flink have incompatible cloudpickle versions.
+# Declare conflicting extras - k8s/benchmark (dask) and flink have incompatible cloudpickle versions.
 # Users cannot install both simultaneously, but each can be resolved independently.
 # - apache-flink requires apache-beam which needs cloudpickle>=2.2.1,<2.3
 # - dask requires cloudpickle>=3.0.0
 conflicts = [
     [
         { extra = "k8s" },
+        { extra = "flink" },
+    ],
+    [
+        { extra = "benchmark" },
         { extra = "flink" },
     ],
 ]
