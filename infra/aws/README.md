@@ -1,431 +1,525 @@
-# AWS Infrastructure for Dask on RKE2
+# AWS Cloud Deployment
 
-This directory contains OpenTofu and Ansible automation for deploying a Dask cluster with JupyterHub on RKE2 (Rancher Kubernetes Engine 2) in a soft air-gapped AWS environment.
+Deploy a production-grade Dask cluster with JupyterHub on RKE2 in AWS, with HTTPS access via ngrok and OAuth authentication.
 
 ## Overview
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
 | Infrastructure | OpenTofu | VPC, EC2, IAM, Security Groups, S3 |
-| Configuration | Ansible | RKE2 installation, Dask, JupyterHub |
+| Configuration | Ansible | RKE2 installation, Dask, JupyterHub, ngrok |
 | Kubernetes | RKE2 | Production-grade K8s distribution |
 | Compute | Dask | Distributed Python computing |
 | Notebooks | JupyterHub | Interactive notebook environment |
 | External Access | ngrok | HTTPS ingress with OAuth |
-| Validation | Conftest | Policy-based infrastructure checks |
-
-## Architecture
-
-```mermaid
-flowchart TB
-    subgraph internet["Internet"]
-        user[User]
-    end
-
-    subgraph vpc["VPC (10.100.0.0/16)"]
-        subgraph public["Public Subnets"]
-            igw[Internet Gateway]
-            bastion["Bastion<br/>(t3.small)"]
-            nat[NAT Gateway]
-        end
-
-        subgraph private["Private Subnets"]
-            subgraph cp["RKE2 Control Plane"]
-                cp1["m6i.xlarge"]
-                cp2["m6i.xlarge"]
-                cp3["m6i.xlarge"]
-            end
-
-            subgraph workers["RKE2 Workers"]
-                w1["m6i.2xlarge"]
-                w2["m6i.2xlarge"]
-                w3["m6i.2xlarge"]
-
-                subgraph dask["Dask Cluster"]
-                    scheduler[Scheduler]
-                    dw["64 workers"]
-                end
-            end
-        end
-
-        subgraph endpoints["VPC Endpoints"]
-            s3ep[S3 Gateway]
-            ecr[ECR Interface]
-            ssm[SSM Interface]
-        end
-    end
-
-    user --> igw
-    igw --> bastion
-    bastion --> cp
-    bastion --> workers
-    nat --> private
-    private --> endpoints
-```
-
-### VPC Endpoints (Soft Air-Gap)
-
-Private subnets access AWS services via VPC endpoints:
-- **S3 Gateway Endpoint** - Free, for data storage
-- **ECR Interface Endpoints** - For container images
-- **SSM Interface Endpoints** - For Session Manager access
 
 ## Prerequisites
 
-- AWS CLI configured with appropriate credentials
-- OpenTofu >= 1.6.0
-- Ansible >= 2.14
-- An SSH key pair in AWS
+### AWS Setup
+
+1. AWS CLI configured with credentials:
+   ```bash
+   aws configure
+   # Or set AWS_PROFILE
+   export AWS_PROFILE=your-profile
+   ```
+
+2. Required IAM permissions:
+   - EC2 (instances, VPCs, security groups)
+   - IAM (roles, policies)
+   - S3 (buckets)
+
+3. SSH key pair created in AWS:
+   ```bash
+   aws ec2 create-key-pair --key-name cybersec-key --query 'KeyMaterial' --output text > ~/.ssh/cybersec-key.pem
+   chmod 600 ~/.ssh/cybersec-key.pem
+   ```
+
+### ngrok Setup (for external access)
+
+1. Create an ngrok account at https://ngrok.com
+2. Get your auth token from the dashboard
+3. Get your API key (for operator deployment)
+
+### Cloudflare Setup (optional, for custom domains)
+
+If using a custom domain with Cloudflare:
+1. Get your Cloudflare API token
+2. Configure your zone ID
+
+---
 
 ## Quick Start
 
-### 1. Deploy Infrastructure
+```bash
+# 1. Set environment variables
+export AWS_PROFILE=default
+export NGROK_AUTH_TOKEN=<your-token>
+export NGROK_API_KEY=<your-api-key>
+export NGROK_ALLOWED_EMAIL=user@company.com
+
+# 2. Provision infrastructure
+devenv tasks run aws:provision
+
+# 3. Generate Ansible inventory
+devenv tasks run aws:inventory
+
+# 4. Deploy full stack
+devenv tasks run aws:deploy
+
+# 5. Verify deployment
+devenv tasks run aws:verify
+```
+
+Access:
+- **JupyterHub**: https://jupyter.your-ngrok-domain.ngrok-free.app (or custom domain)
+- **SSH**: `devenv tasks run aws:ssh`
+
+---
+
+## Detailed Workflow
+
+### Phase 1: Provision Infrastructure
 
 ```bash
-cd tofu
+devenv tasks run aws:provision
+```
 
-# Initialize OpenTofu
-tofu init
+This runs `tofu apply` to create:
+- VPC with public and private subnets
+- NAT Gateway for outbound traffic
+- Bastion host in public subnet
+- 3 control plane nodes (m6i.xlarge)
+- 3 worker nodes (m6i.2xlarge)
+- S3 bucket for data storage
+- VPC endpoints for air-gapped operation
 
-# Create tfvars file
+Alternatively, run OpenTofu directly:
+
+```bash
+cd infra/aws/tofu
 cp terraform.tfvars.example terraform.tfvars
 # Edit terraform.tfvars with your SSH key name
-
-# Plan and apply
+tofu init
 tofu plan
 tofu apply
 ```
 
-### 2. Generate Ansible Inventory
+### Phase 2: Generate Inventory
 
 ```bash
-# Generate inventory from Terraform output
+devenv tasks run aws:inventory
+```
+
+Generates Ansible inventory from Tofu output:
+
+```bash
+# Or manually:
+cd infra/aws/tofu
 tofu output -raw ansible_inventory > ../ansible/inventory/hosts
 ```
 
-### 3. Deploy RKE2 and Dask
+### Phase 3: Deploy Applications
+
+Deploy the full stack:
 
 ```bash
-cd ../ansible
-
-# Run the full playbook
-ansible-playbook playbooks/site.yml
+devenv tasks run aws:deploy
 ```
 
-### 4. Deploy JupyterHub with External Access (Optional)
-
-Use devenv tasks for streamlined deployment:
+Or deploy components individually:
 
 ```bash
-# Set required environment variables
-export AWS_PROFILE=default  # AWS credentials for S3 access
-export NGROK_AUTH_TOKEN=<your-token>
-export NGROK_ALLOWED_EMAIL=<your-email@domain.com>
+# RKE2 cluster (automatically included in aws:deploy)
+cd infra/aws/ansible
+ansible-playbook playbooks/site.yml
 
-# Deploy ngrok operator (one-time)
+# Dask only
+devenv tasks run aws:deploy:dask
+
+# ngrok operator
 devenv tasks run aws:deploy:ngrok
 
-# Deploy JupyterHub
+# JupyterHub
 devenv tasks run aws:deploy:jupyterhub
 ```
 
-JupyterHub will be accessible at the configured ngrok domain (e.g., `https://jupyter.yourdomain.org`).
-
-### 5. Access the Cluster
+### Phase 4: Verify Deployment
 
 ```bash
-# SSH to bastion
-ssh -i ~/.ssh/your-key.pem ec2-user@$(tofu output -raw bastion_public_ip)
-
-# From bastion, access kubectl
-ssh ec2-user@<control-plane-ip>
-kubectl get nodes
-kubectl get pods -n dask
+devenv tasks run aws:verify
 ```
 
-## Customization
+Checks:
+- All nodes are Ready
+- Dask operator is running
+- Dask workers are healthy
+- JupyterHub is accessible
+- ngrok tunnel is established
 
-### Cluster Sizing
+---
 
-Edit `terraform.tfvars`:
+## Environment Variables
 
-```hcl
-# Production sizing
-control_plane_count = 3
-worker_count = 10
-worker_instance_type = "m6i.4xlarge"
-data_volume_size = 1000
-```
+### Required
 
-### Dask Configuration
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `AWS_PROFILE` | AWS credentials profile | `default` |
+| `NGROK_AUTH_TOKEN` | ngrok authentication token | `2abc...` |
+| `NGROK_API_KEY` | ngrok API key for operator | `s_abc...` |
+| `NGROK_ALLOWED_EMAIL` | Email(s) allowed via OAuth | `user@company.com` |
 
-Edit `ansible/group_vars/all.yml`:
+### Optional
 
-```yaml
-dask_worker_replicas: 128
-dask_worker_memory_limit: "16GB"
-dask_worker_threads: 2
-```
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token for DNS | — |
+| `CLOUDFLARE_ZONE_ID` | Cloudflare zone ID | — |
+| `NGROK_DOMAIN` | Custom domain for ingress | auto-generated |
+| `JUPYTERHUB_ADMIN` | JupyterHub admin user | — |
 
-Or pass variables at runtime:
+### Setting Variables
 
 ```bash
-ansible-playbook playbooks/site.yml -e dask_worker_replicas=128
+# In .envrc.local (recommended, gitignored)
+export AWS_PROFILE=default
+export NGROK_AUTH_TOKEN=your-token
+export NGROK_API_KEY=your-api-key
+export NGROK_ALLOWED_EMAIL=user@company.com
+
+# Or pass to specific tasks
+NGROK_AUTH_TOKEN=xxx devenv tasks run aws:deploy:ngrok
 ```
 
-## Operations
+---
 
-### Scale Workers
+## Task Reference
 
-```bash
-# Scale RKE2 workers (edit tfvars then apply)
-tofu apply -var worker_count=5
+### Infrastructure Tasks
 
-# Scale Dask workers
-kubectl -n dask patch daskcluster simple -p '{"spec":{"worker":{"replicas":128}}}' --type=merge
+| Task | Description |
+|------|-------------|
+| `aws:provision` | Create VPC, EC2, IAM with OpenTofu |
+| `aws:inventory` | Generate Ansible inventory from Tofu output |
+| `aws:destroy` | Destroy infrastructure (keeps S3 data) |
+| `aws:teardown` | Full teardown including S3 cleanup |
+
+### Deployment Tasks
+
+| Task | Description |
+|------|-------------|
+| `aws:deploy` | Deploy full stack (RKE2 + Dask + JupyterHub + ngrok) |
+| `aws:deploy:dask` | Deploy Dask operator and cluster |
+| `aws:deploy:jupyterhub` | Deploy JupyterHub with S3 access |
+| `aws:deploy:ngrok` | Deploy ngrok operator for HTTPS ingress |
+| `aws:apply` | Apply all Ansible configuration |
+
+### Operations Tasks
+
+| Task | Description |
+|------|-------------|
+| `aws:status` | Show infrastructure and service status |
+| `aws:verify` | Run post-deployment verification checks |
+| `aws:ssh` | SSH to bastion host |
+| `aws:logs:ngrok` | View ngrok operator logs |
+
+### S3 Tasks
+
+| Task | Description |
+|------|-------------|
+| `aws:s3:clean` | Remove objects from S3 bucket |
+| `aws:s3:empty` | Empty S3 bucket completely |
+
+---
+
+## Infrastructure Details
+
+### VPC Architecture
+
+```
+┌───────────────────────────────────────────────────────────────────────────┐
+│                            VPC (10.100.0.0/16)                            │
+│                                                                           │
+│  ┌─────────────────────────────┐   ┌─────────────────────────────────┐   │
+│  │     Public Subnets          │   │      Private Subnets            │   │
+│  │                             │   │                                 │   │
+│  │  ┌─────────────────────┐    │   │  ┌─────────────────────────┐   │   │
+│  │  │ Internet Gateway    │    │   │  │ Control Plane (x3)      │   │   │
+│  │  └─────────────────────┘    │   │  │ m6i.xlarge              │   │   │
+│  │           │                 │   │  │ - RKE2 server           │   │   │
+│  │           ▼                 │   │  └─────────────────────────┘   │   │
+│  │  ┌─────────────────────┐    │   │                                │   │
+│  │  │ Bastion             │────┼───┼──────────────────────────────► │   │
+│  │  │ t3.small            │    │   │  ┌─────────────────────────┐   │   │
+│  │  └─────────────────────┘    │   │  │ Workers (x3)            │   │   │
+│  │           │                 │   │  │ m6i.2xlarge             │   │   │
+│  │           ▼                 │   │  │ - RKE2 agent            │   │   │
+│  │  ┌─────────────────────┐    │   │  │ - Dask workers          │   │   │
+│  │  │ NAT Gateway         │────┼───┼──► JupyterHub              │   │   │
+│  │  └─────────────────────┘    │   │  └─────────────────────────┘   │   │
+│  │                             │   │                                │   │
+│  └─────────────────────────────┘   └─────────────────────────────────┘   │
+│                                                                           │
+│  ┌───────────────────────────────────────────────────────────────────┐   │
+│  │                        VPC Endpoints                              │   │
+│  │  S3 Gateway │ ECR Interface │ SSM Interface                       │   │
+│  └───────────────────────────────────────────────────────────────────┘   │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Access Dask Dashboard
+### Instance Specifications
 
-```bash
-# Port forward through bastion
-ssh -L 8787:simple-scheduler.dask.svc.cluster.local:8787 \
-    -J ec2-user@<bastion-ip> \
-    ec2-user@<worker-ip>
+| Role | Instance Type | Count | Resources |
+|------|---------------|-------|-----------|
+| Bastion | t3.small | 1 | 2 vCPU, 2 GiB |
+| Control Plane | m6i.xlarge | 3 | 4 vCPU, 16 GiB |
+| Worker | m6i.2xlarge | 3 | 8 vCPU, 32 GiB |
 
-# Open http://localhost:8787
-```
+### S3 Configuration
 
-### Destroy Infrastructure
+The S3 bucket stores:
+- OTel telemetry data
+- Iceberg table data
+- JupyterHub notebooks (optional)
 
-```bash
-cd tofu
-tofu destroy
-```
+IAM roles provide pods with S3 access via IRSA (IAM Roles for Service Accounts).
 
-## JupyterHub + Dask Integration
+---
 
-### Version Compatibility (Critical)
+## JupyterHub Integration
 
-Dask distributed computing requires **exact version matching** between JupyterHub clients and Dask workers for serialization to work. The automation ensures this by:
+### Version Compatibility
 
-1. **Same Docker Image**: JupyterHub singleuser pods use `ghcr.io/dask/dask:latest` - the exact same image as Dask workers
-2. **JupyterHub Installed at Startup**: The singleuser container installs `jupyterhub` via pip at startup
-3. **Pinned Package Versions**: Core packages are pinned in `roles/dask/files/requirements-dask.txt`:
-   ```
-   dask[complete]==2025.2.0
-   distributed==2025.2.0
-   pandas==2.2.3
-   numpy==2.1.3
-   pyarrow==18.1.0
-   ```
+Dask requires exact version matching between JupyterHub clients and workers.
 
-### AWS Credentials for S3 Access
+The automation ensures this by:
+1. Using the same Docker image (`ghcr.io/dask/dask:latest`) for both
+2. Installing JupyterHub at pod startup
+3. Pinning package versions in `roles/dask/files/requirements-dask.txt`
 
-JupyterHub notebooks need AWS credentials to access S3. The deployment:
+### AWS Credentials
 
-1. Reads credentials from your AWS profile (`AWS_PROFILE` env var)
-2. Creates a Kubernetes Secret (`aws-credentials`) in the jupyterhub namespace
-3. Injects credentials into singleuser pods via `valueFrom.secretKeyRef`
+JupyterHub pods get S3 access automatically:
 
-```bash
-# Credentials are pulled from your AWS profile automatically
-devenv tasks run aws:deploy:jupyterhub
-```
-
-### External Access via ngrok
-
-For HTTPS access with GitHub OAuth:
-
-1. **ngrok Operator**: Deployed to `ngrok-system` namespace
-2. **Traffic Policy**: OAuth enforced via `NgrokTrafficPolicy` CRD
-3. **Ingress**: Routes traffic to JupyterHub service
-
-Configure in `ansible/group_vars/all.yml`:
-```yaml
-ngrok_domain: "jupyter.yourdomain.org"
-ngrok_allowed_email: "user@company.com"
-```
+1. `aws:deploy:jupyterhub` reads credentials from `AWS_PROFILE`
+2. Creates Kubernetes Secret `aws-credentials` in jupyterhub namespace
+3. Mounts credentials into single-user pods
 
 ### Sample Notebooks
 
-Notebooks from `build/notebooks/` are deployed to JupyterHub via ConfigMap:
-- `Dask_S3_Validation.ipynb` - Validates out-of-core S3 processing with 10M spans
-- `OTel_Telemetry_Explorer.ipynb` - Interactive OTel data exploration
+Notebooks from `build/notebooks/` are deployed via ConfigMap:
+- `Dask_S3_Validation.ipynb` - S3 out-of-core processing
+- `OTel_Telemetry_Explorer.ipynb` - OTel data exploration
 
-## Security Notes
+---
 
-1. **SSH Access**: Default allows 0.0.0.0/0. Restrict `allowed_ssh_cidrs` in production.
-2. **Session Manager**: All nodes have SSM access for emergency access without SSH.
-3. **Encryption**: All EBS volumes are encrypted at rest.
-4. **Network**: Workers have no direct internet access (NAT gateway for egress).
+## External Access via ngrok
 
-## Cost Optimization
+### How It Works
 
-For development/testing:
-- Use smaller instance types
-- Reduce worker count
-- Use spot instances (modify `ec2.tf`)
+1. **ngrok Operator** deploys as a Kubernetes controller
+2. **NgrokTrafficPolicy** CRD defines OAuth requirements
+3. **Ingress** routes traffic to JupyterHub service
+4. Users authenticate via GitHub/Google OAuth
 
-```hcl
-# Example spot configuration for workers
-resource "aws_spot_instance_request" "worker" {
-  # ... existing config ...
-  spot_price = "0.10"
-  instance_interruption_behavior = "stop"
-}
+### Configuration
+
+```yaml
+# ansible/group_vars/all.yml
+ngrok_domain: "jupyter.yourdomain.org"  # Or use auto-generated
+ngrok_allowed_email: "user@company.com"
 ```
+
+### OAuth Providers
+
+Supported providers:
+- GitHub
+- Google
+- OAuth 2.0 (custom)
+
+Configure in the NgrokTrafficPolicy resource.
+
+---
+
+## Cost Management
+
+### Estimated Costs
+
+| Resource | Monthly Cost (us-east-1) |
+|----------|--------------------------|
+| 3x m6i.xlarge (control plane) | ~$345 |
+| 3x m6i.2xlarge (workers) | ~$690 |
+| 1x t3.small (bastion) | ~$15 |
+| NAT Gateway | ~$32 + data |
+| S3 | Variable |
+| **Total (minimum)** | **~$1,100/mo** |
+
+### Cost Reduction Tips
+
+1. **Destroy when not in use**:
+   ```bash
+   devenv tasks run aws:destroy
+   ```
+
+2. **Use spot instances** for workers (modify `tofu/ec2.tf`)
+
+3. **Reduce worker count** for testing:
+   ```hcl
+   # terraform.tfvars
+   worker_count = 1
+   ```
+
+### Cleanup
+
+```bash
+# Destroy infrastructure (keeps S3 data)
+devenv tasks run aws:destroy
+
+# Full teardown including S3
+devenv tasks run aws:teardown
+
+# Just empty S3 bucket
+devenv tasks run aws:s3:empty
+```
+
+---
 
 ## Troubleshooting
 
 ### RKE2 not starting
+
 ```bash
-# Check logs on control plane
+# SSH to control plane via bastion
+devenv tasks run aws:ssh
+ssh ec2-user@<control-plane-ip>
+
+# Check RKE2 logs
 journalctl -u rke2-server -f
 
-# Check logs on worker
+# On workers
 journalctl -u rke2-agent -f
 ```
 
 ### Dask workers not scheduling
+
 ```bash
 # Check events
 kubectl get events -n dask
 
 # Check operator logs
 kubectl logs -n dask deployment/dask-operator
+
+# Check worker pods
+kubectl describe pods -n dask -l dask.org/component=worker
 ```
 
-### VPC Endpoint issues
+### ngrok tunnel not working
+
 ```bash
-# Verify endpoints from private subnet
+# Check ngrok operator logs
+devenv tasks run aws:logs:ngrok
+
+# Verify ingress
+kubectl get ingress -n jupyterhub
+
+# Check NgrokTrafficPolicy
+kubectl get ngroktrafficpolicy -A
+```
+
+### VPC endpoint issues
+
+```bash
+# Verify endpoints
 aws ec2 describe-vpc-endpoints --filters "Name=vpc-id,Values=<vpc-id>"
+
+# Test from private subnet (via bastion)
+aws s3 ls --endpoint-url https://s3.us-east-1.amazonaws.com
 ```
 
-## Policy Validation
-
-Conftest policies ensure infrastructure consistency before and after deployment.
-
-### Pre-Deployment Validation
+### JupyterHub can't access S3
 
 ```bash
-# Validate Terraform plan (when infrastructure policies are defined)
-tofu plan -out=plan.tfplan
-tofu show -json plan.tfplan > plan.json
+# Verify secret exists
+kubectl get secret aws-credentials -n jupyterhub
 
-# Future: conftest test plan.json --policy ../../policy/infrastructure/
-# Policies can check for:
-# - Security group rules too permissive
-# - Missing encryption on EBS volumes
-# - Instance types not in approved list
+# Check pod environment
+kubectl exec -it <jupyterhub-pod> -n jupyterhub -- env | grep AWS
+
+# Test S3 access from pod
+kubectl exec -it <jupyterhub-pod> -n jupyterhub -- aws s3 ls
 ```
 
-### Runtime Validation
-
-```bash
-# Generate environment config on a cluster node
-uv run python -c "
-from cybersec.health.environment import gather_environment_config
-import json
-print(json.dumps(gather_environment_config()))
-" > /tmp/environment.json
-
-# Validate kubernetes configuration
-conftest test /tmp/environment.json --policy policy/environment/
-```
-
-### Kubernetes Configuration Policies
-
-The `policy/environment/kubernetes.rego` policy validates:
-
-| Rule | Level | AWS Context |
-|------|-------|-------------|
-| Target consistency | DENY | Ensures CYBERSEC_K8S_TARGET matches actual cluster |
-| kubectl connectivity | WARN | Verifies kubectl can reach RKE2 API server |
-| kubeconfig existence | WARN | Confirms kubeconfig path is valid |
-
-### Example Policy Output
-
-```bash
-# On AWS RKE2 cluster with ENABLE_K8S=true
-$ conftest test build/environment.json --policy policy/environment/
-
-PASS - build/environment.json - environment/kubernetes
-
-# Info messages:
-# - Kubernetes target: rke2
-# - Using existing kubeconfig: /etc/rancher/rke2/rke2.yaml (cluster type: rke2)
-```
-
-## Devenv Tasks
-
-Streamlined deployment via devenv:
-
-```bash
-# Show available AWS tasks
-devenv tasks list | grep aws
-
-# Deploy individual components
-devenv tasks run aws:deploy:dask        # Dask operator + cluster
-devenv tasks run aws:deploy:ngrok       # ngrok operator with OAuth
-devenv tasks run aws:deploy:jupyterhub  # JupyterHub with notebooks
-
-# Full stack
-devenv tasks run aws:apply              # Apply all configuration
-```
+---
 
 ## Directory Structure
 
 ```
 aws/
-├── README.md           # This file
+├── README.md                    # This file
 ├── tofu/
-│   ├── main.tf         # Root module
-│   ├── variables.tf    # Input variables
-│   ├── outputs.tf      # Terraform outputs
-│   ├── vpc.tf          # VPC, subnets, NAT gateway
-│   ├── ec2.tf          # EC2 instances (bastion, control plane, workers)
-│   ├── iam.tf          # IAM roles and policies
-│   ├── s3.tf           # S3 bucket for data storage
-│   ├── security.tf     # Security groups
-│   └── terraform.tfvars.example
+│   ├── main.tf                  # Root module
+│   ├── variables.tf             # Input variables
+│   ├── outputs.tf               # Terraform outputs
+│   ├── vpc.tf                   # VPC, subnets, NAT gateway
+│   ├── ec2.tf                   # EC2 instances
+│   ├── iam.tf                   # IAM roles and policies
+│   ├── s3.tf                    # S3 bucket
+│   ├── security.tf              # Security groups
+│   └── terraform.tfvars.example # Example configuration
 └── ansible/
     ├── playbooks/
-    │   ├── site.yml        # Main playbook (RKE2 + Dask)
-    │   ├── dask-only.yml   # Dask operator only
-    │   └── jupyterhub.yml  # JupyterHub deployment
+    │   ├── site.yml             # Main playbook (RKE2 + Dask)
+    │   ├── dask-only.yml        # Dask operator only
+    │   └── jupyterhub.yml       # JupyterHub deployment
     ├── roles/
-    │   ├── rke2/           # RKE2 installation
-    │   ├── dask/           # Dask operator and cluster
+    │   ├── rke2/                # RKE2 installation
+    │   ├── dask/                # Dask operator and cluster
     │   │   └── files/
-    │   │       └── requirements-dask.txt  # Pinned package versions
-    │   ├── jupyterhub/     # JupyterHub with Dask integration
+    │   │       └── requirements-dask.txt
+    │   ├── jupyterhub/          # JupyterHub with Dask
     │   │   ├── defaults/main.yml
     │   │   ├── tasks/main.yml
     │   │   └── templates/jupyterhub-values.yaml.j2
-    │   └── ngrok/          # ngrok operator for external access
+    │   └── ngrok/               # ngrok operator
     ├── inventory/
-    │   └── hosts           # Generated from tofu output
+    │   └── hosts                # Generated from tofu output
     └── group_vars/
-        └── all.yml         # Cluster-wide variables
+        └── all.yml              # Cluster-wide variables
+```
+
+---
 
 ## Integration with Local Development
 
-The AWS cluster can be used from your local devenv environment:
+You can use the AWS cluster from your local devenv:
 
 ```bash
-# Copy kubeconfig from bastion
+# 1. Set up SSH tunnel through bastion
+ssh -L 6443:<control-plane-ip>:6443 -J ec2-user@<bastion-ip> ec2-user@<control-plane-ip>
+
+# 2. Copy and modify kubeconfig
 scp -J ec2-user@<bastion-ip> ec2-user@<control-plane-ip>:/etc/rancher/rke2/rke2.yaml ~/.kube/aws-rke2.yaml
+# Edit server: https://127.0.0.1:6443
 
-# Update server address to use SSH tunnel
-# Edit ~/.kube/aws-rke2.yaml: server: https://127.0.0.1:6443
-
-# Set up SSH tunnel
-ssh -L 6443:<control-plane-private-ip>:6443 -J ec2-user@<bastion-ip> ec2-user@<control-plane-ip>
-
-# In another terminal, use the cluster
+# 3. Use with k8s:* tasks
 export KUBECONFIG=~/.kube/aws-rke2.yaml
-ENABLE_K8S=true CYBERSEC_K8S_TARGET=rke2 devenv up
+devenv tasks run k8s:status
 ```
 
-This allows running the Dask UI port-forwards and other K8s processes against the remote AWS cluster.
+**Note**: For AWS deployments, prefer `aws:*` tasks over `k8s:*` tasks. The `k8s:*` tasks use Helm directly, while `aws:*` tasks use Ansible with AWS-specific configuration.
+
+---
+
+## Security Notes
+
+1. **SSH Access**: Default allows 0.0.0.0/0. Restrict `allowed_ssh_cidrs` in production.
+
+2. **Session Manager**: All nodes have SSM access for emergency access without SSH keys.
+
+3. **Encryption**: All EBS volumes are encrypted at rest.
+
+4. **Network Isolation**: Workers have no direct internet access (NAT for outbound only).
+
+5. **OAuth**: ngrok enforces authentication before reaching JupyterHub.

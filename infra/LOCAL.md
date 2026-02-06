@@ -1,94 +1,204 @@
-# Local Kubernetes Setup
+# Local Kubernetes Development
 
-This document covers local Kubernetes configurations for the cybersec toolkit, including k3d on Podman (macOS) and RKE2 on Linux workstations.
+Deploy Dask and JupyterHub on your local machine using k3d (lightweight Kubernetes) or an existing RKE2 cluster.
 
 ## Overview
 
-| Target | Platform | Provisioning | Best For |
-|--------|----------|--------------|----------|
-| k3d | macOS | Auto (devenv) | Development with lightweight K8s |
-| RKE2 | Linux | System-managed | Enterprise features, GPU workloads |
+| Workflow | Platform | Cluster | Best For |
+|----------|----------|---------|----------|
+| [k3d Development](#workflow-1-k3d-development) | macOS, Linux | k3d (auto-provisioned) | Quick iteration, zero setup |
+| [RKE2 Testing](#workflow-2-rke2-testing) | Linux | Existing RKE2 | Production-like testing |
 
-## Quick Start
+Both workflows use the same `k8s:*` devenv tasks for application deployment.
 
-### Enable Kubernetes Stack
+## Prerequisites
+
+### Required Tools
+
+All tools are provided by `devenv shell`:
+
+| Tool | Purpose | Provided By |
+|------|---------|-------------|
+| `kubectl` | Kubernetes CLI | devenv |
+| `helm` | Package manager | devenv |
+| `k3d` | Lightweight K8s clusters | devenv |
+
+### Platform-Specific Requirements
+
+**macOS (k3d workflow)**:
+- Podman Desktop or Podman CLI with a running machine
+- Recommended: 8 GiB+ memory allocated to Podman machine
+
+**Linux (k3d workflow)**:
+- Docker or Podman installed and running
+
+**Linux (RKE2 workflow)**:
+- RKE2 installed and running (`/etc/rancher/rke2/rke2.yaml` accessible)
+
+---
+
+## Workflow 1: k3d Development
+
+k3d creates lightweight k3s clusters inside containers. This is the fastest path to a working Dask cluster.
+
+### Quick Start
 
 ```bash
-# Auto-detect target based on environment
-ENABLE_K8S=true devenv up
+# Enter devenv shell (provides kubectl, helm, k3d)
+devenv shell
 
-# Explicit target selection
-ENABLE_K8S=true CYBERSEC_K8S_TARGET=k3d devenv up    # Force k3d
-ENABLE_K8S=true CYBERSEC_K8S_TARGET=rke2 devenv up   # Force RKE2
+# Provision k3d cluster
+devenv tasks run k8s:provision
+
+# Deploy Dask
+devenv tasks run k8s:deploy-dask
+
+# Deploy JupyterHub (optional)
+devenv tasks run k8s:deploy-jupyter
+
+# Start port-forwarding
+devenv tasks run k8s:forward
 ```
 
-### Verify Configuration
+Access services:
+- **Dask Dashboard**: http://localhost:8787
+- **JupyterHub**: http://localhost:8000
+
+### Step-by-Step Details
+
+#### 1. Provision k3d Cluster
 
 ```bash
-# Check detected configuration
-uv run python -c "
-from cybersec.health.environment import gather_environment_config
-import json
-cfg = gather_environment_config()
-print(json.dumps(cfg['kubernetes'], indent=2))
-"
+devenv tasks run k8s:provision
+```
 
-# Validate with conftest
-conftest test build/environment.json --policy policy/environment/
+This creates a single-node k3s cluster named `cybersec` with:
+- API server on port 6550
+- Kubeconfig at `.devenv/state/cybersec/kubeconfig`
+
+Verify the cluster:
+
+```bash
+export KUBECONFIG=.devenv/state/cybersec/kubeconfig
+kubectl get nodes
+# NAME                    STATUS   ROLES                  AGE   VERSION
+# k3d-cybersec-server-0   Ready    control-plane,master   1m    v1.28.x
+```
+
+#### 2. Deploy Dask
+
+```bash
+devenv tasks run k8s:deploy-dask
+```
+
+This installs:
+- Dask Kubernetes Operator
+- DaskCluster CR with 1 worker (conservative for local)
+
+Verify Dask:
+
+```bash
+kubectl get pods -n dask
+# NAME                             READY   STATUS    RESTARTS   AGE
+# dask-operator-xxx                1/1     Running   0          1m
+# simple-scheduler-xxx             1/1     Running   0          1m
+# simple-default-worker-xxx        1/1     Running   0          1m
+```
+
+#### 3. Deploy JupyterHub (Optional)
+
+```bash
+devenv tasks run k8s:deploy-jupyter
+```
+
+JupyterHub is configured for local development:
+- Dummy authenticator (any username, no password)
+- Single-user pods with Dask client pre-installed
+
+#### 4. Start Port-Forwarding
+
+```bash
+devenv tasks run k8s:forward
+```
+
+This runs `kubectl port-forward` for:
+- Dask Dashboard: localhost:8787
+- JupyterHub: localhost:8000 (if deployed)
+
+### Cleanup
+
+```bash
+# Delete the k3d cluster
+devenv tasks run k8s:destroy
+
+# This removes all Kubernetes resources and the cluster itself
 ```
 
 ---
 
-## k3d on Podman
+## Workflow 2: RKE2 Testing
 
-k3d creates lightweight k3s clusters inside Podman containers. This is the recommended approach for macOS development.
+Use an existing RKE2 or other Kubernetes cluster for production-like testing.
 
 ### Prerequisites
 
-- Podman machine configured and running
-- `k3d` CLI available (provided by devenv)
+1. RKE2 (or other K8s) cluster running and accessible
+2. KUBECONFIG pointing to the cluster
 
-### What Gets Provisioned
-
-When `ENABLE_K8S=true` and target is `k3d`:
-
-1. **podman-runtime** - Ensures Podman machine is running
-2. **k3d-cluster** - Creates single-node k3s cluster
-3. **dask-operator** - Installs Dask Kubernetes operator
-4. **dask-cluster** - Deploys Dask scheduler and workers
-5. **jupyterhub** - Deploys JupyterHub for notebooks
-6. **k8s-dashboard** - Deploys Kubernetes Dashboard
-7. **dask-ui** - Port-forwards Dask dashboard
-
-### Podman Machine Resources (macOS)
-
-The Podman machine is the resource ceiling for k3d workloads.
-
-**Recommended settings:**
-- Memory: 8 GiB minimum (16 GiB for larger workloads)
-- CPUs: 4-7
+### Quick Start
 
 ```bash
-# Check current settings
-podman machine info
+# Set KUBECONFIG to your cluster
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 
-# Resize (requires stop/start)
-podman machine stop
-podman machine set --cpus 7 --memory 8192
-podman machine start
+# Or for user-local config
+export KUBECONFIG=~/.kube/config
+
+# Verify connectivity
+kubectl get nodes
+
+# Deploy Dask
+devenv tasks run k8s:deploy-dask
+
+# Deploy JupyterHub (optional)
+devenv tasks run k8s:deploy-jupyter
+
+# Start port-forwarding
+devenv tasks run k8s:forward
 ```
 
-### k3d Configuration
+### RKE2 Installation (if needed)
 
-| Setting | Value | Purpose |
-|---------|-------|---------|
-| API Port | 6550 | Fixed port for stable kubectl access |
-| Cluster Name | cybersec | Matches HOCON config |
-| Kubeconfig | `.devenv/state/kubeconfig` | Auto-generated |
+If RKE2 is not yet installed on your Linux workstation:
 
-### Dask Resource Tuning
+```bash
+# Install RKE2 server (control plane + worker)
+curl -sfL https://get.rke2.io | sudo sh -
 
-Local Dask is configured conservatively to fit Podman constraints:
+# Enable and start
+sudo systemctl enable rke2-server
+sudo systemctl start rke2-server
+
+# Make kubeconfig accessible to your user
+mkdir -p ~/.kube
+sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/config
+sudo chown $USER ~/.kube/config
+chmod 600 ~/.kube/config
+```
+
+### Notes for RKE2
+
+- `k8s:provision` is a no-op for RKE2 (cluster already exists)
+- `k8s:destroy` will NOT delete your RKE2 cluster (only k3d clusters)
+- Resource limits can be higher since RKE2 workstations typically have more capacity
+
+---
+
+## Configuration
+
+### Dask Resources
+
+The default Dask configuration is conservative for local development:
 
 ```yaml
 # infra/dask/dask-cluster.yaml
@@ -104,306 +214,294 @@ spec:
         memory: "512Mi"
 ```
 
-### JupyterHub Resource Tuning
+Scale workers for larger workloads:
+
+```bash
+# Scale to 4 workers
+kubectl -n dask patch daskcluster simple \
+  -p '{"spec":{"worker":{"replicas":4}}}' --type=merge
+
+# Increase memory limits
+kubectl -n dask patch daskcluster simple \
+  -p '{"spec":{"worker":{"resources":{"limits":{"memory":"2Gi"}}}}}' --type=merge
+```
+
+### JupyterHub Resources
 
 Single-user pods are constrained for local development:
 
-- CPU request: 0.1 / limit: 0.5
-- Memory request: 256Mi / limit: 512Mi
+| Resource | Request | Limit |
+|----------|---------|-------|
+| CPU | 0.1 | 0.5 |
+| Memory | 256Mi | 512Mi |
 
-### Troubleshooting k3d
+### Podman Machine Resources (macOS)
 
-**Podman socket errors:**
+The Podman machine is the resource ceiling for k3d workloads:
+
 ```bash
-# Symptoms: k3d fails, kubeconfig missing
-# Fix: Restart Podman machine
+# Check current settings
+podman machine info
+
+# Resize (requires stop/start)
 podman machine stop
+podman machine set --cpus 6 --memory 8192
 podman machine start
 ```
 
-**Insufficient memory:**
+Recommended:
+- Memory: 8 GiB minimum (16 GiB for larger workloads)
+- CPUs: 4-6
+
+### YuniKorn Scheduler (Optional)
+
+[Apache YuniKorn](https://yunikorn.apache.org/) provides gang scheduling for Dask. This ensures all workers start together, which can improve performance for tightly-coupled workloads.
+
+YuniKorn is only supported for local deployments (k3d and local RKE2), not AWS.
+
+To enable:
+
 ```bash
-# Symptoms: Pods stuck Pending, "0/1 nodes available: Insufficient memory"
-# Fix: Increase Podman machine memory or reduce workload limits
-kubectl get events -A | grep -i memory
+# Deploy YuniKorn
+kubectl apply -f https://raw.githubusercontent.com/apache/yunikorn-k8shim/master/deployments/scheduler/yunikorn.yaml
+
+# Update Dask to use YuniKorn
+kubectl -n dask patch daskcluster simple \
+  -p '{"spec":{"worker":{"spec":{"schedulerName":"yunikorn"}}}}' --type=merge
 ```
 
-**Port conflicts:**
-```bash
-# Check what's using k3d API port
-lsof -nP -iTCP:6550 -sTCP:LISTEN
-```
-
----
-
-## RKE2 on Linux
-
-RKE2 (Rancher Kubernetes Engine 2) provides a production-grade Kubernetes distribution. Use this for Linux workstations with system-managed RKE2.
-
-### Prerequisites
-
-- RKE2 installed and running at system level
-- Kubeconfig accessible (typically `/etc/rancher/rke2/rke2.yaml`)
-- User in appropriate groups for kubeconfig access
-
-### RKE2 Installation
-
-If RKE2 is not yet installed:
+Access YuniKorn UI:
 
 ```bash
-# Install RKE2 server (control plane + worker)
-curl -sfL https://get.rke2.io | sudo sh -
-
-# Enable and start
-sudo systemctl enable rke2-server
-sudo systemctl start rke2-server
-
-# Make kubeconfig accessible
-sudo chmod 644 /etc/rancher/rke2/rke2.yaml
-# Or copy to user location
-mkdir -p ~/.kube
-sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/config
-sudo chown $USER ~/.kube/config
-```
-
-### Configuration
-
-Set KUBECONFIG to point to your RKE2 cluster:
-
-```bash
-# Option 1: System kubeconfig
-export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-
-# Option 2: User kubeconfig
-export KUBECONFIG=~/.kube/config
-
-# Then enable K8s stack
-ENABLE_K8S=true devenv up
-```
-
-### What Gets Deployed
-
-When `ENABLE_K8S=true` and target is `rke2`:
-
-1. **dask-operator** - Installs Dask Kubernetes operator
-2. **dask-cluster** - Deploys Dask scheduler and workers
-3. **jupyterhub** - Deploys JupyterHub for notebooks
-4. **k8s-dashboard** - Deploys Kubernetes Dashboard
-5. **dask-ui** - Port-forwards Dask dashboard
-
-Note: `podman-runtime` and `k3d-cluster` are skipped for RKE2 targets.
-
-### Resource Configuration
-
-RKE2 workstations typically have more resources. Adjust Dask workers accordingly:
-
-```bash
-# Scale Dask workers
-kubectl -n dask patch daskcluster simple -p '{"spec":{"worker":{"replicas":4}}}' --type=merge
-
-# Increase memory limits
-kubectl -n dask patch daskcluster simple -p '{"spec":{"worker":{"resources":{"limits":{"memory":"4Gi"}}}}}' --type=merge
-```
-
-### Troubleshooting RKE2
-
-**Permission denied on kubeconfig:**
-```bash
-# Check permissions
-ls -la /etc/rancher/rke2/rke2.yaml
-
-# Fix: Add user to rancher group or copy to user location
-sudo usermod -aG rancher $USER
-# Or
-sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/config
-sudo chown $USER ~/.kube/config
-chmod 600 ~/.kube/config
-```
-
-**RKE2 not running:**
-```bash
-# Check service status
-sudo systemctl status rke2-server
-
-# View logs
-sudo journalctl -u rke2-server -f
-```
-
-**API server unreachable:**
-```bash
-# Verify server is listening
-ss -tlnp | grep 6443
-
-# Check firewall
-sudo iptables -L -n | grep 6443
-```
-
----
-
-## YuniKorn Scheduler (Optional)
-
-[Apache YuniKorn](https://yunikorn.apache.org/) is a gang-scheduling capable batch scheduler for Kubernetes. When enabled, Dask pods are scheduled through YuniKorn instead of the default Kubernetes scheduler.
-
-### Benefits
-
-- **Gang scheduling**: Ensures all workers for a job start together
-- **Queue management**: Fair sharing and resource quotas across workloads
-- **Preemption**: Priority-based scheduling for mixed workloads
-
-### Enabling YuniKorn
-
-```bash
-# Enable with K8s stack
-ENABLE_K8S=true ENABLE_YUNIKORN=true devenv up
-
-# Verify YuniKorn is running
-kubectl get pods -n yunikorn
-# Expected: yunikorn-scheduler-xxx Running
-
-# Verify Dask uses YuniKorn
-kubectl get daskcluster cybersec-dask -n dask -o jsonpath='{.spec.worker.spec.schedulerName}'
-# Expected: yunikorn
-```
-
-### YuniKorn Web UI
-
-YuniKorn provides a web UI for queue management (not exposed by default):
-
-```bash
-# Port-forward to access YuniKorn UI
 kubectl port-forward svc/yunikorn-service -n yunikorn 9889:9889
-# Access at http://localhost:9889
+# Open http://localhost:9889
 ```
 
 ---
 
-## Common Configuration
+## Task Reference
 
-### Key Files
+All tasks are idempotent and can be run multiple times safely.
 
-| File | Purpose |
-|------|---------|
-| `devenv.nix` | Process definitions with ENABLE_K8S guards |
-| `config/reference.conf` | HOCON kubernetes configuration |
-| `infra/dask/dask-cluster.yaml` | Dask cluster manifest |
-| `.devenv/state/kubeconfig` | Generated kubeconfig (k3d) |
-| `build/kubeconfig-dashboard` | Dashboard-friendly kubeconfig |
-| `policy/environment/kubernetes.rego` | Conftest validation policies |
+### k8s:status
 
-### Environment Variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `ENABLE_K8S` | Master switch for K8s stack | `true` |
-| `CYBERSEC_K8S_TARGET` | Target type (`k3d`, `rke2`, `auto`, `none`) | `rke2` |
-| `KUBECONFIG` | Path to kubeconfig file | `/etc/rancher/rke2/rke2.yaml` |
-| `ENABLE_YUNIKORN` | Enable YuniKorn scheduler for Dask | `true` |
-
-### Service Ports
-
-| Service | Port | URL |
-|---------|------|-----|
-| Dask Scheduler | 8786 | (internal) |
-| Dask Dashboard | 8787 | http://127.0.0.1:8787 |
-| JupyterHub | 8000 | http://127.0.0.1:8000 |
-| K8s Dashboard | 10443 | https://127.0.0.1:10443 |
-| k3d API Server | 6550 | (k3d only) |
-
-### kubectl Access
+Check cluster connectivity and deployed resources.
 
 ```bash
-# k3d
-KUBECONFIG=.devenv/state/kubeconfig kubectl get nodes
-
-# RKE2
-KUBECONFIG=/etc/rancher/rke2/rke2.yaml kubectl get nodes
-
-# Or set in shell profile
-export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-kubectl get nodes
+devenv tasks run k8s:status
 ```
+
+Shows:
+- Cluster connection status
+- Node status
+- Dask namespace resources
+- JupyterHub namespace resources
+
+### k8s:provision
+
+Create a k3d cluster (k3d workflow only).
+
+```bash
+devenv tasks run k8s:provision
+```
+
+- Creates cluster `cybersec` with API on port 6550
+- Generates kubeconfig at `.devenv/state/cybersec/kubeconfig`
+- No-op if cluster already exists
+- No-op if KUBECONFIG points to non-k3d cluster
+
+### k8s:deploy-dask
+
+Deploy Dask operator and cluster.
+
+```bash
+devenv tasks run k8s:deploy-dask
+```
+
+- Installs Dask Kubernetes Operator via Helm
+- Creates DaskCluster CR in `dask` namespace
+- Idempotent: updates existing installation
+
+### k8s:deploy-jupyter
+
+Deploy JupyterHub.
+
+```bash
+devenv tasks run k8s:deploy-jupyter
+```
+
+- Installs JupyterHub via Helm
+- Configures dummy authenticator for local use
+- Configures Dask client in single-user pods
+
+### k8s:forward
+
+Start port-forwarding for local access.
+
+```bash
+devenv tasks run k8s:forward
+```
+
+Forwards:
+- 8787 → Dask scheduler dashboard
+- 8000 → JupyterHub (if deployed)
+
+Press Ctrl+C to stop forwarding.
+
+### k8s:destroy
+
+Delete k3d cluster (k3d workflow only).
+
+```bash
+devenv tasks run k8s:destroy
+```
+
+- Deletes the `cybersec` k3d cluster
+- Removes all Kubernetes resources
+- No-op for non-k3d clusters (safety measure)
 
 ---
 
-## Policy Validation
+## Troubleshooting
 
-The kubernetes.rego policy validates configuration consistency.
+### k3d cluster won't start
 
-### Deny Rules (Failures)
+**Symptom**: `k8s:provision` fails with container errors
 
-| Condition | Message |
-|-----------|---------|
-| k3d provision + RKE2 kubeconfig | "K8s enabled with k3d provisioning but KUBECONFIG points to RKE2" |
-| K8s enabled, no kubectl | "K8s enabled but no kubectl available" |
-
-### Warn Rules (Warnings)
-
-| Condition | Message |
-|-----------|---------|
-| Target=RKE2 but kubeconfig=k3d | "Target is RKE2 but KUBECONFIG points to k3d cluster" |
-| KUBECONFIG file missing | "KUBECONFIG set to 'path' but file does not exist" |
-| kubectl connection failed | "K8s enabled but kubectl cannot connect to cluster" |
-
-### Running Validation
+**Solution**: Ensure Podman/Docker is running
 
 ```bash
-# Generate environment config
-uv run python -c "
-from cybersec.health.environment import gather_environment_config
-import json
-print(json.dumps(gather_environment_config()))
-" > build/environment.json
+# macOS with Podman
+podman machine start
 
-# Run conftest
-conftest test build/environment.json --policy policy/environment/
-
-# Expected output (K8s disabled):
-# 1 test, 1 passed, 0 warnings, 0 failures
+# Linux with Docker
+sudo systemctl start docker
 ```
+
+### Pods stuck in Pending
+
+**Symptom**: Pods never reach Running state
+
+**Check events**:
+
+```bash
+kubectl get events -A | grep -i insufficient
+```
+
+**Solution**: Increase Podman machine memory or reduce resource requests
+
+```bash
+# macOS: increase Podman memory
+podman machine stop
+podman machine set --memory 8192
+podman machine start
+
+# Or reduce Dask worker limits
+kubectl -n dask patch daskcluster simple \
+  -p '{"spec":{"worker":{"resources":{"limits":{"memory":"256Mi"}}}}}' --type=merge
+```
+
+### Port conflicts
+
+**Symptom**: `k8s:forward` fails with "address already in use"
+
+**Check what's using the port**:
+
+```bash
+lsof -nP -iTCP:8787 -sTCP:LISTEN
+lsof -nP -iTCP:8000 -sTCP:LISTEN
+```
+
+**Solution**: Kill the conflicting process or use different ports
+
+### kubectl can't connect
+
+**Symptom**: "The connection to the server was refused"
+
+**Check KUBECONFIG**:
+
+```bash
+echo $KUBECONFIG
+# For k3d: should be .devenv/state/cybersec/kubeconfig
+# For RKE2: should be /etc/rancher/rke2/rke2.yaml or ~/.kube/config
+
+# Verify file exists and cluster is running
+cat $KUBECONFIG | head -20
+```
+
+**For k3d**: Check if cluster is running
+
+```bash
+k3d cluster list
+# If not listed, run k8s:provision again
+```
+
+**For RKE2**: Check service status
+
+```bash
+sudo systemctl status rke2-server
+```
+
+### JupyterHub authentication fails
+
+**Symptom**: Can't log in to JupyterHub
+
+For local development, JupyterHub uses dummy authentication:
+- **Username**: Any value (e.g., `admin`)
+- **Password**: Leave blank
 
 ---
 
-## Stack Lifecycle
+## Service Ports
 
-### Start
-
-```bash
-# Full clean restart with validation
-devenv tasks run restart:clean
-
-# Quick start
-ENABLE_K8S=true devenv up
-```
-
-### Stop
-
-```bash
-# Stop all processes
-devenv processes down
-
-# Stop only K8s-related (leaves core running)
-# Not directly supported - use full restart
-```
-
-### Status
-
-```bash
-# Process status
-pc status
-
-# Kubernetes resources
-kubectl get pods -A
-kubectl get daskcluster -n dask
-```
+| Service | Port | URL | Notes |
+|---------|------|-----|-------|
+| Dask Dashboard | 8787 | http://localhost:8787 | Port-forwarded |
+| JupyterHub | 8000 | http://localhost:8000 | Any username |
+| k3d API Server | 6550 | — | k3d only |
 
 ---
 
-## URLs Summary
+## Architecture Diagram
 
-| Service | URL | Notes |
-|---------|-----|-------|
-| Dask Dashboard | http://127.0.0.1:8787 | Port-forwarded |
-| JupyterHub | http://127.0.0.1:8000 | Any username (dummy auth) |
-| K8s Dashboard | https://127.0.0.1:10443 | Use kubeconfig-dashboard |
-| Flink UI | http://localhost:8081 | Core stack |
-| Prometheus | http://localhost:9090 | Core stack |
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                              Host Machine                                │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │                    Podman/Docker (for k3d)                        │   │
+│  │                    or RKE2 (system service)                       │   │
+│  │                                                                   │   │
+│  │  ┌────────────────────────────────────────────────────────────┐  │   │
+│  │  │                     Kubernetes Cluster                      │  │   │
+│  │  │                                                             │  │   │
+│  │  │  ┌─────────────────┐     ┌─────────────────────────────┐   │  │   │
+│  │  │  │  dask namespace │     │   jupyterhub namespace      │   │  │   │
+│  │  │  │                 │     │                             │   │  │   │
+│  │  │  │ ┌─────────────┐ │     │ ┌─────────────────────────┐ │   │  │   │
+│  │  │  │ │ dask-       │ │     │ │ hub-xxx                 │ │   │  │   │
+│  │  │  │ │ operator    │ │     │ │ (JupyterHub)            │ │   │  │   │
+│  │  │  │ └─────────────┘ │     │ └─────────────────────────┘ │   │  │   │
+│  │  │  │                 │     │                             │   │  │   │
+│  │  │  │ ┌─────────────┐ │     │ ┌─────────────────────────┐ │   │  │   │
+│  │  │  │ │ simple-     │ │     │ │ jupyter-user-xxx        │ │   │  │   │
+│  │  │  │ │ scheduler   │ │     │ │ (single-user pod)       │ │   │  │   │
+│  │  │  │ └─────────────┘ │     │ └─────────────────────────┘ │   │  │   │
+│  │  │  │                 │     │                             │   │  │   │
+│  │  │  │ ┌─────────────┐ │     └─────────────────────────────┘   │  │   │
+│  │  │  │ │ simple-     │ │                                       │  │   │
+│  │  │  │ │ worker-xxx  │ │                                       │  │   │
+│  │  │  │ └─────────────┘ │                                       │  │   │
+│  │  │  │                 │                                       │  │   │
+│  │  │  └─────────────────┘                                       │  │   │
+│  │  │                                                             │  │   │
+│  │  └────────────────────────────────────────────────────────────┘  │   │
+│  │                                                                   │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  Port Forwards (k8s:forward):                                            │
+│    localhost:8787 ──► simple-scheduler:8787 (Dask Dashboard)             │
+│    localhost:8000 ──► hub:80 (JupyterHub)                                │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+```
