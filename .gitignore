@@ -1,4 +1,5 @@
 .env
+.envrc.local
 thirdparty
 .DS_Store
 .vscode
@@ -202,6 +203,11 @@ org.apache.nifi.bootstrap.config.log.dir_IS_UNDEFINED/
 build/config.json
 build/environment.json
 build/cluster.yaml
+build/benchmarks/
+
+# Terraform plan files
+*.tfplan
+tfplan
 
 # Error screenshots
 error.png
