@@ -1,3 +1,4 @@
+*.txt
 .env
 .envrc.local
 thirdparty
@@ -200,11 +201,10 @@ org.apache.nifi.bootstrap.config.log.dir_IS_UNDEFINED/
 *.retry
 
 # Build artifacts with local paths
-build/config.json
-build/environment.json
-build/cluster.yaml
-build/benchmarks/
-build/notebooks/
+build/
+
+# MDBook compiled output
+docs/current/book/
 
 # Terraform plan files
 *.tfplan
