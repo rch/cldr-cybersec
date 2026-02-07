@@ -32,6 +32,7 @@ dependencies = [
     "pyhocon>=0.3.61",
     "ansible>=13.3.0",
     "ansible-navigator>=26.1.2",
+    "python-snappy>=0.7.3",
 ]
 
 [project.optional-dependencies]
