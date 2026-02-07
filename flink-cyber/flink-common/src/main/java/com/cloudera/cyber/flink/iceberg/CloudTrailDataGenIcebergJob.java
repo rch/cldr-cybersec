@@ -13,6 +13,7 @@
 package com.cloudera.cyber.flink.iceberg;
 
 import org.apache.flink.api.java.utils.ParameterTool;
+import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
@@ -49,9 +50,15 @@ public class CloudTrailDataGenIcebergJob {
         String s3SecretKey = params.get("s3.secret-key", "minioadmin");
 
         int rowsPerSecond = params.getInt("rows-per-second", 10);
+        int checkpointIntervalMs = params.getInt("checkpoint-interval-ms", 10000);
 
         // Create streaming environment
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Enable checkpointing for Iceberg commits (required for data to be committed)
+        env.enableCheckpointing(checkpointIntervalMs, CheckpointingMode.EXACTLY_ONCE);
+        env.getCheckpointConfig().setMinPauseBetweenCheckpoints(1000);
+
         EnvironmentSettings settings = EnvironmentSettings
                 .newInstance()
                 .inStreamingMode()
@@ -92,10 +99,7 @@ public class CloudTrailDataGenIcebergJob {
             ") WITH (" +
             "  'connector' = 'datagen'," +
             "  'rows-per-second' = '%d'," +
-            "  'number-of-rows' = '10000000'," +
-            "  'fields.event_version.kind' = 'sequence'," +
-            "  'fields.event_version.start' = '1'," +
-            "  'fields.event_version.end' = '1'," +
+            "  'fields.event_version.length' = '4'," +
             "  'fields.event_id.length' = '36'," +
             "  'fields.event_name.length' = '20'," +
             "  'fields.aws_region.length' = '15'," +

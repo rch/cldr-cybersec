@@ -72,10 +72,19 @@ devenv tasks run k8s:deploy-dask       # Deploy to RKE2
 
 ## Architecture
 
-### Data Flow
+### Data Flow (Java Pipeline - Default)
 ```
-Flink DataGen → Kafka (cloudtrail-raw) → Flink Processor → Kafka (cloudtrail-parsed) → PyIceberg Writer → PostgreSQL Catalog + MinIO Storage
+Java Flink DataGen → Iceberg Table → Polaris REST Catalog → MinIO S3
 ```
+
+The Java pipeline (`CloudTrailDataGenIcebergJob`) is the default for benchmarking. It generates synthetic CloudTrail events and writes directly to Iceberg at 100 rows/sec.
+
+### Data Flow (Python Pipeline - Disabled)
+```
+PyFlink DataGen → Kafka (cloudtrail-raw) → Flink Processor → Kafka (cloudtrail-parsed) → PyIceberg Writer → PostgreSQL Catalog + MinIO Storage
+```
+
+To switch to Python pipeline: set `disabled = false` on `cloudtrail-datagen` and `disabled = true` on `java-cloudtrail-datagen` in devenv.nix.
 
 ### Key Components
 
@@ -88,6 +97,7 @@ Flink DataGen → Kafka (cloudtrail-raw) → Flink Processor → Kafka (cloudtra
 - `main.py` - Pipeline orchestrator
 
 **Java Toolkit** (`flink-cyber/`):
+- `flink-common/` - Iceberg integration including `CloudTrailDataGenIcebergJob` (default datagen)
 - `parser-chains-flink/` - Log parsing pipeline
 - `flink-enrichment/` - Event enrichment (CIDR, geocode, ThreatQ, HBase lookup)
 - `flink-indexing/` - Iceberg/Hive indexing
@@ -113,6 +123,7 @@ Flink DataGen → Kafka (cloudtrail-raw) → Flink Processor → Kafka (cloudtra
 - Scala: 2.12
 
 ### Environment Variables
+- `JAVA_DATAGEN_RPS`: Rows per second for Java datagen (default: `100`)
 - `ICEBERG_CATALOG_URI`: PostgreSQL connection (default: `postgresql://postgres@localhost:5438/cybersec`)
 - `ICEBERG_WAREHOUSE`: S3 path (default: `s3://cybersec/iceberg/warehouse`)
 - `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`: MinIO credentials (minioadmin/minioadmin)

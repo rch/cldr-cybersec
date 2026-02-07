@@ -2113,6 +2113,36 @@ except Exception as e:
       };
     };
 
+    # Build flink-cyber Java datagen JAR if not already built (one-shot process)
+    java-datagen-bootstrap = {
+      exec = ''
+        JAR="$PWD/flink-cyber/flink-common/target/flink-common-2.4.0-iceberg.jar"
+        if [ -f "$JAR" ]; then
+          echo "Java datagen JAR exists: $JAR"
+          exit 0
+        fi
+        echo "Building flink-cyber Java datagen..."
+        cd flink-cyber && mvn clean install -DskipTests -pl flink-common -am
+        if [ -f "$JAR" ]; then
+          echo "Java datagen JAR built successfully"
+          exit 0
+        else
+          echo "Failed to build Java datagen JAR"
+          exit 1
+        fi
+      '';
+      process-compose = {
+        availability = {
+          restart = "no";
+        };
+        depends_on = {
+          flink-bootstrap = {
+            condition = "process_completed_successfully";
+          };
+        };
+      };
+    };
+
     flink-jobmanager = {
       exec = ''
         # Use custom-built Apache Flink 1.20.1 (for Iceberg compatibility)
@@ -2315,6 +2345,7 @@ except Exception as e:
         fi
       '';
       process-compose = {
+        disabled = true;  # Replaced by java-cloudtrail-datagen for benchmarking
         availability = {
           restart = "on_failure";
           max_restarts = 3;
@@ -2324,6 +2355,78 @@ except Exception as e:
             condition = "process_healthy";
           };
           polaris-init = {
+            condition = "process_completed_successfully";
+          };
+        };
+      };
+    };
+
+    # Java CloudTrail DataGen - Pure Java pipeline for benchmarking
+    # Generates synthetic CloudTrail events and writes directly to Iceberg
+    java-cloudtrail-datagen = {
+      exec = ''
+        echo "Starting Java CloudTrail DataGen job..."
+
+        # Set Flink paths
+        export FLINK_HOME="$PWD/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1"
+        FLINK_BIN="$FLINK_HOME/bin/flink"
+        JAR="$PWD/flink-cyber/flink-common/target/flink-common-2.4.0-iceberg.jar"
+
+        # Configurable rows per second (default 100 for benchmarking)
+        RPS="''${JAVA_DATAGEN_RPS:-100}"
+
+        # Add comprehensive Java module opens for checkpoint serialization
+        export FLINK_ENV_JAVA_OPTS="--add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED --add-opens java.base/java.lang.reflect=ALL-UNNAMED --add-opens java.base/java.text=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/java.net=ALL-UNNAMED --add-opens java.base/java.util.concurrent=ALL-UNNAMED --add-opens java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/sun.security.action=ALL-UNNAMED"
+
+        # Function to check if job is already running
+        check_job_running() {
+          curl -s http://localhost:8081/jobs/overview 2>/dev/null | \
+            grep -q '"state":"RUNNING"'
+        }
+
+        # Function to submit the Java datagen job
+        submit_job() {
+          echo "Submitting Java CloudTrail DataGen job ($RPS rows/sec)..."
+          "$FLINK_BIN" run -d \
+            -c com.cloudera.cyber.flink.iceberg.CloudTrailDataGenIcebergJob \
+            "$JAR" \
+            --catalog.uri http://localhost:8181 \
+            --warehouse.name cybersec \
+            --s3.endpoint http://localhost:9010 \
+            --s3.access-key minioadmin \
+            --s3.secret-key minioadmin \
+            --rows-per-second "$RPS"
+        }
+
+        # Check if job is already running, otherwise submit
+        if check_job_running; then
+          echo "Java CloudTrail DataGen job is already running. Monitoring..."
+        else
+          submit_job
+        fi
+
+        # Monitor the job and keep process alive
+        while true; do
+          if ! check_job_running; then
+            echo "Job stopped. Resubmitting..."
+            submit_job
+          fi
+          sleep 30
+        done
+      '';
+      process-compose = {
+        availability = {
+          restart = "on_failure";
+          max_restarts = 3;
+        };
+        depends_on = {
+          flink-taskmanager = {
+            condition = "process_healthy";
+          };
+          polaris-init = {
+            condition = "process_completed_successfully";
+          };
+          java-datagen-bootstrap = {
             condition = "process_completed_successfully";
           };
         };
