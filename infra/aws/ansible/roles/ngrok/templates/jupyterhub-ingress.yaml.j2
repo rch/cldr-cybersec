@@ -5,7 +5,7 @@ metadata:
   namespace: {{ jupyterhub_service_namespace }}
   labels:
     app.kubernetes.io/managed-by: ngrok-operator
-{% if ngrok_oauth_enabled | default(false) | bool %}
+{% if ngrok_access_mode | default('oauth') in ['oauth', 'ip'] %}
   annotations:
     k8s.ngrok.com/traffic-policy: "{{ ngrok_oauth_policy_name }}"
 {% endif %}

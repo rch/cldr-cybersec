@@ -1,9 +1,22 @@
-# ngrok Traffic Policy with OAuth authentication
-# Uses ngrok's managed OAuth app for {{ ngrok_oauth_provider }}
-# Note: Pay-as-you-go tier doesn't support custom scopes, using defaults
+# ngrok Traffic Policy with configurable access control
+# Mode: {{ ngrok_access_mode | default('oauth') }}
 policy:
   on_http_request:
+{% if ngrok_access_mode | default('oauth') == 'ip' %}
+    # IP-based restriction - allow only specified IPs/CIDRs
+    - actions:
+        - type: restrict-ips
+          config:
+            enforce: true
+            allow:
+{% for ip in ngrok_allowed_ips %}
+              - "{{ ip }}/32"
+{% endfor %}
+{% else %}
+    # OAuth authentication via {{ ngrok_oauth_provider }}
+    # Note: Pay-as-you-go tier doesn't support custom scopes, using defaults
     - actions:
         - type: oauth
           config:
             provider: {{ ngrok_oauth_provider }}
+{% endif %}

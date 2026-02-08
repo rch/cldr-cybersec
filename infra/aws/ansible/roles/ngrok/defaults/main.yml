@@ -7,8 +7,17 @@ ngrok_operator_version: "0.21.1"
 # Namespace for ngrok operator
 ngrok_namespace: ngrok-system
 
-# OAuth configuration
-ngrok_oauth_enabled: true  # Enable OAuth authentication
+# Access control mode: 'oauth' or 'ip'
+# - oauth: Requires GitHub/Google OAuth login
+# - ip: Restricts access to specified IP addresses/CIDRs
+ngrok_access_mode: "{{ lookup('env', 'NGROK_ACCESS_MODE') | default('oauth') }}"
+
+# IP restriction configuration (when ngrok_access_mode == 'ip')
+# List of allowed IPs or CIDRs
+ngrok_allowed_ips: "{{ (lookup('env', 'NGROK_ALLOWED_IPS') | default('')).split(',') | select | list }}"
+
+# OAuth configuration (when ngrok_access_mode == 'oauth')
+ngrok_oauth_enabled: "{{ ngrok_access_mode == 'oauth' }}"
 ngrok_oauth_provider: github  # Options: github, google
 ngrok_allowed_email: "{{ lookup('env', 'NGROK_ALLOWED_EMAIL') | default('') }}"
 ngrok_github_orgs: []  # List of allowed GitHub orgs, e.g., ['myorg']
@@ -28,6 +37,7 @@ cloudflare_zone_id: "{{ lookup('env', 'CLOUDFLARE_ZONE_ID') }}"
 ngrok_dask_domain: "dask.zndx.org"
 ngrok_jupyterhub_domain: "jupyter.zndx.org"
 ngrok_k8s_dashboard_domain: "k8s.zndx.org"
+ngrok_panel_viz_domain: "viz.zndx.org"
 
 # Service references
 # K8s Dashboard service (kubernetes-dashboard namespace)

@@ -32,6 +32,9 @@ __all__ = [
     "OverviewDetailView",
     "ServiceLatencyExplorer",
     "create_temporal_drilldown",
+    # Server module exports
+    "SpanExplorerApp",
+    "create_app",
 ]
 
 
@@ -58,4 +61,10 @@ def __getattr__(name: str):
     if name == "create_temporal_drilldown":
         from cybersec.observability.viz.drilldown import create_temporal_drilldown
         return create_temporal_drilldown
+    if name == "SpanExplorerApp":
+        from cybersec.observability.viz.server.app import SpanExplorerApp
+        return SpanExplorerApp
+    if name == "create_app":
+        from cybersec.observability.viz.server.app import create_app
+        return create_app
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

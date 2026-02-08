@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/managed-by: ngrok-operator
   annotations:
     k8s.ngrok.com/backend-protocol: "HTTPS"
-{% if ngrok_oauth_enabled | default(false) | bool %}
+{% if ngrok_access_mode | default('oauth') in ['oauth', 'ip'] %}
     k8s.ngrok.com/traffic-policy: "{{ ngrok_oauth_policy_name }}"
 {% endif %}
 spec:

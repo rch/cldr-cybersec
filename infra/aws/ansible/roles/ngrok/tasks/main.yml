@@ -92,34 +92,35 @@
   retries: 30
   delay: 10
 
-# OAuth traffic policies - ngrok operator requires NgrokTrafficPolicy CRDs
+# Traffic policies - ngrok operator requires NgrokTrafficPolicy CRDs
 # The ingress annotation references the policy by name
-- name: Apply OAuth traffic policy to ngrok namespace
+# Applies OAuth or IP restriction based on ngrok_access_mode
+- name: Apply traffic policy to ngrok namespace
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
     state: present
     definition: "{{ lookup('template', 'oauth-policy.yaml.j2') | from_yaml }}"
   vars:
     _ngrok_policy_namespace: "{{ ngrok_namespace }}"
-  when: ngrok_oauth_enabled | bool
+  when: ngrok_access_mode | default('oauth') in ['oauth', 'ip']
 
-- name: Apply OAuth traffic policy to Dask namespace
+- name: Apply traffic policy to Dask namespace
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
     state: present
     definition: "{{ lookup('template', 'oauth-policy.yaml.j2') | from_yaml }}"
   vars:
     _ngrok_policy_namespace: "{{ dask_dashboard_service_namespace }}"
-  when: ngrok_oauth_enabled | bool and ngrok_dask_domain | length > 0
+  when: ngrok_access_mode | default('oauth') in ['oauth', 'ip'] and ngrok_dask_domain | length > 0
 
-- name: Apply OAuth traffic policy to JupyterHub namespace
+- name: Apply traffic policy to JupyterHub namespace
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
     state: present
     definition: "{{ lookup('template', 'oauth-policy.yaml.j2') | from_yaml }}"
   vars:
     _ngrok_policy_namespace: "{{ jupyterhub_service_namespace }}"
-  when: ngrok_oauth_enabled | bool and ngrok_jupyterhub_domain | length > 0
+  when: ngrok_access_mode | default('oauth') in ['oauth', 'ip'] and ngrok_jupyterhub_domain | length > 0
 
 # Custom domain setup
 - name: Create ngrok Domain for Dask Dashboard
