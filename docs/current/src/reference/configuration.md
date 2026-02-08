@@ -1,56 +1,68 @@
-# CloudTrail Event Processing Configuration
+# Configuration
 
-## Kafka Topics
+Complete configuration reference for the Cybersec Toolkit.
 
-### cloudtrail-raw
-Raw CloudTrail events from the data generator
-- Format: JSON
-- Rate: 10 events/second (configurable)
-- Consumer: cloudtrail_processor.py
+## Environment Variables
 
-### cloudtrail-parsed
-Parsed and structured CloudTrail events
-- Format: JSON
-- Schema: See below
-- Consumer: cloudtrail_writer.py (Iceberg)
+### Required
 
-## Event Schema
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POLARIS_API_URL` | `http://localhost:8181` | Polaris REST API endpoint |
+| `POLARIS_ADMIN_URL` | `http://localhost:8182` | Polaris Admin API endpoint |
+| `ICEBERG_WAREHOUSE` | `s3://cybersec/iceberg/warehouse` | Iceberg warehouse location |
+| `AWS_ACCESS_KEY_ID` | `minioadmin` | MinIO/S3 access key |
+| `AWS_SECRET_ACCESS_KEY` | `minioadmin` | MinIO/S3 secret key |
+| `S3_ENDPOINT` | `http://localhost:9010` | MinIO endpoint |
 
-### Raw CloudTrail Event (cloudtrail-raw)
-```json
-{
-  "eventVersion": "1.08",
-  "userIdentity": {
-    "type": "IAMUser",
-    "principalId": "AIDAI23EXAMPLE",
-    "arn": "arn:aws:iam::123456789012:user/testuser1",
-    "accountId": "123456789012",
-    "accessKeyId": "AKIAIOSFODNN7EXAMPLE"
-  },
-  "eventTime": "2026-01-20T10:30:45Z",
-  "eventSource": "s3.amazonaws.com",
-  "eventName": "GetObject",
-  "awsRegion": "us-east-1",
-  "sourceIPAddress": "192.168.1.100",
-  "userAgent": "aws-cli/2.13.0",
-  "requestParameters": {
-    "bucketName": "test-bucket-123",
-    "key": "data/file-456.json"
-  },
-  "responseElements": {
-    "requestId": "abc123def456"
-  },
-  "requestID": "abc123def456",
-  "eventID": "12345678-1234-1234-1234-123456789012",
-  "readOnly": true,
-  "eventType": "AwsApiCall",
-  "managementEvent": true,
-  "recipientAccountId": "123456789012",
-  "eventCategory": "Management"
-}
-```
+### Optional
 
-### Parsed CloudTrail Event (cloudtrail-parsed)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JAVA_DATAGEN_RPS` | `100` | Rows per second for Java DataGen |
+| `FLINK_HOME` | (auto-detected) | Flink installation directory |
+| `FLINK_STATE_DIR` | `$DEVENV_STATE/flink` | Flink state directory |
+| `LOG_LEVEL` | `INFO` | Logging level |
+| `PYTHONUNBUFFERED` | `1` | Disable Python output buffering |
+
+## Iceberg Table Configuration
+
+### Catalog
+
+- Type: REST (Polaris)
+- Endpoint: `http://localhost:8181/api/catalog`
+- Warehouse: `cybersec`
+
+### Warehouse
+
+- Location: `s3://cybersec/iceberg/warehouse`
+- Storage: MinIO (localhost:9010)
+- Format: Parquet
+- File I/O: FsspecFileIO (s3fs backend)
+
+### Table Schema
+
+The CloudTrail events table (`cybersec.default.cloudtrail_events`) has the following schema:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `event_id` | STRING | Unique event identifier |
+| `event_version` | STRING | CloudTrail event version |
+| `event_timestamp` | TIMESTAMP | When the event occurred |
+| `event_source` | STRING | AWS service (e.g., s3.amazonaws.com) |
+| `event_name` | STRING | API action name (e.g., GetObject) |
+| `aws_region` | STRING | AWS region |
+| `source_ip` | STRING | Source IP address |
+| `user_agent` | STRING | Client user agent |
+| `user_type` | STRING | IAM user type |
+| `user_arn` | STRING | IAM user ARN |
+| `account_id` | STRING | AWS account ID |
+| `read_only` | BOOLEAN | Whether the operation is read-only |
+| `event_type` | STRING | Event type (e.g., AwsApiCall) |
+| `processing_time` | TIMESTAMP | When the event was processed |
+
+### Sample Event
+
 ```json
 {
   "event_version": "1.08",
@@ -70,30 +82,16 @@ Parsed and structured CloudTrail events
 }
 ```
 
-## Iceberg Table Configuration
+### Partitioning
 
-### Catalog
-- Type: SQL (PostgreSQL) - uses `pyiceberg[sql-postgres]` extra
-- Database: cybersec
-- Schema: iceberg
-- Connection: `postgresql://postgres@localhost:5438/cybersec`
-
-### Warehouse
-- Location: `s3://cybersec/iceberg/warehouse`
-- Storage: MinIO (localhost:9010) - uses `pyiceberg[s3fs]` extra
-- Format: Parquet
-- File I/O: FsspecFileIO (s3fs backend)
-
-### Table: cybersec.cloudtrail_events
-
-#### Partitioning
-- Partition by: `event_date` (day transform on `event_timestamp`)
+- Partition by: `event_day` (day transform on `event_timestamp`) and `region`
 - Benefits:
   - Efficient time-range queries
   - Partition pruning
   - Easy data lifecycle management
 
-#### Sorting
+### Sorting
+
 Primary sort order:
 1. `event_timestamp` (ascending)
 2. `event_id` (ascending)
@@ -103,25 +101,35 @@ Benefits:
 - Better compression
 - Efficient range scans
 
-#### Sample Partition Layout
+### Sample Partition Layout
+
 ```
 s3://cybersec/iceberg/warehouse/
   cybersec/
-    cloudtrail_events/
-      metadata/
-        v1.metadata.json
-        snap-123456789.avro
-      data/
-        event_date=2026-01-20/
-          00000-0-abc123.parquet
-          00001-0-def456.parquet
-        event_date=2026-01-21/
-          00000-0-ghi789.parquet
+    default/
+      cloudtrail_events/
+        metadata/
+          v1.metadata.json
+          snap-123456789.avro
+        data/
+          event_day=2026-01-20/region=us-east-1/
+            00000-0-abc123.parquet
+            00001-0-def456.parquet
+          event_day=2026-01-21/region=us-west-2/
+            00000-0-ghi789.parquet
 ```
 
 ## Flink Configuration
 
-### DataGen Job
+### Java DataGen Job (Default)
+
+```yaml
+rows-per-second: 100  # configurable via JAVA_DATAGEN_RPS
+checkpoint-interval: 60000  # 60 seconds
+```
+
+### Python DataGen Job (Optional)
+
 ```yaml
 rows-per-second: 10
 fields:
@@ -131,76 +139,49 @@ fields:
     end: 1000000
 ```
 
-### Processor Job
-```yaml
-parallelism: 2
-checkpoint-interval: 60000  # 60 seconds
-state-backend: filesystem
-```
-
 ### Resources
-- TaskManager slots: 4
-- Parallelism: 2
-- Checkpoint interval: 60s
 
-## Environment Variables Reference
-
-### Required
-```bash
-# Iceberg Catalog
-export ICEBERG_CATALOG_URI="postgresql://postgres@localhost:5438/cybersec"
-export ICEBERG_WAREHOUSE="s3://cybersec/iceberg/warehouse"
-
-# MinIO/S3
-export AWS_ACCESS_KEY_ID="minioadmin"
-export AWS_SECRET_ACCESS_KEY="minioadmin"
-export S3_ENDPOINT="http://localhost:9010"
-
-# Kafka
-export KAFKA_BOOTSTRAP_SERVERS="localhost:9092"
+```yaml
+taskmanager.numberOfTaskSlots: 4
+parallelism.default: 2
+execution.checkpointing.interval: 60000  # 60 seconds
+jobmanager.memory.process.size: 2g
+taskmanager.memory.process.size: 4g
 ```
 
-### Optional
-```bash
-# Flink
-export FLINK_HOME="/opt/flink"
-export FLINK_STATE_DIR="$HOME/.devenv/state/flink"
+Adjust via devenv.nix or environment variables.
 
-# Logging
-export LOG_LEVEL="INFO"
-export PYTHONUNBUFFERED="1"
+### Rate Tuning
+
+```bash
+# Increase Java DataGen rate
+export JAVA_DATAGEN_RPS=1000  # 1000 rows/sec
+devenv up
 ```
 
 ## Query Examples
 
-### Time-based Queries
+### Python API
+
 ```python
-# Last 24 hours
-events = query.query_recent_events(hours=24)
+from iceberg_writer.cloudtrail_query import CloudTrailQuery
 
-# Last hour with limit
-events = query.query_recent_events(hours=1, limit=1000)
-```
+query = CloudTrailQuery(
+    catalog_uri="postgresql://postgres@localhost:5438/cybersec",
+    warehouse_path="s3://cybersec/iceberg/warehouse"
+)
 
-### Event-specific Queries
-```python
-# All console logins
-logins = query.query_by_event_name("ConsoleLogin")
+# Recent events
+events = query.query_recent_events(hours=24, limit=1000)
 
-# S3 operations
-s3_ops = query.query_by_event_name("GetObject")
-```
+# Query by event name
+console_logins = query.query_by_event_name("ConsoleLogin")
 
-### IP-based Queries
-```python
 # Events from specific IP
 events = query.query_by_source_ip("192.168.1.100")
-```
 
-### Statistics
-```python
+# Statistics
 stats = query.get_event_statistics(hours=24)
-# Returns:
 # {
 #   "total_events": 86400,
 #   "unique_event_names": 16,
@@ -211,15 +192,49 @@ stats = query.get_event_statistics(hours=24)
 # }
 ```
 
-## Monitoring Queries
+### DuckDB Integration
+
+```python
+import duckdb
+
+con = duckdb.connect()
+con.execute("""
+    INSTALL iceberg;
+    LOAD iceberg;
+
+    SELECT event_name, COUNT(*) as count
+    FROM iceberg_scan('s3://cybersec/iceberg/warehouse/cybersec/cloudtrail_events')
+    WHERE event_timestamp > NOW() - INTERVAL '1 hour'
+    GROUP BY event_name
+    ORDER BY count DESC
+""")
+```
+
+### Apache Spark
+
+```python
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder \
+    .config("spark.sql.catalog.cybersec", "org.apache.iceberg.spark.SparkCatalog") \
+    .config("spark.sql.catalog.cybersec.type", "jdbc") \
+    .config("spark.sql.catalog.cybersec.uri", "jdbc:postgresql://localhost:5438/cybersec") \
+    .getOrCreate()
+
+df = spark.table("cybersec.cloudtrail_events")
+df.filter("event_name = 'ConsoleLogin'").show()
+```
+
+## Monitoring
 
 ### PostgreSQL Catalog Queries
+
 ```sql
 -- List all tables
 SELECT * FROM iceberg.catalog_tables;
 
 -- Table metadata
-SELECT 
+SELECT
   table_name,
   metadata_location,
   previous_metadata_location
@@ -227,11 +242,24 @@ FROM iceberg.catalog_tables
 WHERE catalog_name = 'cybersec';
 ```
 
-### Performance Metrics
+### Polaris REST API
+
+```bash
+# Check catalog configuration
+curl http://localhost:8181/api/catalog/v1/config
+
+# List namespaces
+curl -u admin:admin http://localhost:8181/api/catalog/v1/namespaces
+
+# List tables
+curl -u admin:admin http://localhost:8181/api/catalog/v1/namespaces/default/tables
+```
+
+### Parquet File Statistics
+
 ```python
 import pyarrow.parquet as pq
 
-# Read Parquet file stats
 parquet_file = pq.ParquetFile('path/to/file.parquet')
 print(parquet_file.metadata)
 print(parquet_file.schema)
@@ -242,11 +270,13 @@ for i in range(parquet_file.num_row_groups):
     print(f"Row group {i}: {rg.num_rows} rows")
 ```
 
-## Data Retention
+## Data Lifecycle Management
 
-### Iceberg Features for Lifecycle Management
+### Iceberg Maintenance
 
 ```python
+from datetime import datetime, timedelta
+
 # Expire old snapshots
 table.expire_snapshots(
     older_than=datetime.now() - timedelta(days=30)
@@ -260,14 +290,15 @@ table.rewrite_manifests()
 ```
 
 ### PostgreSQL Cleanup (using pg_cron)
+
 ```sql
 -- Schedule weekly cleanup
 SELECT cron.schedule(
   'iceberg-cleanup',
   '0 2 * * 0',  -- Every Sunday at 2 AM
   $$
-    DELETE FROM iceberg.catalog_tables 
-    WHERE metadata_location IS NULL 
+    DELETE FROM iceberg.catalog_tables
+    WHERE metadata_location IS NULL
       AND updated_at < NOW() - INTERVAL '90 days'
   $$
 );
@@ -276,16 +307,30 @@ SELECT cron.schedule(
 ## Scaling Considerations
 
 ### Horizontal Scaling
+
 - Increase Flink TaskManager slots
-- Add more Kafka partitions
-- Run multiple Iceberg writers
+- Run multiple DataGen jobs
+- Partition by additional columns
 
 ### Vertical Scaling
+
 - Increase TaskManager memory
 - Larger batch sizes for Iceberg writes
 - More CPU cores for Flink
 
 ### Storage Scaling
+
 - MinIO can be clustered for HA
 - PostgreSQL can use replication
 - Iceberg supports multiple table formats
+
+## Security Considerations
+
+This is a development setup. For production:
+
+1. **Enable authentication** on all services
+2. **Use TLS/SSL** for communication
+3. **Rotate credentials** regularly
+4. **Implement proper IAM** for S3/MinIO access
+5. **Enable Flink security** features
+6. **Use secrets management** for credentials

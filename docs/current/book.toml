@@ -4,9 +4,6 @@ language = "en"
 src = "src"
 title = "Cybersec Toolkit"
 
-[preprocessor.mermaid]
-command = "mdbook-mermaid"
-
 [preprocessor.d2]
 
 # path to d2 binary.
@@ -28,10 +25,16 @@ inline = false
 # optional. default is "d2".
 output-dir = "d2"
 
+# Disabled: mdbook-mermaid 0.17.0 fails with "Unable to parse the input"
+# Re-enable when adding mermaid diagrams and debug the issue
+# [preprocessor.mermaid]
+# command = "mdbook-mermaid"
+
 [output.html]
 default-theme = "light"
 additional-css = ["theme/custom.css"]
 additional-js = ["theme/diagrams.js"]
+# Mermaid JS (re-enable with preprocessor): "mermaid.min.js", "mermaid-init.js"
 
 [output.html.print]
 enable = true

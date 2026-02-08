@@ -180,8 +180,8 @@
   }; 
 
   tasks = {
-    "docs:build".exec = "mdbook build docs";
-    "docs:open".exec = "mdbook build docs --open";
+    "docs:build".exec = "mdbook build docs/current";
+    "docs:open".exec = "mdbook build docs/current --open";
 
     # Policy validation using conftest
     "policy:check".exec = ''

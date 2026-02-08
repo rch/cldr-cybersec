@@ -61,10 +61,77 @@ cybersec bootstrap settings --set flink_home=/path/to/flink-1.20.1
 
 ## 5. Access the UI
 
-- **Iceberg Browser**: [http://localhost:5050](http://localhost:5050)
-- **Flink Web UI**: [http://localhost:8081](http://localhost:8081)
-- **MinIO Console**: [http://localhost:9011](http://localhost:9011) (minioadmin/minioadmin)
-- **Prometheus**: [http://localhost:9090](http://localhost:9090)
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Iceberg Browser | [http://localhost:5050](http://localhost:5050) | - |
+| Flink Web UI | [http://localhost:8081](http://localhost:8081) | - |
+| MinIO Console | [http://localhost:9011](http://localhost:9011) | minioadmin / minioadmin |
+| Polaris REST | [http://localhost:8181](http://localhost:8181) | - |
+| Prometheus | [http://localhost:9090](http://localhost:9090) | - |
+
+PostgreSQL: `psql -h localhost -p 5438 -U postgres -d cybersec`
+
+## Pipeline Overview
+
+```
+┌──────────────┐
+│ Flink DataGen│ Generates synthetic CloudTrail events (100/sec)
+└──────┬───────┘
+       │ Direct write to Iceberg
+       ▼
+┌──────────────┐
+│ Iceberg Table│ Polaris REST Catalog + MinIO S3
+└──────────────┘
+```
+
+The Java DataGen starts automatically with `devenv up` and writes 100 rows/sec to the `cybersec.default.cloudtrail_events` table.
+
+## Common Commands
+
+### Check Services
+
+```bash
+python main.py check
+```
+
+### Initialize Iceberg Catalog
+
+```bash
+python main.py init
+```
+
+### View Status
+
+```bash
+python main.py status
+```
+
+## Query Data
+
+```python
+from iceberg_writer.cloudtrail_query import CloudTrailQuery
+
+query = CloudTrailQuery(
+    "postgresql://postgres@localhost:5438/cybersec",
+    "s3://cybersec/iceberg/warehouse"
+)
+
+# Recent events
+events = query.query_recent_events(hours=24)
+
+# Statistics
+stats = query.get_event_statistics(hours=24)
+```
+
+## Key Features
+
+- Synthetic CloudTrail event generation
+- Direct Iceberg writes (no intermediate queues)
+- Time + region partitioning for efficient queries
+- PostgreSQL catalog for ACID transactions
+- S3-compatible storage (MinIO)
+- Python query interface
+- Compatible with Spark, DuckDB, Trino
 
 ## Next Steps
 

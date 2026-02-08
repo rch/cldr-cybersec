@@ -162,6 +162,43 @@ curl http://localhost:8081/jobs/overview
 open http://localhost:5050
 ```
 
+## PyIceberg Compatibility
+
+### PyArrow Version Mismatch
+
+**Problem**: `TypeError: __cinit__() got an unexpected keyword argument 'store_decimal_as_integer'`
+
+This occurs with certain combinations of pyarrow and pyiceberg-core versions.
+
+**Workarounds**:
+1. Use compatible version combinations (pyiceberg 0.10.0 with pyarrow 15.x)
+2. Use Flink's native Iceberg connector (Java) instead of PyIceberg for writes
+3. Use Spark for writing to Iceberg tables
+
+### Table Partitioning Issues
+
+**Problem**: Partitioning triggers errors with pyiceberg
+
+**Workaround**: For testing, disable partitioning (`partition_spec = None`). For production, use the Java Flink pipeline which handles partitioning correctly.
+
+### MinIO S3 Compatibility
+
+PyIceberg works with MinIO via s3fs. Required configuration:
+
+```python
+from pyiceberg.catalog.sql import SqlCatalog
+
+catalog = SqlCatalog(
+    "cybersec",
+    **{
+        "uri": "postgresql://postgres@localhost:5438/cybersec",
+        "s3.endpoint": "http://localhost:9010",
+        "s3.access-key-id": "minioadmin",
+        "s3.secret-access-key": "minioadmin",
+    }
+)
+```
+
 ## K8s Issues (K3d/RKE2)
 
 **Problem**: K3d cluster not starting
