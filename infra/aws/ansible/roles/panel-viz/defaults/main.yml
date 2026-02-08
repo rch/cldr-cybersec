@@ -1,0 +1,71 @@
+---
+# Panel visualization service defaults
+
+# Namespace for Panel deployment
+panel_namespace: panel-viz
+
+# Container image configuration
+panel_image: "ghcr.io/dask/dask:latest"
+panel_image_pull_policy: "IfNotPresent"
+
+# Replica configuration
+panel_replicas: 1
+panel_min_replicas: 1
+panel_max_replicas: 4
+
+# Resource limits for Panel pods
+# Reduced for validation; increase for production with larger datasets
+panel_memory_limit: "4Gi"
+panel_memory_request: "2Gi"
+panel_cpu_limit: "2"
+panel_cpu_request: "500m"
+
+# Dask cluster connection
+# Uses the simple-scheduler deployed by dask role
+panel_dask_scheduler: "simple-scheduler.dask.svc.cluster.local:8786"
+
+# S3/MinIO configuration for data access
+# Empty endpoint = use real AWS S3 (not MinIO)
+panel_s3_endpoint: ""
+panel_otel_data_path: "s3://cybersec-dask-data/otel/"
+
+# AWS credentials (from environment, AWS CLI config, or vault)
+# Priority: 1. Environment vars, 2. AWS CLI credentials file, 3. MinIO fallback
+panel_aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') | default(lookup('ini', 'aws_access_key_id', section='default', file='~/.aws/credentials', errors='ignore'), true) | default(lookup('env', 'MINIO_ACCESS_KEY'), true) }}"
+panel_aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') | default(lookup('ini', 'aws_secret_access_key', section='default', file='~/.aws/credentials', errors='ignore'), true) | default(lookup('env', 'MINIO_SECRET_KEY'), true) }}"
+# Note: cybersec-dask-data bucket is in us-east-1; override via PANEL_AWS_REGION env var if needed
+panel_aws_region: "{{ lookup('env', 'PANEL_AWS_REGION') | default(lookup('env', 'AWS_REGION'), true) | default('us-east-1', true) }}"
+
+# Rendering configuration
+panel_canvas_width: 800
+panel_canvas_height: 400
+panel_cache_size: 100
+panel_debounce_ms: 100
+
+# ngrok ingress configuration
+panel_ngrok_enabled: true
+panel_ngrok_domain: "viz.zndx.org"
+ngrok_oauth_policy_name: "oauth-policy"
+ngrok_access_mode: "{{ lookup('env', 'NGROK_ACCESS_MODE') | default('oauth') }}"
+ngrok_allowed_ips: "{{ (lookup('env', 'NGROK_ALLOWED_IPS') | default('')).split(',') | select | list }}"
+ngrok_oauth_provider: github
+
+# Pod affinity with Dask workers for data locality
+panel_dask_affinity_enabled: true
+panel_dask_worker_namespace: "{{ dask_namespace | default('dask') }}"
+
+# HPA configuration
+panel_hpa_enabled: true
+panel_hpa_cpu_threshold: 70
+panel_hpa_memory_threshold: 70
+
+# Health check configuration
+# Note: pip install can take 60-90s, especially for numba compilation
+panel_health_path: "/healthz"
+panel_readiness_initial_delay: 90
+panel_liveness_initial_delay: 120
+panel_health_period: 15
+
+# Requirements installation
+panel_install_requirements: true
+panel_requirements_configmap: "panel-requirements"

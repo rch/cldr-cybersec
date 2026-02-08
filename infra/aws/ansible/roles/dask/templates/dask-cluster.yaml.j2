@@ -101,14 +101,18 @@ spec:
             httpGet:
               port: http-dashboard
               path: /health
-            initialDelaySeconds: 5
+            initialDelaySeconds: 90
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               port: http-dashboard
               path: /health
-            initialDelaySeconds: 15
+            initialDelaySeconds: 120
             periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
 {% if dask_install_requirements | default(true) %}
           volumeMounts:
             - name: requirements

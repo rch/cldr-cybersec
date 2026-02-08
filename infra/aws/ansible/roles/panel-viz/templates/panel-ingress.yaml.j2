@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: panel-viz-ngrok
+  namespace: {{ panel_namespace }}
+  labels:
+    app: panel-viz
+    app.kubernetes.io/name: panel-viz
+    app.kubernetes.io/managed-by: ngrok-operator
+{% if ngrok_access_mode | default('oauth') in ['oauth', 'ip'] %}
+  annotations:
+    k8s.ngrok.com/traffic-policy: "{{ ngrok_oauth_policy_name | default('oauth-policy') }}"
+{% endif %}
+spec:
+  ingressClassName: ngrok
+  rules:
+    - host: "{{ panel_ngrok_domain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: panel-viz
+                port:
+                  number: 80

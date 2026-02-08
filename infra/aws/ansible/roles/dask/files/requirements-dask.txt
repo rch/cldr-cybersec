@@ -9,9 +9,10 @@ pandas==2.2.3
 numpy==2.1.3
 pyarrow==18.1.0
 
-# Visualization (HoloViews stack)
+# Visualization (HoloViews stack for distributed Datashader)
 holoviews>=1.18.0
 datashader>=0.16.0
+hvplot>=0.9.0
 bokeh>=3.3.0
 panel>=1.3.0
 colorcet>=3.0.0

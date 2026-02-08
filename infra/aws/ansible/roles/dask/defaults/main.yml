@@ -9,12 +9,12 @@ dask_namespace: dask
 
 # Dask cluster configuration
 dask_cluster_name: simple
-dask_worker_replicas: 64
-dask_worker_memory_limit: "12Gi"
-dask_worker_memory_request: "8Gi"
-dask_worker_cpu_limit: "1"
-dask_worker_cpu_request: "1"
-dask_worker_threads: 1
+dask_worker_replicas: 8
+dask_worker_memory_limit: "4Gi"
+dask_worker_memory_request: "2Gi"
+dask_worker_cpu_limit: "2"
+dask_worker_cpu_request: "500m"
+dask_worker_threads: 2
 
 # Image configuration
 dask_image: "ghcr.io/dask/dask:latest"

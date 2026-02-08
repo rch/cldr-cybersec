@@ -1,0 +1,173 @@
+---
+# Panel visualization service deployment
+
+- name: Install Python kubernetes library for Ansible
+  ansible.builtin.pip:
+    name: kubernetes
+    state: present
+  become: true
+
+- name: Read Panel requirements file
+  ansible.builtin.set_fact:
+    panel_requirements_content: "{{ lookup('file', role_path + '/files/requirements-panel.txt') }}"
+  when: panel_install_requirements | default(true)
+
+- name: Create Panel namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ panel_namespace }}"
+
+- name: Create Panel requirements ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ panel_requirements_configmap }}"
+        namespace: "{{ panel_namespace }}"
+      data:
+        requirements.txt: "{{ panel_requirements_content }}"
+  when: panel_install_requirements | default(true)
+
+- name: Create Panel AWS credentials secret
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: panel-aws-credentials
+        namespace: "{{ panel_namespace }}"
+      type: Opaque
+      stringData:
+        AWS_ACCESS_KEY_ID: "{{ panel_aws_access_key_id }}"
+        AWS_SECRET_ACCESS_KEY: "{{ panel_aws_secret_access_key }}"
+        AWS_REGION: "{{ panel_aws_region }}"
+
+- name: Create Panel configuration ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'panel-config.yaml.j2') | from_yaml }}"
+
+- name: Deploy Panel application
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'panel-deployment.yaml.j2') | from_yaml }}"
+
+- name: Create Panel service
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'panel-service.yaml.j2') | from_yaml }}"
+
+- name: Create Panel HPA
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'panel-hpa.yaml.j2') | from_yaml }}"
+  when: panel_hpa_enabled | default(true)
+
+- name: Apply traffic policy to Panel namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'traffic-policy.yaml.j2') | from_yaml }}"
+  vars:
+    _ngrok_policy_namespace: "{{ panel_namespace }}"
+  when: panel_ngrok_enabled | default(true) and ngrok_access_mode | default('oauth') in ['oauth', 'ip']
+
+- name: Create ngrok Domain for Panel
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: ingress.k8s.ngrok.com/v1alpha1
+      kind: Domain
+      metadata:
+        name: "{{ panel_ngrok_domain | replace('.', '-') }}"
+        namespace: "{{ ngrok_namespace | default('ngrok-system') }}"
+      spec:
+        domain: "{{ panel_ngrok_domain }}"
+  when: panel_ngrok_enabled | default(true) and panel_ngrok_domain | length > 0
+
+- name: Create Panel ingress
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'panel-ingress.yaml.j2') | from_yaml }}"
+  when: panel_ngrok_enabled | default(true)
+
+- name: Wait for Panel deployment to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Deployment
+    namespace: "{{ panel_namespace }}"
+    name: panel-viz
+  register: panel_deployment
+  until: >
+    panel_deployment.resources | length > 0 and
+    panel_deployment.resources[0].status.readyReplicas | default(0) >= 1
+  retries: 30
+  delay: 10
+
+- name: Wait for ngrok domain to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Domain
+    api_version: ingress.k8s.ngrok.com/v1alpha1
+    namespace: "{{ ngrok_namespace | default('ngrok-system') }}"
+    name: "{{ panel_ngrok_domain | replace('.', '-') }}"
+  register: panel_domain
+  until: >
+    panel_domain.resources | length > 0 and
+    panel_domain.resources[0].status.cnameTarget is defined
+  retries: 30
+  delay: 10
+  when: panel_ngrok_enabled | default(true) and panel_ngrok_domain | length > 0
+
+- name: Extract Panel domain CNAME target
+  set_fact:
+    panel_cname_target: "{{ panel_domain.resources[0].status.cnameTarget }}"
+  when: panel_ngrok_enabled | default(true) and panel_ngrok_domain | length > 0
+
+- name: Create Cloudflare CNAME for Panel
+  community.general.cloudflare_dns:
+    zone: "{{ panel_ngrok_domain.split('.')[-2:] | join('.') }}"
+    record: "{{ panel_ngrok_domain.split('.')[0] }}"
+    type: CNAME
+    value: "{{ panel_cname_target }}"
+    proxied: false
+    api_token: "{{ cloudflare_api_token }}"
+    state: present
+  when: >
+    panel_ngrok_enabled | default(true) and
+    panel_ngrok_domain | length > 0 and
+    cloudflare_api_token | default('') | length > 0
+
+- name: Display Panel deployment info
+  debug:
+    msg: |
+      Panel visualization service deployed successfully!
+
+      Service: panel-viz.{{ panel_namespace }}.svc.cluster.local:80
+      Pods: {{ panel_replicas }} replicas (scaling {{ panel_min_replicas }}-{{ panel_max_replicas }})
+      Dask Scheduler: {{ panel_dask_scheduler }}
+
+      {% if panel_ngrok_enabled | default(true) %}
+      Access URL: https://{{ panel_ngrok_domain }}
+      Authentication: OAuth (same as Dask dashboard)
+      {% endif %}
+
+      Verify with:
+        kubectl get pods -n {{ panel_namespace }}
+        kubectl logs -f deployment/panel-viz -n {{ panel_namespace }}

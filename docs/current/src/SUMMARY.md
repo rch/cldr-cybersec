@@ -42,6 +42,7 @@
 - [Operations Guide](./operations/overview.md)
     - [Health Diagnostics](./operations/health.md)
     - [Bootstrap System](./operations/bootstrap.md)
+    - [Testing & Verification](./operations/testing.md)
     - [Historical Retrieval](./operations/historical.md)
     - [Data Verification](./operations/verification.md)
 

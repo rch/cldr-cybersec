@@ -79,22 +79,23 @@ Java Flink DataGen → Iceberg Table → Polaris REST Catalog → MinIO S3
 
 The Java pipeline (`CloudTrailDataGenIcebergJob`) is the default for benchmarking. It generates synthetic CloudTrail events and writes directly to Iceberg at 100 rows/sec.
 
-### Data Flow (Python Pipeline - Disabled)
+### Data Flow (Python Pipeline - Disabled by default)
 ```
-PyFlink DataGen → Kafka (cloudtrail-raw) → Flink Processor → Kafka (cloudtrail-parsed) → PyIceberg Writer → PostgreSQL Catalog + MinIO Storage
+PyFlink DataGen → Iceberg Table → Polaris REST Catalog → MinIO S3
 ```
 
-To switch to Python pipeline: set `disabled = false` on `cloudtrail-datagen` and `disabled = true` on `java-cloudtrail-datagen` in devenv.nix.
+The Python pipeline (`flink_jobs/cloudtrail_datagen.py`) generates synthetic CloudTrail events and writes directly to Iceberg at 10 rows/sec. It is independent from the Java pipeline - both can run simultaneously.
+
+To enable: set `disabled = false` on `cloudtrail-datagen` in devenv.nix.
 
 ### Key Components
 
 **Python Pipeline** (root directory):
-- `flink_jobs/cloudtrail_datagen.py` - Generates synthetic CloudTrail events
-- `flink_jobs/cloudtrail_processor.py` - Parses and enriches events
-- `iceberg_writer/cloudtrail_writer.py` - Persists to Iceberg format
+- `flink_jobs/cloudtrail_datagen.py` - Generates synthetic CloudTrail events, writes to Iceberg
+- `iceberg_writer/cloudtrail_writer.py` - Iceberg table utilities
 - `iceberg_writer/cloudtrail_query.py` - Python query interface
 - `iceberg_browser.py` - Flask web UI for browsing Iceberg data
-- `main.py` - Pipeline orchestrator
+- `main.py` - Pipeline status and utilities
 
 **Java Toolkit** (`flink-cyber/`):
 - `flink-common/` - Iceberg integration including `CloudTrailDataGenIcebergJob` (default datagen)

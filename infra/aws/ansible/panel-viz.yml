@@ -1,0 +1,26 @@
+---
+# Panel visualization service deployment playbook
+#
+# Deploys the Panel-based OTEL span visualization service to Kubernetes.
+# Requires:
+#   - Dask cluster deployed (dask role)
+#   - ngrok operator deployed (ngrok role)
+#
+# Usage:
+#   ansible-playbook -i inventory.yaml panel-viz.yml
+#   ansible-playbook -i inventory.yaml panel-viz.yml --tags deploy
+#   ansible-playbook -i inventory.yaml panel-viz.yml --tags ingress
+#
+# Environment variables:
+#   AWS_ACCESS_KEY_ID / MINIO_ACCESS_KEY: S3 credentials
+#   AWS_SECRET_ACCESS_KEY / MINIO_SECRET_KEY: S3 secret
+#   CLOUDFLARE_API_TOKEN: For DNS setup (optional)
+
+- name: Deploy Panel visualization service
+  hosts: control_plane[0]
+  become: true
+  vars_files:
+    - group_vars/all.yml
+  roles:
+    - role: panel-viz
+      tags: [deploy, panel-viz]

@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: panel-config
+  namespace: {{ panel_namespace }}
+data:
+  # Dask cluster connection
+  DASK_SCHEDULER: "{{ panel_dask_scheduler }}"
+  # S3 data source
+  OTEL_DATA_PATH: "{{ panel_otel_data_path }}"
+  S3_ENDPOINT: "{{ panel_s3_endpoint }}"
+  AWS_REGION: "{{ panel_aws_region }}"
+  # Canvas/rendering settings (must match app variable names)
+  CANVAS_WIDTH: "{{ panel_canvas_width }}"
+  CANVAS_HEIGHT: "{{ panel_canvas_height }}"
+  CACHE_SIZE: "{{ panel_cache_size }}"
+  DEBOUNCE_MS: "{{ panel_debounce_ms }}"
+  # Panel server settings
+  PANEL_WARM_START: "true"
+  PANEL_ALLOWED_ORIGINS: "{{ panel_ngrok_domain }}"

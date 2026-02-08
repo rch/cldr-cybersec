@@ -1,0 +1,27 @@
+apiVersion: ngrok.k8s.ngrok.com/v1alpha1
+kind: NgrokTrafficPolicy
+metadata:
+  name: {{ ngrok_oauth_policy_name }}
+  namespace: {{ _ngrok_policy_namespace | default(panel_namespace) }}
+spec:
+  # ngrok Traffic Policy with configurable access control
+  # Mode: {{ ngrok_access_mode | default('oauth') }}
+  policy:
+    on_http_request:
+{% if ngrok_access_mode | default('oauth') == 'ip' %}
+      # IP-based restriction - allow only specified IPs/CIDRs
+      - actions:
+          - type: restrict-ips
+            config:
+              enforce: true
+              allow:
+{% for ip in ngrok_allowed_ips %}
+                - "{{ ip }}/32"
+{% endfor %}
+{% else %}
+      # OAuth authentication via {{ ngrok_oauth_provider }}
+      - actions:
+          - type: oauth
+            config:
+              provider: {{ ngrok_oauth_provider }}
+{% endif %}

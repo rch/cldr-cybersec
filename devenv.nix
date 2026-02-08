@@ -656,6 +656,23 @@ EOF
       echo "✅ JupyterHub deployed"
     '';
 
+    "aws:deploy:panel-viz".exec = ''
+      echo "🚀 Deploying Panel visualization service..."
+      export PROJECT_ROOT="$PWD"
+
+      # Override MinIO credentials with real AWS credentials from profile
+      export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id --profile ''${AWS_PROFILE:-default})
+      export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
+      export AWS_SESSION_TOKEN=$(aws configure get aws_session_token --profile ''${AWS_PROFILE:-default} 2>/dev/null || echo "")
+
+      cd infra/aws/ansible
+      ansible-playbook panel-viz.yml
+      echo ""
+      echo "✅ Panel visualization deployed"
+      echo ""
+      echo "Access URL: https://viz.zndx.org"
+    '';
+
     "aws:apply".exec = ''
       echo "🔄 Applying configuration changes..."
       echo ""
