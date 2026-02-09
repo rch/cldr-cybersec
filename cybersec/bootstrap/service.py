@@ -929,7 +929,9 @@ class BootstrapService:
         # We look for any iceberg-flink-runtime JAR (version may vary based on git tag)
         existing_jars = list(lib_dir.glob("iceberg-flink-runtime-1.20-*.jar"))
         aws_bundle_jars = list(lib_dir.glob("iceberg-aws-bundle-*.jar"))
-        s3_hadoop_jars = list(lib_dir.glob("flink-s3-fs-hadoop-*.jar"))
+        # S3 filesystem plugin must be in plugins/, NOT lib/ (uses classloader isolation)
+        s3_plugin_dir = flink_home / "plugins" / "s3-fs-hadoop"
+        s3_hadoop_jars = list(s3_plugin_dir.glob("flink-s3-fs-hadoop-*.jar")) if s3_plugin_dir.exists() else []
         hdfs_client_jars = list(lib_dir.glob("hadoop-hdfs-client-*.jar"))
         if existing_jars and aws_bundle_jars and s3_hadoop_jars and hdfs_client_jars:
             yield BootstrapEvent(
@@ -1079,16 +1081,30 @@ class BootstrapService:
                     message="Copied flink-python to lib (required for PyFlink)",
                 )
 
-            # Copy flink-s3-fs-hadoop from opt to lib (provides Hadoop classes for S3)
-            # This JAR contains Hadoop common, S3A filesystem, and AWS SDK
+            # Install flink-s3-fs-hadoop as a PLUGIN (NOT in lib/)
+            # This is critical: the plugin system uses isolated classloaders, which
+            # prevents the "Delegation token provider s3-hadoop has multiple implementations" error
+            # that occurs when the JAR is in lib/ alongside iceberg-aws-bundle
+            s3_plugin_dir = flink_home / "plugins" / "s3-fs-hadoop"
             s3_jar_src = opt_dir / "flink-s3-fs-hadoop-1.20.1.jar"
-            s3_jar_dst = lib_dir / "flink-s3-fs-hadoop-1.20.1.jar"
+            s3_jar_dst = s3_plugin_dir / "flink-s3-fs-hadoop-1.20.1.jar"
             if s3_jar_src.exists() and not s3_jar_dst.exists():
+                s3_plugin_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy(s3_jar_src, s3_jar_dst)
                 yield BootstrapEvent(
                     event_type=EventType.LOG_INFO,
                     task_id=task_id,
-                    message="Copied flink-s3-fs-hadoop to lib (provides Hadoop + S3A)",
+                    message="Installed flink-s3-fs-hadoop as plugin (S3 filesystem)",
+                )
+
+            # Remove from lib/ if previously installed there (causes delegation token conflict)
+            s3_jar_in_lib = lib_dir / "flink-s3-fs-hadoop-1.20.1.jar"
+            if s3_jar_in_lib.exists():
+                s3_jar_in_lib.unlink()
+                yield BootstrapEvent(
+                    event_type=EventType.LOG_INFO,
+                    task_id=task_id,
+                    message="Removed flink-s3-fs-hadoop from lib/ (now in plugins/)",
                 )
 
             # Clean up conflicting S3/Hadoop JARs to prevent "multiple implementations" error

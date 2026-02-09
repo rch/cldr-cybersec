@@ -2169,13 +2169,17 @@ except Exception as e:
           echo "Iceberg connectors already installed"
         fi
 
-        # Copy additional required JARs from Flink opt/ directory
-        if [ ! -f "$FLINK_DIST/lib/flink-s3-fs-hadoop-1.20.1.jar" ]; then
+        # Install S3 filesystem plugin (must be in plugins/, NOT lib/, to avoid delegation token conflict)
+        S3_PLUGIN_DIR="$FLINK_DIST/plugins/s3-fs-hadoop"
+        if [ ! -f "$S3_PLUGIN_DIR/flink-s3-fs-hadoop-1.20.1.jar" ]; then
           if [ -f "$FLINK_DIST/opt/flink-s3-fs-hadoop-1.20.1.jar" ]; then
-            cp "$FLINK_DIST/opt/flink-s3-fs-hadoop-1.20.1.jar" "$FLINK_DIST/lib/"
-            echo "Copied flink-s3-fs-hadoop to lib (S3 filesystem support)"
+            mkdir -p "$S3_PLUGIN_DIR"
+            cp "$FLINK_DIST/opt/flink-s3-fs-hadoop-1.20.1.jar" "$S3_PLUGIN_DIR/"
+            echo "Installed flink-s3-fs-hadoop as plugin (S3 filesystem support)"
           fi
         fi
+        # Remove from lib/ if previously installed there (causes delegation token conflict)
+        rm -f "$FLINK_DIST/lib/flink-s3-fs-hadoop-1.20.1.jar" 2>/dev/null || true
 
         if [ ! -f "$FLINK_DIST/lib/flink-python-1.20.1.jar" ]; then
           if [ -f "$FLINK_DIST/opt/flink-python-1.20.1.jar" ]; then
@@ -2262,14 +2266,12 @@ except Exception as e:
 
         # Run JobManager in foreground mode
         # classloader.parent-first-patterns: Fix Dropwizard metrics classloader conflict with Iceberg
-        # security.delegation.tokens.enabled=false: Avoid conflict between flink-s3-fs-hadoop and iceberg-aws-bundle
         exec "$FLINK_HOME/bin/jobmanager.sh" start-foreground \
           -D jobmanager.rpc.address=localhost \
           -D rest.bind-address=0.0.0.0 \
           -D rest.port=8081 \
           -D state.checkpoints.dir=file://$FLINK_STATE_DIR/checkpoints \
           -D state.savepoints.dir=file://$FLINK_STATE_DIR/savepoints \
-          -D security.delegation.tokens.enabled=false \
           -D 'classloader.parent-first-patterns.additional=com.codahale.metrics;org.apache.flink.dropwizard'
       '';
       process-compose = {
@@ -2306,12 +2308,10 @@ except Exception as e:
         
         # Run TaskManager in foreground mode
         # classloader.parent-first-patterns: Fix Dropwizard metrics classloader conflict with Iceberg
-        # security.delegation.tokens.enabled=false: Avoid conflict between flink-s3-fs-hadoop and iceberg-aws-bundle
         exec "$FLINK_HOME/bin/taskmanager.sh" start-foreground \
           -D jobmanager.rpc.address=localhost \
           -D taskmanager.numberOfTaskSlots=4 \
           -D taskmanager.tmp.dirs=$FLINK_STATE_DIR/tmp \
-          -D security.delegation.tokens.enabled=false \
           -D 'classloader.parent-first-patterns.additional=com.codahale.metrics;org.apache.flink.dropwizard'
       '';
       process-compose = {

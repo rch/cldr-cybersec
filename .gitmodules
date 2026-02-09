@@ -6,7 +6,7 @@
 	url = git@github.com:rch/asf-flink.git
 [submodule "thirdparty/iceberg"]
 	path = thirdparty/iceberg
-	url = https://github.com/apache/iceberg.git
+	url = git@github.com:rch/asf-iceberg.git
 [submodule "thirdparty/nifi"]
 	path = thirdparty/nifi
 	url = https://github.com/apache/nifi.git
