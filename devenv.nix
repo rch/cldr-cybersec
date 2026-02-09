@@ -2204,21 +2204,33 @@ except Exception as e:
           fi
         fi
 
-        # Clean up conflicting S3/Hadoop JARs that duplicate flink-s3-fs-hadoop's bundled classes
-        # NOTE: hadoop-common is kept - only conflicts with S3 delegation tokens (now isolated in plugin)
-        CONFLICTING_JARS=(
-          "aws-java-sdk-bundle-*.jar"
-          "hadoop-auth-*.jar"
-          "hadoop-aws-*.jar"
-          "hadoop-shaded-guava-*.jar"
-        )
-        for pattern in "''${CONFLICTING_JARS[@]}"; do
-          for jar in "$FLINK_DIST/lib/"$pattern; do
-            if [ -f "$jar" ]; then
-              rm -f "$jar"
-              echo "Removed conflicting JAR: $(basename $jar)"
-            fi
-          done
+        # Copy additional Hadoop dependencies needed by hadoop-common
+        # hadoop-auth: Required for UserGroupInformation
+        # hadoop-shaded-guava: Required for Maps and other Guava collections (uses version 1.3.0)
+        copy_hadoop_dep() {
+          local artifact="$1"
+          local version="$2"
+          local dep_dir="$GRADLE_CACHE/org.apache.hadoop/$artifact/$version"
+          if [ -d "$dep_dir" ]; then
+            for jar in "$dep_dir"/*/"$artifact-$version.jar"; do
+              if [ -f "$jar" ] && [ ! -f "$FLINK_DIST/lib/$artifact-$version.jar" ]; then
+                cp "$jar" "$FLINK_DIST/lib/"
+                echo "Copied $artifact from Gradle cache (hadoop-common dependency)"
+                break
+              fi
+            done
+          fi
+        }
+        copy_hadoop_dep "hadoop-auth" "3.4.1"
+        copy_hadoop_dep "hadoop-shaded-guava" "1.3.0"
+
+        # Only remove AWS SDK bundle if it conflicts with iceberg-aws-bundle
+        # NOTE: With flink-s3-fs-hadoop in plugins/, Hadoop JARs no longer conflict
+        for jar in "$FLINK_DIST/lib/"aws-java-sdk-bundle-*.jar; do
+          if [ -f "$jar" ]; then
+            rm -f "$jar"
+            echo "Removed conflicting JAR: $(basename $jar)"
+          fi
         done
 
         echo "Flink bootstrap complete"

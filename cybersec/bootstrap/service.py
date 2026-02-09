@@ -1046,11 +1046,15 @@ class BootstrapService:
 
             # Copy Hadoop JARs from Gradle cache (populated by Iceberg build)
             # hadoop-common: Required by Iceberg FlinkCatalogFactory for Configuration class
+            # hadoop-auth: Required by hadoop-common for UserGroupInformation
+            # hadoop-shaded-guava: Required by hadoop-common for Maps and collections
             # hadoop-hdfs-client: Required for HdfsConfiguration class
             # These are safe now that flink-s3-fs-hadoop is in plugins/ with classloader isolation
             gradle_cache = Path.home() / ".gradle" / "caches" / "modules-2" / "files-2.1"
             hadoop_jars = [
                 ("hadoop-common", "3.4.1"),
+                ("hadoop-auth", "3.4.1"),
+                ("hadoop-shaded-guava", "1.3.0"),  # Note: different versioning scheme
                 ("hadoop-hdfs-client", "3.4.1"),
             ]
 
@@ -1111,13 +1115,10 @@ class BootstrapService:
                     message="Removed flink-s3-fs-hadoop from lib/ (now in plugins/)",
                 )
 
-            # Clean up conflicting S3/Hadoop JARs that duplicate flink-s3-fs-hadoop's bundled classes
-            # NOTE: hadoop-common is kept - only conflicts with S3 delegation tokens (now isolated in plugin)
+            # Only remove AWS SDK bundle if it conflicts with iceberg-aws-bundle
+            # NOTE: With flink-s3-fs-hadoop in plugins/, Hadoop JARs no longer conflict
             conflicting_patterns = [
                 "aws-java-sdk-bundle-*.jar",
-                "hadoop-auth-*.jar",
-                "hadoop-aws-*.jar",
-                "hadoop-shaded-guava-*.jar",
             ]
             for pattern in conflicting_patterns:
                 for jar in lib_dir.glob(pattern):
