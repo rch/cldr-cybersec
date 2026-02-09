@@ -2601,8 +2601,9 @@ except Exception as e:
 
         # Try bootstrap - it will fail gracefully if already bootstrapped
         # The admin CLI handles idempotency internally
+        # Note: -c= format required (equals sign) per CLI help
         echo "🔧 Bootstrapping Polaris realm..."
-        if ./bin/admin bootstrap -v 3 -r POLARIS -c POLARIS,admin,admin -p 2>&1 | tee /tmp/polaris-bootstrap.log; then
+        if ./bin/admin bootstrap -v=3 -r=POLARIS -c=POLARIS,admin,admin -p 2>&1 | tee /tmp/polaris-bootstrap.log; then
           echo "Polaris realm bootstrapped successfully"
         else
           # Check if it failed because already bootstrapped (exit code may be non-zero but that's OK)
