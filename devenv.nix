@@ -1036,6 +1036,38 @@ EOF
         fi
       fi
 
+      # Check if Polaris needs to be built
+      POLARIS_HOME="thirdparty/polaris/polaris-bin-1.3.0-incubating"
+      if [ ! -f "''${POLARIS_HOME}/server/quarkus-run.jar" ]; then
+        log_info "=== First-time setup: Building Polaris from source ==="
+        log_info "This takes 3-5 minutes on first run..."
+        cd thirdparty/polaris
+        ./gradlew :polaris-distribution:assemble -x test -x integrationTest
+
+        # Extract the distribution
+        DIST_TGZ="runtime/distribution/build/distributions/polaris-bin-1.3.0-incubating.tgz"
+        if [ -f "$DIST_TGZ" ]; then
+          tar -xzf "$DIST_TGZ" -C .
+          log_success "Polaris distribution extracted"
+        else
+          log_error "Polaris build failed - distribution tarball not found"
+          exit 1
+        fi
+        cd ../..
+
+        # Create wrapper scripts
+        if [ -f "scripts/setup_polaris_bin.sh" ]; then
+          ./scripts/setup_polaris_bin.sh "$POLARIS_HOME"
+        fi
+
+        if [ -f "''${POLARIS_HOME}/server/quarkus-run.jar" ]; then
+          log_success "Polaris built successfully"
+        else
+          log_error "Polaris build failed - server JAR not found"
+          exit 1
+        fi
+      fi
+
       echo "Aggressively stopping all processes..."
 
       # Portable process killing function (works on both Linux and macOS)
