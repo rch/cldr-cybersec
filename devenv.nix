@@ -2184,6 +2184,24 @@ except Exception as e:
           fi
         fi
 
+        # Clean up conflicting S3/Hadoop JARs to prevent "multiple implementations" error
+        # The flink-s3-fs-hadoop JAR already bundles Hadoop+AWS SDK, so we remove duplicates
+        CONFLICTING_JARS=(
+          "aws-java-sdk-bundle-*.jar"
+          "hadoop-auth-*.jar"
+          "hadoop-aws-*.jar"
+          "hadoop-common-*.jar"
+          "hadoop-shaded-guava-*.jar"
+        )
+        for pattern in "''${CONFLICTING_JARS[@]}"; do
+          for jar in "$FLINK_DIST/lib/"$pattern; do
+            if [ -f "$jar" ]; then
+              rm -f "$jar"
+              echo "Removed conflicting JAR: $(basename $jar)"
+            fi
+          done
+        done
+
         echo "Flink bootstrap complete"
         exit 0
       '';

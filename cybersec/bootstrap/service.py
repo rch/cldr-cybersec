@@ -1091,6 +1091,24 @@ class BootstrapService:
                     message="Copied flink-s3-fs-hadoop to lib (provides Hadoop + S3A)",
                 )
 
+            # Clean up conflicting S3/Hadoop JARs to prevent "multiple implementations" error
+            # The flink-s3-fs-hadoop JAR bundles Hadoop+AWS SDK, so remove duplicates
+            conflicting_patterns = [
+                "aws-java-sdk-bundle-*.jar",
+                "hadoop-auth-*.jar",
+                "hadoop-aws-*.jar",
+                "hadoop-common-*.jar",
+                "hadoop-shaded-guava-*.jar",
+            ]
+            for pattern in conflicting_patterns:
+                for jar in lib_dir.glob(pattern):
+                    jar.unlink()
+                    yield BootstrapEvent(
+                        event_type=EventType.LOG_INFO,
+                        task_id=task_id,
+                        message=f"Removed conflicting JAR: {jar.name}",
+                    )
+
             self.state.complete_task(task_id, success=True, message="Flink connectors built and installed")
             yield BootstrapEvent(
                 event_type=EventType.TASK_COMPLETED,
