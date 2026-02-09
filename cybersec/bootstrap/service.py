@@ -932,8 +932,10 @@ class BootstrapService:
         # S3 filesystem plugin must be in plugins/, NOT lib/ (uses classloader isolation)
         s3_plugin_dir = flink_home / "plugins" / "s3-fs-hadoop"
         s3_hadoop_jars = list(s3_plugin_dir.glob("flink-s3-fs-hadoop-*.jar")) if s3_plugin_dir.exists() else []
+        # Hadoop JARs needed by Iceberg
+        hadoop_common_jars = list(lib_dir.glob("hadoop-common-*.jar"))
         hdfs_client_jars = list(lib_dir.glob("hadoop-hdfs-client-*.jar"))
-        if existing_jars and aws_bundle_jars and s3_hadoop_jars and hdfs_client_jars:
+        if existing_jars and aws_bundle_jars and s3_hadoop_jars and hadoop_common_jars and hdfs_client_jars:
             yield BootstrapEvent(
                 event_type=EventType.LOG_INFO,
                 task_id=task_id,
@@ -1043,10 +1045,12 @@ class BootstrapService:
                     break
 
             # Copy Hadoop JARs from Gradle cache (populated by Iceberg build)
-            # NOTE: flink-s3-fs-hadoop (copied from opt/) provides hadoop-common classes
-            # We only need hadoop-hdfs-client for HdfsConfiguration class
+            # hadoop-common: Required by Iceberg FlinkCatalogFactory for Configuration class
+            # hadoop-hdfs-client: Required for HdfsConfiguration class
+            # These are safe now that flink-s3-fs-hadoop is in plugins/ with classloader isolation
             gradle_cache = Path.home() / ".gradle" / "caches" / "modules-2" / "files-2.1"
             hadoop_jars = [
+                ("hadoop-common", "3.4.1"),
                 ("hadoop-hdfs-client", "3.4.1"),
             ]
 
@@ -1107,13 +1111,12 @@ class BootstrapService:
                     message="Removed flink-s3-fs-hadoop from lib/ (now in plugins/)",
                 )
 
-            # Clean up conflicting S3/Hadoop JARs to prevent "multiple implementations" error
-            # The flink-s3-fs-hadoop JAR bundles Hadoop+AWS SDK, so remove duplicates
+            # Clean up conflicting S3/Hadoop JARs that duplicate flink-s3-fs-hadoop's bundled classes
+            # NOTE: hadoop-common is kept - only conflicts with S3 delegation tokens (now isolated in plugin)
             conflicting_patterns = [
                 "aws-java-sdk-bundle-*.jar",
                 "hadoop-auth-*.jar",
                 "hadoop-aws-*.jar",
-                "hadoop-common-*.jar",
                 "hadoop-shaded-guava-*.jar",
             ]
             for pattern in conflicting_patterns:

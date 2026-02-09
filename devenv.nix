@@ -2188,13 +2188,28 @@ except Exception as e:
           fi
         fi
 
-        # Clean up conflicting S3/Hadoop JARs to prevent "multiple implementations" error
-        # The flink-s3-fs-hadoop JAR already bundles Hadoop+AWS SDK, so we remove duplicates
+        # Copy hadoop-common from Gradle cache (needed by Iceberg FlinkCatalogFactory)
+        # This is safe now that flink-s3-fs-hadoop is in plugins/ with classloader isolation
+        GRADLE_CACHE="$HOME/.gradle/caches/modules-2/files-2.1"
+        if [ -d "$GRADLE_CACHE" ]; then
+          HADOOP_COMMON_DIR="$GRADLE_CACHE/org.apache.hadoop/hadoop-common/3.4.1"
+          if [ -d "$HADOOP_COMMON_DIR" ]; then
+            for jar in "$HADOOP_COMMON_DIR"/*/hadoop-common-3.4.1.jar; do
+              if [ -f "$jar" ] && [ ! -f "$FLINK_DIST/lib/hadoop-common-3.4.1.jar" ]; then
+                cp "$jar" "$FLINK_DIST/lib/"
+                echo "Copied hadoop-common from Gradle cache (for Iceberg catalog)"
+                break
+              fi
+            done
+          fi
+        fi
+
+        # Clean up conflicting S3/Hadoop JARs that duplicate flink-s3-fs-hadoop's bundled classes
+        # NOTE: hadoop-common is kept - only conflicts with S3 delegation tokens (now isolated in plugin)
         CONFLICTING_JARS=(
           "aws-java-sdk-bundle-*.jar"
           "hadoop-auth-*.jar"
           "hadoop-aws-*.jar"
-          "hadoop-common-*.jar"
           "hadoop-shaded-guava-*.jar"
         )
         for pattern in "''${CONFLICTING_JARS[@]}"; do
@@ -2448,7 +2463,7 @@ except Exception as e:
         fi
       '';
       process-compose = {
-        disabled = true;  # Replaced by java-cloudtrail-datagen for benchmarking
+        disabled = false;  # Python datagen (10 rows/sec) - runs alongside Java datagen
         availability = {
           restart = "on_failure";
           max_restarts = 3;
