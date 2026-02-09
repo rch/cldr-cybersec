@@ -2262,12 +2262,14 @@ except Exception as e:
 
         # Run JobManager in foreground mode
         # classloader.parent-first-patterns: Fix Dropwizard metrics classloader conflict with Iceberg
+        # security.delegation.tokens.enabled=false: Avoid conflict between flink-s3-fs-hadoop and iceberg-aws-bundle
         exec "$FLINK_HOME/bin/jobmanager.sh" start-foreground \
           -D jobmanager.rpc.address=localhost \
           -D rest.bind-address=0.0.0.0 \
           -D rest.port=8081 \
           -D state.checkpoints.dir=file://$FLINK_STATE_DIR/checkpoints \
           -D state.savepoints.dir=file://$FLINK_STATE_DIR/savepoints \
+          -D security.delegation.tokens.enabled=false \
           -D 'classloader.parent-first-patterns.additional=com.codahale.metrics;org.apache.flink.dropwizard'
       '';
       process-compose = {
@@ -2304,10 +2306,12 @@ except Exception as e:
         
         # Run TaskManager in foreground mode
         # classloader.parent-first-patterns: Fix Dropwizard metrics classloader conflict with Iceberg
+        # security.delegation.tokens.enabled=false: Avoid conflict between flink-s3-fs-hadoop and iceberg-aws-bundle
         exec "$FLINK_HOME/bin/taskmanager.sh" start-foreground \
           -D jobmanager.rpc.address=localhost \
           -D taskmanager.numberOfTaskSlots=4 \
           -D taskmanager.tmp.dirs=$FLINK_STATE_DIR/tmp \
+          -D security.delegation.tokens.enabled=false \
           -D 'classloader.parent-first-patterns.additional=com.codahale.metrics;org.apache.flink.dropwizard'
       '';
       process-compose = {
