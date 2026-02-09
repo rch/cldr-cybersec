@@ -510,6 +510,10 @@ class BootstrapService:
                 async for event in self._run_nifi_setup(nifi_path):
                     yield event
 
+            # Phase 8: Polaris setup (build from source if needed)
+            async for event in self._run_polaris_setup():
+                yield event
+
             # Mark bootstrap as complete
             self.config.completed = True
             self.config.last_run = datetime.now().isoformat()
@@ -661,7 +665,7 @@ class BootstrapService:
         )
 
     async def _run_git_submodules(self) -> AsyncIterator[BootstrapEvent]:
-        """Initialize git submodules if needed."""
+        """Initialize git submodules if needed using the submodules module."""
         task_id = "git_submodules"
         self.state.phase = BootstrapPhase.GIT_SUBMODULES
         self.state.start_task(task_id, "Checking git submodules")
@@ -672,18 +676,24 @@ class BootstrapService:
             message="Checking git submodules",
         )
 
-        flink_dir = Path("thirdparty/flink")
-        if flink_dir.exists() and any(flink_dir.iterdir()):
-            self.state.complete_task(task_id, success=True, message="Flink submodule already initialized")
+        from .submodules import prepare_all_submodules, get_submodule_status
+
+        # Get current status
+        status = get_submodule_status()
+        all_initialized = all(s["initialized"] for s in status.values())
+
+        if all_initialized:
+            status_msgs = [f"{name}: {s['branch'] or 'detached'}" for name, s in status.items() if s["initialized"]]
+            self.state.complete_task(task_id, success=True, message="All submodules initialized")
             yield BootstrapEvent(
                 event_type=EventType.TASK_COMPLETED,
                 task_id=task_id,
-                message="Flink submodule already initialized",
+                message=f"All submodules initialized ({', '.join(status_msgs)})",
                 progress=1.0,
             )
             return
 
-        # Need to initialize submodule
+        # Initialize missing submodules
         yield BootstrapEvent(
             event_type=EventType.LOG_INFO,
             task_id=task_id,
@@ -691,18 +701,33 @@ class BootstrapService:
         )
 
         try:
-            process = await asyncio.create_subprocess_exec(
-                "git",
-                "submodule",
-                "update",
-                "--init",
-                "--recursive",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
+            results = prepare_all_submodules()
 
-            if process.returncode == 0:
+            # Report results
+            failed = []
+            for name, (success, message) in results.items():
+                if success:
+                    yield BootstrapEvent(
+                        event_type=EventType.LOG_INFO,
+                        task_id=task_id,
+                        message=f"  {name}: {message}",
+                    )
+                else:
+                    failed.append(name)
+                    yield BootstrapEvent(
+                        event_type=EventType.LOG_WARN,
+                        task_id=task_id,
+                        message=f"  {name}: {message}",
+                    )
+
+            if failed:
+                self.state.complete_task(task_id, success=False, error=f"Failed: {', '.join(failed)}")
+                yield BootstrapEvent(
+                    event_type=EventType.TASK_FAILED,
+                    task_id=task_id,
+                    message=f"Submodule init failed for: {', '.join(failed)}",
+                )
+            else:
                 self.state.complete_task(task_id, success=True, message="Git submodules initialized")
                 yield BootstrapEvent(
                     event_type=EventType.TASK_COMPLETED,
@@ -710,14 +735,7 @@ class BootstrapService:
                     message="Git submodules initialized",
                     progress=1.0,
                 )
-            else:
-                error = stderr.decode() if stderr else "Unknown error"
-                self.state.complete_task(task_id, success=False, error=error)
-                yield BootstrapEvent(
-                    event_type=EventType.TASK_FAILED,
-                    task_id=task_id,
-                    message=f"Git submodule init failed: {error}",
-                )
+
         except Exception as e:
             self.state.complete_task(task_id, success=False, error=str(e))
             yield BootstrapEvent(
@@ -1231,6 +1249,248 @@ class BootstrapService:
             )
 
     # =========================================================================
+    # Polaris Setup
+    # =========================================================================
+
+    async def _run_polaris_setup(self) -> AsyncIterator[BootstrapEvent]:
+        """Set up Polaris from thirdparty submodule - fully automatic.
+
+        Builds Polaris from source if not already built. Uses the submodules
+        module to auto-initialize the git submodule if needed.
+        """
+        task_id = "polaris_setup"
+        self.state.phase = BootstrapPhase.POLARIS_SETUP
+        self.state.start_task(task_id, "Setting up Apache Polaris")
+
+        yield BootstrapEvent(
+            event_type=EventType.TASK_STARTED,
+            task_id=task_id,
+            message="Setting up Apache Polaris...",
+        )
+
+        # Auto-prepare submodule (init if needed)
+        from .submodules import prepare_submodule
+
+        success, message = prepare_submodule("polaris")
+
+        yield BootstrapEvent(
+            event_type=EventType.LOG_INFO,
+            task_id=task_id,
+            message=message,
+        )
+
+        if not success:
+            self.state.complete_task(task_id, success=False, error=message)
+            yield BootstrapEvent(
+                event_type=EventType.TASK_FAILED,
+                task_id=task_id,
+                message=message,
+            )
+            return
+
+        polaris_home = self.config.get_polaris_home()
+
+        # Check if already built
+        if polaris_home and (polaris_home / "server" / "quarkus-run.jar").exists():
+            self.state.complete_task(task_id, success=True, message=f"Polaris ready at {polaris_home}")
+            yield BootstrapEvent(
+                event_type=EventType.TASK_COMPLETED,
+                task_id=task_id,
+                message=f"Polaris ready at {polaris_home}",
+                progress=1.0,
+            )
+            return
+
+        # Build from source
+        async for event in self._build_polaris():
+            yield event
+
+    async def _build_polaris(self) -> AsyncIterator[BootstrapEvent]:
+        """Build Polaris from thirdparty/polaris submodule."""
+        task_id = "polaris_build"
+        self.state.start_task(task_id, f"Building Polaris {self.config.polaris_version}")
+
+        yield BootstrapEvent(
+            event_type=EventType.TASK_STARTED,
+            task_id=task_id,
+            message=f"Building Polaris {self.config.polaris_version} from source",
+        )
+
+        polaris_src = self.project_root / "thirdparty" / "polaris"
+
+        if not polaris_src.exists():
+            self.state.complete_task(task_id, success=False, error="Polaris source directory not found")
+            yield BootstrapEvent(
+                event_type=EventType.TASK_FAILED,
+                task_id=task_id,
+                message="Polaris source directory not found. Run git submodule init first.",
+            )
+            return
+
+        yield BootstrapEvent(
+            event_type=EventType.LOG_INFO,
+            task_id=task_id,
+            message="Building Polaris distribution (this may take several minutes)...",
+        )
+
+        try:
+            # Build Polaris distribution using Gradle
+            # :polaris-distribution:assemble creates the binary tarball
+            build_cmd = [
+                "./gradlew",
+                ":polaris-distribution:assemble",
+                "-x", "test",
+                "-x", "integrationTest",
+            ]
+
+            if self._dry_run:
+                yield BootstrapEvent(
+                    event_type=EventType.LOG_INFO,
+                    task_id=task_id,
+                    message=f"[DRY RUN] Would run: {' '.join(build_cmd)}",
+                )
+                self.state.complete_task(task_id, success=True, message="Dry run completed")
+                yield BootstrapEvent(
+                    event_type=EventType.TASK_COMPLETED,
+                    task_id=task_id,
+                    message="[DRY RUN] Polaris build skipped",
+                    progress=1.0,
+                )
+                return
+
+            process = await asyncio.create_subprocess_exec(
+                *build_cmd,
+                cwd=polaris_src,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+
+            # Stream progress
+            line_count = 0
+            while process.stdout:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                line_count += 1
+                line_str = line.decode().strip()
+                # Emit progress for significant lines
+                if line_str and ("BUILD" in line_str or "> Task" in line_str or ":polaris" in line_str):
+                    yield BootstrapEvent(
+                        event_type=EventType.LOG_INFO,
+                        task_id=task_id,
+                        message=line_str[:100],
+                    )
+                # Emit progress every 100 lines
+                if line_count % 100 == 0:
+                    yield BootstrapEvent(
+                        event_type=EventType.TASK_PROGRESS,
+                        task_id=task_id,
+                        message=f"Building... ({line_count} lines)",
+                        progress=min(0.9, line_count / 3000),  # Estimate ~3000 lines
+                    )
+
+            await process.wait()
+
+            if process.returncode != 0:
+                self.state.complete_task(task_id, success=False, error=f"Build failed with exit code {process.returncode}")
+                yield BootstrapEvent(
+                    event_type=EventType.TASK_FAILED,
+                    task_id=task_id,
+                    message=f"Gradle build failed with exit code {process.returncode}",
+                )
+                return
+
+            # Extract tarball
+            dist_dir = polaris_src / "runtime" / "distribution" / "build" / "distributions"
+            tarball = dist_dir / f"polaris-bin-{self.config.polaris_version}.tgz"
+
+            if tarball.exists():
+                import tarfile
+
+                # Extract to thirdparty/polaris/
+                extract_to = polaris_src
+                yield BootstrapEvent(
+                    event_type=EventType.LOG_INFO,
+                    task_id=task_id,
+                    message=f"Extracting {tarball.name}...",
+                )
+
+                with tarfile.open(tarball, "r:gz") as tar:
+                    tar.extractall(path=extract_to)
+
+                polaris_home = extract_to / f"polaris-bin-{self.config.polaris_version}"
+
+                # Create wrapper scripts
+                setup_script = self.project_root / "scripts" / "setup_polaris_bin.sh"
+                if setup_script.exists():
+                    yield BootstrapEvent(
+                        event_type=EventType.LOG_INFO,
+                        task_id=task_id,
+                        message="Creating Polaris wrapper scripts...",
+                    )
+                    setup_process = await asyncio.create_subprocess_exec(
+                        "bash",
+                        str(setup_script),
+                        str(polaris_home),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await setup_process.wait()
+
+                self.config.polaris_home = str(polaris_home)
+                self.settings_manager.save(self.config)
+
+                self.state.complete_task(task_id, success=True, message=f"Polaris built: {polaris_home}")
+                yield BootstrapEvent(
+                    event_type=EventType.TASK_COMPLETED,
+                    task_id=task_id,
+                    message=f"Polaris built successfully: {polaris_home}",
+                    progress=1.0,
+                )
+            else:
+                # Check for zip file instead
+                zipfile_path = dist_dir / f"polaris-bin-{self.config.polaris_version}.zip"
+                if zipfile_path.exists():
+                    import zipfile
+
+                    extract_to = polaris_src
+                    yield BootstrapEvent(
+                        event_type=EventType.LOG_INFO,
+                        task_id=task_id,
+                        message=f"Extracting {zipfile_path.name}...",
+                    )
+
+                    with zipfile.ZipFile(zipfile_path, "r") as zf:
+                        zf.extractall(path=extract_to)
+
+                    polaris_home = extract_to / f"polaris-bin-{self.config.polaris_version}"
+                    self.config.polaris_home = str(polaris_home)
+                    self.settings_manager.save(self.config)
+
+                    self.state.complete_task(task_id, success=True, message=f"Polaris built: {polaris_home}")
+                    yield BootstrapEvent(
+                        event_type=EventType.TASK_COMPLETED,
+                        task_id=task_id,
+                        message=f"Polaris built successfully: {polaris_home}",
+                        progress=1.0,
+                    )
+                else:
+                    self.state.complete_task(task_id, success=False, error="Build succeeded but distribution not found")
+                    yield BootstrapEvent(
+                        event_type=EventType.TASK_FAILED,
+                        task_id=task_id,
+                        message="Build succeeded but Polaris distribution not found",
+                    )
+
+        except Exception as e:
+            self.state.complete_task(task_id, success=False, error=str(e))
+            yield BootstrapEvent(
+                event_type=EventType.TASK_FAILED,
+                task_id=task_id,
+                message=f"Build failed: {e}",
+            )
+
+    # =========================================================================
     # Assessment (for devenv bootstrap-check process)
     # =========================================================================
 
@@ -1247,6 +1507,9 @@ class BootstrapService:
         nifi_home = self.config.get_nifi_home()
         nifi_installed = nifi_home is not None and nifi_home.exists()
 
+        polaris_home = self.config.get_polaris_home()
+        polaris_installed = polaris_home is not None and polaris_home.exists()
+
         iceberg_connector = env.get("iceberg_connector_installed", False)
 
         # Need bootstrap if config incomplete OR missing critical components
@@ -1255,6 +1518,7 @@ class BootstrapService:
             or not self.config.completed
             or not env["flink_installed"]
             or not iceberg_connector
+            or not polaris_installed
         )
 
         return {
@@ -1266,8 +1530,10 @@ class BootstrapService:
             "iceberg_connector_installed": iceberg_connector,
             "nifi_installed": nifi_installed,
             "nifi_home": str(nifi_home) if nifi_home else None,
+            "polaris_installed": polaris_installed,
+            "polaris_home": str(polaris_home) if polaris_home else None,
             "needs_bootstrap": needs_bootstrap,
-            "ready": not needs_bootstrap and all_tools and env["flink_installed"] and iceberg_connector,
+            "ready": not needs_bootstrap and all_tools and env["flink_installed"] and iceberg_connector and polaris_installed,
             "settings_url": f"http://localhost:{self.config.iceberg_browser_port}/settings",
         }
 

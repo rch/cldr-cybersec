@@ -30,6 +30,8 @@ class BootstrapPhase(Enum):
     DIRECTORY_SETUP = "directory_setup"
     GIT_SUBMODULES = "git_submodules"
     FLINK_SETUP = "flink_setup"
+    FLINK_CONNECTORS = "flink_connectors"
+    POLARIS_SETUP = "polaris_setup"
     POLARIS_BINARIES = "polaris_binaries"
     SERVICE_HEALTH = "service_health"
     POLARIS_BOOTSTRAP = "polaris_bootstrap"

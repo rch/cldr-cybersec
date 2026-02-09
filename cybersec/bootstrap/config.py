@@ -87,6 +87,10 @@ class BootstrapConfig:
     nifi_otlp_port: int = 4319
     nifi_version: str = "2.0.0"
 
+    # Polaris configuration
+    polaris_home: str = ""  # Empty = build from thirdparty/polaris
+    polaris_version: str = "1.3.0-incubating"
+
     # UI configuration
     ui_theme: str = "nord"
 
@@ -143,6 +147,23 @@ class BootstrapConfig:
             return Path(self.nifi_state_dir).expanduser()
         devenv_state = os.environ.get("DEVENV_STATE", ".devenv/state")
         return Path(devenv_state) / "nifi"
+
+    def get_polaris_home(self) -> Optional[Path]:
+        """Get Polaris home directory.
+
+        Returns path to Polaris installation. Checks in order:
+        1. Configured polaris_home path
+        2. Extracted distribution from thirdparty/polaris build
+        """
+        if self.polaris_home:
+            path = Path(self.polaris_home).expanduser()
+            if path.exists():
+                return path
+        # Default: extracted build from thirdparty/polaris
+        default = Path(f"thirdparty/polaris/polaris-bin-{self.polaris_version}")
+        if default.exists():
+            return default
+        return None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -253,6 +274,11 @@ class SettingsManager:
             flat["nifi_home"] = data["nifi"].get("home", "")
             flat["nifi_state_dir"] = data["nifi"].get("state_dir", "")
 
+        # Polaris build section
+        if "polaris" in data:
+            flat["polaris_version"] = data["polaris"].get("version", "1.3.0-incubating")
+            flat["polaris_home"] = data["polaris"].get("home", "")
+
         # Paths section - NiFi paths
         if "paths" in data:
             if "nifi_home" in data["paths"]:
@@ -293,6 +319,7 @@ class SettingsManager:
             "MINIO_DATA_DIR": ("minio_data_dir", str),
             "NIFI_HOME": ("nifi_home", str),
             "NIFI_STATE_DIR": ("nifi_state_dir", str),
+            "POLARIS_HOME": ("polaris_home", str),
         }
 
         for env_var, (field_name, converter) in env_map.items():
@@ -376,6 +403,10 @@ class SettingsManager:
                 "version": self._config.nifi_version,
                 "home": self._config.nifi_home,
                 "state_dir": self._config.nifi_state_dir,
+            },
+            "polaris": {
+                "version": self._config.polaris_version,
+                "home": self._config.polaris_home,
             },
             "ui": {
                 "theme": self._config.ui_theme,

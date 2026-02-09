@@ -145,6 +145,28 @@
       fi
     fi
 
+    # Auto-prepare submodules (init only, no branch checkout)
+    # This runs quickly and ensures submodules are initialized on direnv allow
+    if [ -f "cybersec/bootstrap/submodules.py" ]; then
+      uv run python -c "
+from cybersec.bootstrap.submodules import prepare_all_submodules, is_submodule_initialized
+import sys
+
+# Check if any submodule needs initialization
+needs_init = []
+for name in ['flink', 'polaris', 'iceberg']:
+    if not is_submodule_initialized(name):
+        needs_init.append(name)
+
+if needs_init:
+    print(f'Initializing submodules: {needs_init}')
+    results = prepare_all_submodules()
+    for name, (ok, msg) in results.items():
+        if not ok:
+            print(f'  Warning: {msg}', file=sys.stderr)
+" 2>/dev/null || true
+    fi
+
     # Create Polaris bin wrapper scripts if needed
     POLARIS_HOME="$PWD/thirdparty/polaris/polaris-bin-1.3.0-incubating"
     if [ -d "$POLARIS_HOME" ] && [ ! -x "$POLARIS_HOME/bin/admin" ]; then
@@ -152,11 +174,21 @@
       "$PWD/scripts/setup_polaris_bin.sh" "$POLARIS_HOME" 2>/dev/null || true
     fi
 
-    # First-time setup hint
+    # First-time setup hint - check for missing builds, not just submodules
+    NEEDS_BOOTSTRAP=false
     if [ ! -f "thirdparty/flink/pom.xml" ]; then
+      NEEDS_BOOTSTRAP=true
+    elif [ ! -d "thirdparty/flink/flink-dist/target/flink-1.20.1-bin" ]; then
+      NEEDS_BOOTSTRAP=true
+    elif [ ! -d "$POLARIS_HOME/server" ]; then
+      NEEDS_BOOTSTRAP=true
+    fi
+
+    if [ "$NEEDS_BOOTSTRAP" = "true" ]; then
       echo ""
-      echo "First-time setup detected. Run: devenv tasks run restart:clean"
-      echo "This initializes submodules and builds Flink (~15 min on first run)"
+      echo "First-time setup or missing builds detected."
+      echo "Run: devenv tasks run restart:clean"
+      echo "This initializes submodules and builds Flink + Polaris (~15 min on first run)"
       echo ""
     fi
 
