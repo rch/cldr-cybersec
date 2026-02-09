@@ -2205,24 +2205,25 @@ except Exception as e:
         fi
 
         # Copy additional Hadoop dependencies needed by hadoop-common
-        # hadoop-auth: Required for UserGroupInformation
-        # hadoop-shaded-guava: Required for Maps and other Guava collections (uses version 1.3.0)
-        copy_hadoop_dep() {
-          local artifact="$1"
-          local version="$2"
-          local dep_dir="$GRADLE_CACHE/org.apache.hadoop/$artifact/$version"
+        # hadoop-auth: Required for UserGroupInformation (group: org.apache.hadoop)
+        # hadoop-shaded-guava: Required for Maps/Guava (group: org.apache.hadoop.thirdparty)
+        copy_gradle_jar() {
+          local group="$1"
+          local artifact="$2"
+          local version="$3"
+          local dep_dir="$GRADLE_CACHE/$group/$artifact/$version"
           if [ -d "$dep_dir" ]; then
             for jar in "$dep_dir"/*/"$artifact-$version.jar"; do
               if [ -f "$jar" ] && [ ! -f "$FLINK_DIST/lib/$artifact-$version.jar" ]; then
                 cp "$jar" "$FLINK_DIST/lib/"
-                echo "Copied $artifact from Gradle cache (hadoop-common dependency)"
+                echo "Copied $artifact-$version from Gradle cache"
                 break
               fi
             done
           fi
         }
-        copy_hadoop_dep "hadoop-auth" "3.4.1"
-        copy_hadoop_dep "hadoop-shaded-guava" "1.3.0"
+        copy_gradle_jar "org.apache.hadoop" "hadoop-auth" "3.4.1"
+        copy_gradle_jar "org.apache.hadoop.thirdparty" "hadoop-shaded-guava" "1.4.0"
 
         # Only remove AWS SDK bundle if it conflicts with iceberg-aws-bundle
         # NOTE: With flink-s3-fs-hadoop in plugins/, Hadoop JARs no longer conflict

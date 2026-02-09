@@ -1048,24 +1048,26 @@ class BootstrapService:
             # hadoop-common: Required by Iceberg FlinkCatalogFactory for Configuration class
             # hadoop-auth: Required by hadoop-common for UserGroupInformation
             # hadoop-shaded-guava: Required by hadoop-common for Maps and collections
+            #   NOTE: Uses group org.apache.hadoop.thirdparty, not org.apache.hadoop
             # hadoop-hdfs-client: Required for HdfsConfiguration class
             # These are safe now that flink-s3-fs-hadoop is in plugins/ with classloader isolation
             gradle_cache = Path.home() / ".gradle" / "caches" / "modules-2" / "files-2.1"
+            # (group, artifact, version)
             hadoop_jars = [
-                ("hadoop-common", "3.4.1"),
-                ("hadoop-auth", "3.4.1"),
-                ("hadoop-shaded-guava", "1.3.0"),  # Note: different versioning scheme
-                ("hadoop-hdfs-client", "3.4.1"),
+                ("org.apache.hadoop", "hadoop-common", "3.4.1"),
+                ("org.apache.hadoop", "hadoop-auth", "3.4.1"),
+                ("org.apache.hadoop.thirdparty", "hadoop-shaded-guava", "1.4.0"),
+                ("org.apache.hadoop", "hadoop-hdfs-client", "3.4.1"),
             ]
 
-            for artifact, version in hadoop_jars:
+            for group, artifact, version in hadoop_jars:
                 jar_name = f"{artifact}-{version}.jar"
                 dest = lib_dir / jar_name
                 if dest.exists():
                     continue
 
                 # Find in Gradle cache
-                artifact_dir = gradle_cache / "org.apache.hadoop" / artifact / version
+                artifact_dir = gradle_cache / group / artifact / version
                 if artifact_dir.exists():
                     for jar in artifact_dir.glob("*/*.jar"):
                         if jar.name == jar_name:
