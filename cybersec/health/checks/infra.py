@@ -360,15 +360,24 @@ async def check_shared_memory_limits(ctx: HealthContext) -> CheckResult:
     import subprocess
 
     start = time.monotonic()
+    system = platform.system()
 
-    # Only relevant on macOS
-    if platform.system() != "Darwin":
-        return CheckResult.skipped("Shared memory limits check only applies to macOS")
+    # Only relevant on macOS and Linux
+    if system not in ("Darwin", "Linux"):
+        return CheckResult.skipped(f"Shared memory limits check not applicable on {system}")
 
     try:
+        # Platform-specific sysctl keys
+        if system == "Darwin":
+            sysctl_keys = ["kern.sysv.shmmax", "kern.sysv.shmall", "kern.sysv.shmmni"]
+            prefix = "kern.sysv."
+        else:  # Linux
+            sysctl_keys = ["kernel.shmmax", "kernel.shmall", "kernel.shmmni"]
+            prefix = "kernel."
+
         # Get current sysctl values
         result = subprocess.run(
-            ["sysctl", "kern.sysv.shmmax", "kern.sysv.shmall", "kern.sysv.shmmni"],
+            ["sysctl"] + sysctl_keys,
             capture_output=True,
             text=True,
             timeout=5,
@@ -378,12 +387,14 @@ async def check_shared_memory_limits(ctx: HealthContext) -> CheckResult:
             duration = int((time.monotonic() - start) * 1000)
             return CheckResult.error(f"sysctl command failed: {result.stderr}", duration_ms=duration)
 
-        # Parse output: "kern.sysv.shmmax: 4194304"
+        # Parse output: "kern.sysv.shmmax: 4194304" (macOS) or "kernel.shmmax = 18446744073692774399" (Linux)
         values = {}
         for line in result.stdout.strip().split('\n'):
-            if ':' in line:
-                key, val = line.split(':', 1)
-                key = key.strip().replace('kern.sysv.', '')
+            # Handle both ": " (macOS) and " = " (Linux) separators
+            if ':' in line or '=' in line:
+                sep = ':' if ':' in line else '='
+                key, val = line.split(sep, 1)
+                key = key.strip().replace(prefix, '')
                 values[key] = int(val.strip())
 
         shmmax = values.get('shmmax', 0)

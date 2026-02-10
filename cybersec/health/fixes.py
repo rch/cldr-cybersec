@@ -988,7 +988,8 @@ async def _fix_shared_memory_limits(dry_run: bool) -> dict[str, Any]:
     and other services that use shared memory. This fix applies sysctl
     settings to increase the limits.
 
-    Note: Requires sudo. For permanent fix, user should create /etc/sysctl.conf.
+    Note: Requires sudo. For permanent fix, user should create /etc/sysctl.conf
+    (macOS) or /etc/sysctl.d/99-postgresql.conf (Linux).
     """
     import platform
     import subprocess
@@ -998,18 +999,29 @@ async def _fix_shared_memory_limits(dry_run: bool) -> dict[str, Any]:
         "action": "increase_shared_memory_limits",
     }
 
-    # Only applies to macOS
-    if platform.system() != "Darwin":
+    system = platform.system()
+
+    # Only applies to macOS and Linux
+    if system not in ("Darwin", "Linux"):
         result["success"] = True
-        result["message"] = f"Platform {platform.system()} - shared memory limits fix not applicable"
+        result["message"] = f"Platform {system} - shared memory limits fix not applicable"
         return result
 
-    # Recommended values
-    settings = {
-        "kern.sysv.shmmax": "1073741824",  # 1GB
-        "kern.sysv.shmall": "262144",       # pages
-        "kern.sysv.shmmni": "256",          # segments
-    }
+    # Platform-specific sysctl keys
+    if system == "Darwin":
+        settings = {
+            "kern.sysv.shmmax": "1073741824",  # 1GB
+            "kern.sysv.shmall": "262144",       # pages
+            "kern.sysv.shmmni": "256",          # segments
+        }
+        persistent_file = "/etc/sysctl.conf"
+    else:  # Linux
+        settings = {
+            "kernel.shmmax": "1073741824",  # 1GB
+            "kernel.shmall": "262144",       # pages
+            "kernel.shmmni": "256",          # segments
+        }
+        persistent_file = "/etc/sysctl.d/99-postgresql.conf"
 
     if dry_run:
         result["success"] = True
@@ -1052,7 +1064,7 @@ async def _fix_shared_memory_limits(dry_run: bool) -> dict[str, Any]:
         result["applied"] = applied
         result["message"] = (
             f"Applied shared memory limits: {', '.join(applied)}\n"
-            "Note: For permanent fix, add to /etc/sysctl.conf and reboot."
+            f"Note: For permanent fix, add to {persistent_file} and reboot."
         )
 
     return result
