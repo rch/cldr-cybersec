@@ -116,8 +116,8 @@ check_nodes() {
         return 1
     fi
 
-    local total=$(echo "$nodes" | wc -l)
-    local ready=$(echo "$nodes" | grep -c "Ready" || echo 0)
+    local total=$(echo "$nodes" | wc -l | tr -d ' ')
+    local ready=$(echo "$nodes" | grep -c " Ready" || echo 0)
     local notready=$(echo "$nodes" | grep -c "NotReady" || echo 0)
 
     if [ "$notready" -gt 0 ]; then
@@ -140,7 +140,7 @@ check_dask_operator() {
 
     local running=$(echo "$pods" | grep -c "Running" || echo 0)
     local pending=$(echo "$pods" | grep -c "Pending\|ContainerCreating" || echo 0)
-    local total=$(echo "$pods" | wc -l)
+    local total=$(echo "$pods" | wc -l | tr -d ' ')
 
     if [ "$pending" -gt 0 ]; then
         echo -e "  ${YELLOW}⟳${NC} Dask Operator ($running/$total running)"
@@ -161,8 +161,9 @@ check_dask_cluster() {
     fi
 
     # Get worker count
-    local workers=$(run_remote "$kubectl get pods -n dask -l dask.org/component=worker --no-headers 2>/dev/null" | wc -l || echo 0)
+    local workers=$(run_remote "$kubectl get pods -n dask -l dask.org/component=worker --no-headers 2>/dev/null" | wc -l | tr -d ' ')
     local running_workers=$(run_remote "$kubectl get pods -n dask -l dask.org/component=worker --no-headers 2>/dev/null" | grep -c "Running" || echo 0)
+    workers=${workers:-0}
 
     if [ "$workers" -eq 0 ]; then
         echo -e "  ${YELLOW}○${NC} Dask Cluster (0 workers)"
@@ -186,7 +187,7 @@ check_ngrok() {
 
     if [ "$running" -gt 0 ]; then
         # Check for ingresses
-        local ingresses=$(run_remote "$kubectl get ingress -A -l app.kubernetes.io/managed-by=ngrok-operator --no-headers 2>/dev/null" | wc -l || echo 0)
+        local ingresses=$(run_remote "$kubectl get ingress -A -l app.kubernetes.io/managed-by=ngrok-operator --no-headers 2>/dev/null" | wc -l | tr -d ' ')
         echo -e "  ${GREEN}✓${NC} ngrok Operator ($ingresses ingresses)"
     else
         echo -e "  ${YELLOW}⟳${NC} ngrok Operator (starting)"
@@ -203,7 +204,7 @@ check_jupyterhub() {
     fi
 
     local running=$(echo "$pods" | grep -c "Running" || echo 0)
-    local total=$(echo "$pods" | wc -l)
+    local total=$(echo "$pods" | wc -l | tr -d ' ')
 
     if [ "$running" -eq "$total" ]; then
         echo -e "  ${GREEN}✓${NC} JupyterHub ($running pods)"
