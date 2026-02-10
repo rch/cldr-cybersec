@@ -1146,6 +1146,10 @@ EOF
 
     "aws:deploy".exec = ''
       echo "🚀 Deploying full RKE2 cluster with Dask..."
+      echo ""
+      echo "💡 Monitor progress in another terminal:"
+      echo "   ./scripts/monitor_deploy.sh --watch"
+      echo ""
       export PROJECT_ROOT="$PWD"
 
       # Override MinIO credentials with real AWS credentials from profile
