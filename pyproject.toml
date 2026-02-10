@@ -47,7 +47,7 @@ dev = [
 # K8s/Dask stack - install with: uv sync --extra k8s
 # Only needed when connecting to Dask clusters running in Kubernetes.
 # Dask itself runs in K8s (deployed via Helm), not locally.
-# Now compatible with flink extra (patched submodule uses cloudpickle 3.x).
+# Compatible with PyFlink (patched thirdparty/flink uses cloudpickle 3.x).
 k8s = [
     "dask-kubernetes>=2025.7.0",
     "dask[complete]>=2025.2.0",
@@ -73,7 +73,7 @@ observability = [
 
 # SC26 Benchmark extra - install with: uv sync --extra benchmark
 # For running Dask/Datashader scaling benchmarks.
-# Now compatible with flink extra (patched submodule uses cloudpickle 3.x).
+# Compatible with PyFlink (patched thirdparty/flink uses cloudpickle 3.x).
 benchmark = [
     # Dask distributed computing
     "dask[complete]>=2025.2.0",

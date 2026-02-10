@@ -99,10 +99,10 @@
     package = pkgs.python312;
     uv.enable = true;
     uv.sync.enable = true;
-    # Install flink extra by default (for local PyFlink development).
-    # The k8s extra (dask) conflicts with flink and must be installed separately.
+    # PyFlink is now a core dependency (not an extra).
+    # The k8s extra (dask) is compatible with flink after patching thirdparty/flink.
     uv.sync.allExtras = false;
-    uv.sync.extras = ["flink" "dev"];
+    uv.sync.extras = ["dev"];
     venv.enable = true;
   };
 
