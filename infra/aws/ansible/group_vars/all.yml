@@ -3,6 +3,10 @@
 
 # Project identification (must match Tofu var.project)
 project: "cybersec-dask"
+
+# AWS region - this is a fallback default. The actual region is set by:
+# 1. aws:inventory task writes it to the inventory [all:vars] section
+# 2. aws:deploy* tasks pass it via -e "aws_region=..." from tofu state
 aws_region: "us-east-1"
 
 # RKE2 version

@@ -1060,6 +1060,7 @@ PY
       CONTROL_PLANE_IPS=$(tofu output -json control_plane_private_ips 2>/dev/null || echo "[]")
       WORKER_IPS=$(tofu output -json worker_private_ips 2>/dev/null || echo "[]")
       K8S_API=$(tofu output -raw k8s_api_endpoint 2>/dev/null || echo "")
+      REGION=$(tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
 
       if [ -z "$BASTION_IP" ]; then
         echo "❌ No bastion IP found. Run 'devenv tasks run aws:provision' first."
@@ -1102,9 +1103,11 @@ workers
 ansible_ssh_private_key_file=~/.ssh/cybersec-dask.pem
 ansible_ssh_common_args='-o ProxyCommand="ssh -i ~/.ssh/cybersec-dask.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP" -o StrictHostKeyChecking=no'
 k8s_api_endpoint=$K8S_API
+aws_region=$REGION
 EOF
 
       echo "✅ Inventory written to $INVENTORY_FILE"
+      echo "   Region: $REGION"
       echo ""
       cat "$INVENTORY_FILE"
     '';
@@ -1155,6 +1158,9 @@ EOF
 
       cd infra/aws/tofu
       BUCKET_NAME=$(tofu output -raw s3_bucket_name 2>/dev/null || echo "")
+
+      # Get region from tofu state to ensure consistency with provisioned infrastructure
+      export AWS_REGION=$(tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
       
       if [ -z "$BUCKET_NAME" ]; then
         echo "❌ Error: Could not determine S3 bucket name from Tofu."
@@ -1164,9 +1170,10 @@ EOF
       fi
       
       echo "Using S3 Bucket: $BUCKET_NAME"
+      echo "Using Region:    $AWS_REGION"
 
       cd ../ansible
-      ansible-playbook playbooks/site.yml -e "s3_bucket_name=$BUCKET_NAME"
+      ansible-playbook playbooks/site.yml -e "s3_bucket_name=$BUCKET_NAME" -e "aws_region=$AWS_REGION"
       echo ""
       echo "✅ Cluster deployment complete"
       echo ""
@@ -1177,8 +1184,13 @@ EOF
 
     "aws:deploy:dask".exec = ''
       echo "🚀 Deploying Dask operator..."
+
+      # Get region from tofu state
+      export AWS_REGION=$(cd infra/aws/tofu && tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
+      echo "Using Region: $AWS_REGION"
+
       cd infra/aws/ansible
-      ansible-playbook playbooks/dask-only.yml
+      ansible-playbook playbooks/dask-only.yml -e "aws_region=$AWS_REGION"
       echo "✅ Dask operator deployed"
     '';
 
@@ -1199,8 +1211,12 @@ EOF
         exit 1
       fi
 
+      # Get region from tofu state
+      export AWS_REGION=$(cd infra/aws/tofu && tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
+      echo "Using Region: $AWS_REGION"
+
       cd infra/aws/ansible
-      ansible-playbook playbooks/ngrok.yml
+      ansible-playbook playbooks/ngrok.yml -e "aws_region=$AWS_REGION"
       echo ""
       echo "✅ ngrok operator deployed"
       echo ""
@@ -1218,8 +1234,12 @@ EOF
       export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
       export AWS_SESSION_TOKEN=$(aws configure get aws_session_token --profile ''${AWS_PROFILE:-default} 2>/dev/null || echo "")
 
+      # Get region from tofu state
+      export AWS_REGION=$(cd infra/aws/tofu && tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
+      echo "Using Region: $AWS_REGION"
+
       cd infra/aws/ansible
-      ansible-playbook playbooks/jupyterhub.yml
+      ansible-playbook playbooks/jupyterhub.yml -e "aws_region=$AWS_REGION"
       echo "✅ JupyterHub deployed"
     '';
 
@@ -1232,8 +1252,12 @@ EOF
       export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
       export AWS_SESSION_TOKEN=$(aws configure get aws_session_token --profile ''${AWS_PROFILE:-default} 2>/dev/null || echo "")
 
+      # Get region from tofu state
+      export AWS_REGION=$(cd infra/aws/tofu && tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
+      echo "Using Region: $AWS_REGION"
+
       cd infra/aws/ansible
-      ansible-playbook panel-viz.yml
+      ansible-playbook panel-viz.yml -e "aws_region=$AWS_REGION"
       echo ""
       echo "✅ Panel visualization deployed"
       echo ""
@@ -1246,17 +1270,22 @@ EOF
       echo "This runs all deployment playbooks to apply any changes."
       echo ""
 
+      # Get region from tofu state
+      export AWS_REGION=$(cd infra/aws/tofu && tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
+      echo "Using Region: $AWS_REGION"
+      echo ""
+
       cd infra/aws/ansible
 
       # Run playbooks that are idempotent
       echo "Applying Dask configuration..."
-      ansible-playbook playbooks/dask-only.yml
+      ansible-playbook playbooks/dask-only.yml -e "aws_region=$AWS_REGION"
 
       # Check if ngrok credentials are available
       if [ -n "$NGROK_AUTH_TOKEN" ] || [ -n "$NGROK_AUTHTOKEN" ]; then
         echo ""
         echo "Applying ngrok configuration..."
-        ansible-playbook playbooks/ngrok.yml
+        ansible-playbook playbooks/ngrok.yml -e "aws_region=$AWS_REGION"
       else
         echo ""
         echo "Skipping ngrok (no credentials in environment)"
