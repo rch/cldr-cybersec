@@ -321,6 +321,27 @@ class CheckResult:
         return result
 
 
+def is_devenv_running() -> bool:
+    """Check if devenv/process-compose is running.
+
+    Returns True if process-compose is detected, indicating devenv services
+    should be running. Used to skip service connectivity checks when devenv
+    is not active.
+    """
+    import subprocess
+
+    try:
+        # Check for process-compose process
+        result = subprocess.run(
+            ["pgrep", "-f", "process-compose"],
+            capture_output=True,
+            timeout=2,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
 @dataclass
 class HealthContext:
     """Runtime context for health checks.
@@ -336,6 +357,7 @@ class HealthContext:
     browser_port: int = 5050
     nifi_url: str = "http://localhost:8450"
     nifi_otlp_port: int = 4319
+    devenv_running: bool = field(default_factory=is_devenv_running)
 
 
 @dataclass

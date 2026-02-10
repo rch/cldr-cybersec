@@ -25,6 +25,9 @@ async def check_postgres(ctx: HealthContext) -> CheckResult:
 
     Simple TCP connection test to the database port.
     """
+    if not ctx.devenv_running:
+        return CheckResult.skipped("devenv not running")
+
     start = time.monotonic()
 
     try:
@@ -70,6 +73,9 @@ async def check_minio(ctx: HealthContext) -> CheckResult:
 
     Queries the MinIO health endpoint.
     """
+    if not ctx.devenv_running:
+        return CheckResult.skipped("devenv not running")
+
     start = time.monotonic()
 
     try:
@@ -116,6 +122,9 @@ async def check_polaris(ctx: HealthContext) -> CheckResult:
 
     Queries the Polaris admin health endpoint and measures latency.
     """
+    if not ctx.devenv_running:
+        return CheckResult.skipped("devenv not running")
+
     start = time.monotonic()
 
     # Polaris admin port is typically 8182

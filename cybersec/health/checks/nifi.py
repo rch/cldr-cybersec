@@ -93,6 +93,9 @@ async def check_nifi_running(ctx: HealthContext) -> CheckResult:
 
     Queries the NiFi system diagnostics endpoint.
     """
+    if not ctx.devenv_running:
+        return CheckResult.skipped("devenv not running")
+
     start = time.monotonic()
 
     try:
@@ -149,6 +152,9 @@ async def check_nifi_otlp(ctx: HealthContext) -> CheckResult:
 
     Verifies the NiFi OTLP receiver is listening on the expected port.
     """
+    if not ctx.devenv_running:
+        return CheckResult.skipped("devenv not running")
+
     start = time.monotonic()
 
     try:

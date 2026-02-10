@@ -20,6 +20,9 @@ async def check_taskmanagers(ctx: HealthContext) -> CheckResult:
 
     Verifies at least one TaskManager is registered.
     """
+    if not ctx.devenv_running:
+        return CheckResult.skipped("devenv not running")
+
     start = time.monotonic()
 
     try:
