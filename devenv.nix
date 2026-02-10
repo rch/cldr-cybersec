@@ -128,6 +128,14 @@
     # Short alias for OpenTofu CLI
     alias tf="tofu"
 
+    # Fix PyFlink editable install: remove conflicting pyflink directory from site-packages
+    # The apache-flink-libraries package installs a pyflink/ dir with bin/lib/opt that shadows
+    # the editable install from thirdparty/flink/flink-python. This causes pyflink.__file__ = None.
+    PYFLINK_SITEPACKAGES="$DEVENV_STATE/venv/lib/python3.12/site-packages/pyflink"
+    if [ -d "$PYFLINK_SITEPACKAGES" ] && [ -f "$PYFLINK_SITEPACKAGES/README.txt" ]; then
+      rm -rf "$PYFLINK_SITEPACKAGES"
+    fi
+
     # macOS: prefer Podman machine connection for k3d/docker clients
     if [ "$(uname -s)" = "Darwin" ] && command -v podman >/dev/null 2>&1; then
       if [ -z "''${DOCKER_HOST:-}" ]; then
