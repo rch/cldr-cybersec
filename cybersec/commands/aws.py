@@ -233,6 +233,118 @@ async def cmd_aws_s3_empty(cmd: ParsedCommand) -> CommandResult:
     )
 
 
+async def cmd_aws_preflight(cmd: ParsedCommand) -> CommandResult:
+    """Pre-flight quota validation before AWS deployment.
+
+    Checks resource quotas to fail fast before deployment starts.
+    This prevents partial deployments that fail mid-way due to quota limits.
+
+    Usage:
+        /aws preflight              Check quotas in configured region
+        /aws preflight us-west-1    Check quotas in specific region
+        /aws preflight --eips       Show current EIP allocations
+
+    Options:
+        --eips      List current Elastic IP allocations
+        --json, -j  Output as JSON
+    """
+    from ..bootstrap.config import SettingsManager
+    from ..aws.quota import check_deployment_quotas, list_eips
+
+    settings = SettingsManager()
+    config = settings.load()
+
+    # Get region from args or config
+    region = cmd.args[0] if cmd.args else config.aws_region
+
+    # Handle --eips option to list current allocations
+    if cmd.options.get("eips", False):
+        eips = await list_eips(region, config.aws_profile)
+
+        data = {
+            "region": region,
+            "eip_count": len(eips),
+            "eips": [
+                {
+                    "public_ip": eip.get("PublicIp"),
+                    "allocation_id": eip.get("AllocationId"),
+                    "association_id": eip.get("AssociationId"),
+                    "instance_id": eip.get("InstanceId"),
+                    "network_interface_id": eip.get("NetworkInterfaceId"),
+                    "tags": {t["Key"]: t["Value"] for t in eip.get("Tags", [])},
+                }
+                for eip in eips
+            ],
+        }
+
+        lines = [
+            f"Elastic IPs in {region}",
+            "=" * 60,
+            "",
+        ]
+
+        if eips:
+            lines.append(f"{'Public IP':<16} {'Instance':<22} {'Name/Tags'}")
+            lines.append("-" * 60)
+            for eip in eips:
+                public_ip = eip.get("PublicIp", "N/A")
+                instance_id = eip.get("InstanceId", "-")
+                tags = {t["Key"]: t["Value"] for t in eip.get("Tags", [])}
+                name = tags.get("Name", "-")
+                lines.append(f"{public_ip:<16} {instance_id:<22} {name}")
+        else:
+            lines.append("No Elastic IPs allocated")
+
+        lines.append("")
+        lines.append(f"Total: {len(eips)} EIP(s)")
+
+        return CommandResult(
+            success=True,
+            data=data,
+            formatted="\n".join(lines),
+        )
+
+    # Run quota checks
+    result = await check_deployment_quotas(
+        region=region,
+        required_eips=1,  # NAT gateway
+        required_vpcs=1,  # VPC
+        profile=config.aws_profile,
+    )
+
+    data = {
+        "success": result.success,
+        "region": result.region,
+        "quotas": {
+            name: {
+                "current_usage": quota.current_usage,
+                "limit": quota.limit,
+                "available": quota.available,
+                "required": quota.required,
+                "sufficient": quota.sufficient,
+            }
+            for name, quota in result.quotas.items()
+        },
+        "unused_eips": [
+            {
+                "public_ip": eip.public_ip,
+                "allocation_id": eip.allocation_id,
+                "name": eip.name,
+                "tags": eip.tags,
+            }
+            for eip in result.unused_eips
+        ],
+        "errors": result.errors,
+        "warnings": result.warnings,
+    }
+
+    return CommandResult(
+        success=result.success,
+        data=data,
+        formatted=result.format_report(),
+    )
+
+
 async def cmd_aws_target(cmd: ParsedCommand) -> CommandResult:
     """Set or show AWS target region with validation.
 
@@ -446,5 +558,21 @@ def register_aws_commands():
             "/aws target us-west-1",
             "/aws target --list",
             "/aws target us-west-1 --dry-run",
+        ],
+    )
+
+    register_command(
+        "aws.preflight",
+        cmd_aws_preflight,
+        description="Pre-flight quota validation before deployment",
+        args=[{"name": "region", "required": False, "help": "Target region (default: from config)"}],
+        options=[
+            {"name": "eips", "help": "List current Elastic IP allocations"},
+        ],
+        examples=[
+            "/aws preflight",
+            "/aws preflight us-east-1",
+            "/aws preflight --eips",
+            "/aws preflight us-west-1 --eips",
         ],
     )

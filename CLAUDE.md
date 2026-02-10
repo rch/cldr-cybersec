@@ -393,6 +393,13 @@ The health system provides FMEA-based diagnostics and automated remediation.
 /k8s validate aws          # Validate AWS target
 /k8s prepare k3d           # Prepare k3d target
 /k8s prepare aws --dry-run # Validate without writing config
+
+# AWS commands (pre-flight validation)
+/aws                       # Show developer identity and config
+/aws preflight             # Quota validation (EIPs, VPCs) before deployment
+/aws preflight us-west-1   # Check quotas in specific region
+/aws preflight --eips      # List current EIP allocations
+/aws target us-west-1      # Set target region
 ```
 
 ### Categories

@@ -19,6 +19,16 @@ from .target import (
     get_current_target,
     list_allowed_regions,
 )
+from .quota import (
+    QuotaInfo,
+    QuotaCheckResult,
+    EipInfo,
+    check_deployment_quotas,
+    check_eip_quota,
+    check_vpc_quota,
+    get_unused_eips,
+    list_eips,
+)
 
 __all__ = [
     # s3_safety
@@ -34,4 +44,13 @@ __all__ = [
     "set_aws_target",
     "get_current_target",
     "list_allowed_regions",
+    # quota
+    "QuotaInfo",
+    "QuotaCheckResult",
+    "EipInfo",
+    "check_deployment_quotas",
+    "check_eip_quota",
+    "check_vpc_quota",
+    "get_unused_eips",
+    "list_eips",
 ]
