@@ -11,10 +11,12 @@ resource "aws_s3_bucket" "cybersec" {
   })
 }
 
+# Versioning suspended for dev buckets - simplifies cleanup
+# Enable for production by changing status to "Enabled"
 resource "aws_s3_bucket_versioning" "cybersec" {
   bucket = aws_s3_bucket.cybersec.id
   versioning_configuration {
-    status = "Enabled"
+    status = "Suspended"
   }
 }
 

@@ -141,6 +141,9 @@ variable "tags" {
 }
 
 locals {
+  # Merge base tags with developer identity
+  # The merge order ensures developer_email always overrides any Owner in var.tags
+  # This guarantees consistent resource attribution for multi-developer environments
   common_tags = merge(var.tags, {
     Project     = var.project
     Environment = var.environment
@@ -148,6 +151,7 @@ locals {
     Owner       = var.developer_email
   })
 
-  # Bucket name with developer isolation
+  # S3 bucket name includes developer prefix for data isolation
+  # Each developer gets their own bucket: cybersec-dask-<prefix>-data
   bucket_name = "${var.project}-${var.developer_prefix}-data"
 }

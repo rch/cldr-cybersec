@@ -320,10 +320,11 @@ print('Environment config written to build/environment.json')
       cd infra/aws/tofu
 
       PROFILE="''${AWS_PROFILE:-default}"
-      REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-west-1")}" 
+      REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-east-1")}"
 
       PREFIX=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_prefix; settings = SettingsManager(); config = settings.load(); print(get_developer_prefix(config))")
       EMAIL=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_email; settings = SettingsManager(); config = settings.load(); print(get_developer_email(config))")
+      ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "unknown")
       KEY_NAME="cybersec-dask-$PREFIX"
 
       export TF_VAR_developer_prefix="$PREFIX"
@@ -332,6 +333,8 @@ print('Environment config written to build/environment.json')
       export TF_VAR_aws_region="$REGION"
       export TF_VAR_availability_zones="[\"''${REGION}a\",\"''${REGION}b\",\"''${REGION}c\"]"
 
+      echo "Developer: $EMAIL (prefix: $PREFIX)"
+      echo "AWS Account: $ACCOUNT_ID"
       echo "Using profile: $PROFILE"
       echo "Using region:  $REGION"
       echo "Using key:     $KEY_NAME"
@@ -383,37 +386,89 @@ PY
       done
       wait "$PLAN_PID"
 
+      # Generate JSON plan for policy validation
       echo ""
-      read -p "Apply this plan? [y/N] " -n 1 -r
-      echo
-      if [[ $REPLY =~ ^[Yy]$ ]]; then
-        (
-          # Unset env var to avoid "Mismatch between input and plan variable value" error
-          unset TF_VAR_ssh_key_name
-          tofu apply "tfplan"
-        ) &
-        APPLY_PID=$!
-        START_TS=$(date +%s)
-        while kill -0 "$APPLY_PID" 2>/dev/null; do
-          ELAPSED=$(( $(date +%s) - START_TS ))
-          echo "...tofu apply running (''${ELAPSED}s elapsed)"
-          sleep 30
-        done
-        wait "$APPLY_PID"
-        echo ""
-        echo "✅ Infrastructure provisioned"
-        echo ""
-        echo "Next steps:"
-        echo "  1. Update inventory: devenv tasks run aws:inventory"
-        echo "  2. Deploy cluster: devenv tasks run aws:deploy"
-      else
-        echo "Aborted."
+      echo "Validating against OPA policies..."
+      tofu show -json tfplan > tfplan.json
+
+      # Check for existing S3 bucket and get its region (for cross-region detection)
+      BUCKET_NAME="cybersec-dask-$PREFIX-data"
+      S3_BUCKET_REGION=$(aws s3api get-bucket-location --bucket "$BUCKET_NAME" --query 'LocationConstraint' --output text 2>/dev/null || echo "")
+      # AWS returns "None" for us-east-1 buckets (legacy behavior)
+      if [ "$S3_BUCKET_REGION" = "None" ] || [ "$S3_BUCKET_REGION" = "null" ]; then
+        S3_BUCKET_REGION="us-east-1"
       fi
+
+      # Check if SSH key pair exists in target region
+      SSH_KEY_EXISTS="false"
+      if aws ec2 describe-key-pairs --key-names "$KEY_NAME" --region "$REGION" >/dev/null 2>&1; then
+        SSH_KEY_EXISTS="true"
+      fi
+
+      # Create policy input with plan and context
+      jq -n --slurpfile plan tfplan.json \
+            --arg prefix "$PREFIX" \
+            --arg email "$EMAIL" \
+            --arg account "$ACCOUNT_ID" \
+            --arg region "$REGION" \
+            --arg s3_bucket_region "$S3_BUCKET_REGION" \
+            --argjson ssh_key_exists "$SSH_KEY_EXISTS" \
+            '{plan: $plan[0], context: {developer_prefix: $prefix, developer_email: $email, aws_account_id: $account, aws_region: $region, s3_bucket_region: $s3_bucket_region, ssh_key_exists: $ssh_key_exists, operation: "provision"}}' \
+        > policy_input.json
+
+      # Validate with conftest
+      echo ""
+      if ! conftest test policy_input.json --policy ../../../policy/tofu/ --namespace tofu.provision --all-namespaces; then
+        echo ""
+        echo "❌ Policy validation FAILED. Provisioning blocked."
+        echo ""
+        echo "The provision operation was blocked due to policy violations."
+        echo "Check that resources have correct Owner tags and naming conventions."
+        rm -f tfplan tfplan.json policy_input.json
+        exit 1
+      fi
+
+      echo ""
+      echo "✅ Policy validation PASSED"
+      echo ""
+      echo "Applying plan..."
+      (
+        # Unset env var to avoid "Mismatch between input and plan variable value" error
+        unset TF_VAR_ssh_key_name
+        tofu apply "tfplan"
+      ) &
+      APPLY_PID=$!
+      START_TS=$(date +%s)
+      while kill -0 "$APPLY_PID" 2>/dev/null; do
+        ELAPSED=$(( $(date +%s) - START_TS ))
+        echo "...tofu apply running (''${ELAPSED}s elapsed)"
+        sleep 30
+      done
+      wait "$APPLY_PID"
+
+      # Cleanup temporary files
+      rm -f tfplan tfplan.json policy_input.json
+
+      echo ""
+      echo "✅ Infrastructure provisioned"
+      echo ""
+      echo "Next steps:"
+      echo "  1. Update inventory: devenv tasks run aws:inventory"
+      echo "  2. Deploy cluster: devenv tasks run aws:deploy"
     '';
 
     "aws:destroy".exec = ''
       echo "⚠️  Destroying AWS infrastructure..."
       cd infra/aws/tofu
+
+      # Get developer identity
+      PREFIX=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_prefix; settings = SettingsManager(); config = settings.load(); print(get_developer_prefix(config))")
+      EMAIL=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_email; settings = SettingsManager(); config = settings.load(); print(get_developer_email(config))")
+      ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "unknown")
+
+      echo "Developer: $EMAIL (prefix: $PREFIX)"
+      echo "AWS Account: $ACCOUNT_ID"
+      echo ""
 
       # Clear stale state locks (no running tofu/terraform)
       LOCK_FILE=".terraform.tfstate.lock.info"
@@ -443,9 +498,9 @@ PY
         fi
       fi
 
-      echo ""
+      echo "Generating destroy plan..."
       (
-        tofu plan -destroy -var "ssh_key_name=$KEY_NAME"
+        tofu plan -destroy -var "ssh_key_name=$KEY_NAME" -out=destroy.tfplan
       ) &
       PLAN_PID=$!
       START_TS=$(date +%s)
@@ -456,25 +511,51 @@ PY
       done
       wait "$PLAN_PID"
 
+      # Generate JSON plan for policy validation
       echo ""
-      read -p "Destroy all resources? This cannot be undone! [y/N] " -n 1 -r
-      echo
-      if [[ $REPLY =~ ^[Yy]$ ]]; then
-        (
-          tofu destroy -auto-approve
-        ) &
-        DESTROY_PID=$!
-        START_TS=$(date +%s)
-        while kill -0 "$DESTROY_PID" 2>/dev/null; do
-          ELAPSED=$(( $(date +%s) - START_TS ))
-          echo "...tofu destroy running (''${ELAPSED}s elapsed)"
-          sleep 30
-        done
-        wait "$DESTROY_PID"
-        echo "✅ Infrastructure destroyed"
-      else
-        echo "Aborted."
+      echo "Validating against OPA policies..."
+      tofu show -json destroy.tfplan > destroy.tfplan.json
+
+      # Create policy input with plan and context
+      jq -n --slurpfile plan destroy.tfplan.json \
+            --arg prefix "$PREFIX" \
+            --arg email "$EMAIL" \
+            --arg account "$ACCOUNT_ID" \
+            '{plan: $plan[0], context: {developer_prefix: $prefix, developer_email: $email, aws_account_id: $account, operation: "destroy"}}' \
+        > policy_input.json
+
+      # Validate with conftest
+      echo ""
+      if ! conftest test policy_input.json --policy ../../../policy/tofu/ --namespace tofu.destroy --all-namespaces; then
+        echo ""
+        echo "❌ Policy validation FAILED. Destruction blocked."
+        echo ""
+        echo "The destroy operation was blocked because resources don't match your developer identity."
+        echo "If you believe this is an error, check the Owner tags on the resources."
+        rm -f destroy.tfplan destroy.tfplan.json policy_input.json
+        exit 1
       fi
+
+      echo ""
+      echo "✅ Policy validation PASSED"
+      echo ""
+      echo "Applying destruction..."
+      (
+        tofu destroy -auto-approve
+      ) &
+      DESTROY_PID=$!
+      START_TS=$(date +%s)
+      while kill -0 "$DESTROY_PID" 2>/dev/null; do
+        ELAPSED=$(( $(date +%s) - START_TS ))
+        echo "...tofu destroy running (''${ELAPSED}s elapsed)"
+        sleep 30
+      done
+      wait "$DESTROY_PID"
+
+      # Cleanup temporary files
+      rm -f destroy.tfplan destroy.tfplan.json policy_input.json
+
+      echo "✅ Infrastructure destroyed"
     '';
 
     # Complete teardown - empties S3 bucket and destroys all infrastructure
@@ -487,13 +568,22 @@ PY
       echo "  1. Delete ALL data from the S3 bucket (including all versions)"
       echo "  2. Destroy ALL AWS infrastructure (EC2, VPC, IAM, etc.)"
       echo ""
-      echo "⚠️  THIS CANNOT BE UNDONE!"
-      echo ""
 
       cd infra/aws/tofu
 
+      # Get developer identity
+      PREFIX=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_prefix; settings = SettingsManager(); config = settings.load(); print(get_developer_prefix(config))")
+      EMAIL=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_email; settings = SettingsManager(); config = settings.load(); print(get_developer_email(config))")
+      ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "unknown")
+
+      echo "Developer: $EMAIL (prefix: $PREFIX)"
+      echo "AWS Account: $ACCOUNT_ID"
+      echo ""
+
       # Get bucket name from Tofu state
       BUCKET_NAME=$(tofu output -raw s3_bucket_name 2>/dev/null || echo "")
+      OBJECT_COUNT=0
+      BUCKET_OWNER=""
 
       if [ -z "$BUCKET_NAME" ]; then
         echo "No S3 bucket found in Tofu state."
@@ -502,17 +592,47 @@ PY
         echo "S3 Bucket: $BUCKET_NAME"
 
         # Check bucket contents
-        OBJECT_COUNT=$(aws s3 ls "s3://$BUCKET_NAME" --recursive 2>/dev/null | wc -l || echo "0")
-        echo "Objects in bucket: ~$OBJECT_COUNT"
+        OBJECT_COUNT=$(aws s3api list-objects-v2 --bucket "$BUCKET_NAME" --query 'length(Contents || `[]`)' --output text 2>/dev/null || echo "0")
+        BUCKET_OWNER=$(aws s3api get-bucket-tagging --bucket "$BUCKET_NAME" --query 'TagSet[?Key==`Owner`].Value | [0]' --output text 2>/dev/null || echo "")
+        echo "Objects in bucket: $OBJECT_COUNT"
+        if [ -n "$BUCKET_OWNER" ]; then
+          echo "Bucket owner: $BUCKET_OWNER"
+        fi
         echo ""
       fi
 
-      read -p "Proceed with complete teardown? [y/N] " -n 1 -r
-      echo
-      if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Aborted."
-        exit 0
+      # Generate destroy plan for policy validation
+      echo "Generating destroy plan..."
+      tofu plan -destroy -var "ssh_key_name=cybersec-dask-$PREFIX" -out=destroy.tfplan
+      tofu show -json destroy.tfplan > destroy.tfplan.json
+
+      # Create policy input with plan and S3 context
+      echo ""
+      echo "Validating against OPA policies..."
+      jq -n --slurpfile plan destroy.tfplan.json \
+            --arg prefix "$PREFIX" \
+            --arg email "$EMAIL" \
+            --arg account "$ACCOUNT_ID" \
+            --arg bucket "$BUCKET_NAME" \
+            --argjson objects "$OBJECT_COUNT" \
+            --arg owner "$BUCKET_OWNER" \
+            '{plan: $plan[0], context: {developer_prefix: $prefix, developer_email: $email, aws_account_id: $account, s3_bucket: $bucket, s3_object_count: $objects, bucket_owner: $owner, operation: "teardown"}}' \
+        > policy_input.json
+
+      # Validate with conftest (teardown policy includes both destroy and s3_cleanup)
+      echo ""
+      if ! conftest test policy_input.json --policy ../../../policy/tofu/ --namespace tofu.teardown --all-namespaces; then
+        echo ""
+        echo "❌ Policy validation FAILED. Teardown blocked."
+        echo ""
+        echo "The teardown operation was blocked because resources don't match your developer identity."
+        echo "If you believe this is an error, check the Owner tags on the resources."
+        rm -f destroy.tfplan destroy.tfplan.json policy_input.json
+        exit 1
       fi
+
+      echo ""
+      echo "✅ Policy validation PASSED"
 
       # Step 1: Empty S3 bucket (required before Tofu can delete it)
       if [ -n "$BUCKET_NAME" ]; then
@@ -546,6 +666,9 @@ PY
       echo "Step 2/2: Destroying infrastructure with Tofu..."
       tofu destroy -auto-approve
 
+      # Cleanup temporary files
+      rm -f destroy.tfplan destroy.tfplan.json policy_input.json
+
       echo ""
       echo "✅ TEARDOWN COMPLETE"
       echo ""
@@ -558,6 +681,13 @@ PY
       echo "🧹 Cleaning S3 validation data..."
       cd infra/aws/tofu
 
+      # Get developer identity
+      PREFIX=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_prefix; settings = SettingsManager(); config = settings.load(); print(get_developer_prefix(config))")
+      EMAIL=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_email; settings = SettingsManager(); config = settings.load(); print(get_developer_email(config))")
+
+      echo "Developer: $EMAIL (prefix: $PREFIX)"
+      echo ""
+
       BUCKET_NAME=$(tofu output -raw s3_bucket_name 2>/dev/null || echo "")
 
       if [ -z "$BUCKET_NAME" ]; then
@@ -566,34 +696,64 @@ PY
       fi
 
       echo "Bucket: $BUCKET_NAME"
+
+      # Get bucket metadata for policy validation
+      OBJECT_COUNT=$(aws s3api list-objects-v2 --bucket "$BUCKET_NAME" --query 'length(Contents || `[]`)' --output text 2>/dev/null || echo "0")
+      BUCKET_OWNER=$(aws s3api get-bucket-tagging --bucket "$BUCKET_NAME" --query 'TagSet[?Key==`Owner`].Value | [0]' --output text 2>/dev/null || echo "")
+
+      echo "Objects: $OBJECT_COUNT"
+      if [ -n "$BUCKET_OWNER" ]; then
+        echo "Owner: $BUCKET_OWNER"
+      fi
+      echo ""
+
+      # Create policy input for S3 cleanup validation
+      echo "Validating against OPA policies..."
+      jq -n --arg prefix "$PREFIX" \
+            --arg email "$EMAIL" \
+            --arg bucket "$BUCKET_NAME" \
+            --argjson objects "$OBJECT_COUNT" \
+            --arg owner "$BUCKET_OWNER" \
+            '{context: {developer_prefix: $prefix, developer_email: $email, s3_bucket: $bucket, s3_object_count: $objects, bucket_owner: $owner, operation: "s3_clear"}}' \
+        > policy_input.json
+
+      # Validate with conftest
+      if ! conftest test policy_input.json --policy ../../../policy/tofu/s3_cleanup.rego --all-namespaces; then
+        echo ""
+        echo "❌ Policy validation FAILED. S3 cleanup blocked."
+        echo ""
+        echo "The cleanup operation was blocked because the bucket doesn't match your developer identity."
+        rm -f policy_input.json
+        exit 1
+      fi
+
+      echo ""
+      echo "✅ Policy validation PASSED"
       echo ""
       echo "Listing data directories..."
       aws s3 ls "s3://$BUCKET_NAME/" 2>/dev/null || true
       echo ""
 
-      read -p "Delete all data in s3://$BUCKET_NAME? [y/N] " -n 1 -r
-      echo
-      if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "Deleting objects (this may take a while for large datasets)..."
+      echo "Deleting objects (this may take a while for large datasets)..."
 
-        # Delete all object versions
-        aws s3api list-object-versions --bucket "$BUCKET_NAME" --output json 2>/dev/null | \
-          jq -r '.Versions[]? | "\(.Key)\t\(.VersionId)"' | \
-          while IFS=$'\t' read key version; do
-            [ -n "$key" ] && aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" 2>/dev/null
-          done
+      # Delete all object versions
+      aws s3api list-object-versions --bucket "$BUCKET_NAME" --output json 2>/dev/null | \
+        jq -r '.Versions[]? | "\(.Key)\t\(.VersionId)"' | \
+        while IFS=$'\t' read key version; do
+          [ -n "$key" ] && aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" 2>/dev/null
+        done
 
-        # Delete delete markers
-        aws s3api list-object-versions --bucket "$BUCKET_NAME" --output json 2>/dev/null | \
-          jq -r '.DeleteMarkers[]? | "\(.Key)\t\(.VersionId)"' | \
-          while IFS=$'\t' read key version; do
-            [ -n "$key" ] && aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" 2>/dev/null
-          done
+      # Delete delete markers
+      aws s3api list-object-versions --bucket "$BUCKET_NAME" --output json 2>/dev/null | \
+        jq -r '.DeleteMarkers[]? | "\(.Key)\t\(.VersionId)"' | \
+        while IFS=$'\t' read key version; do
+          [ -n "$key" ] && aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" 2>/dev/null
+        done
 
-        echo "✅ S3 bucket cleaned"
-      else
-        echo "Aborted."
-      fi
+      # Cleanup temporary files
+      rm -f policy_input.json
+
+      echo "✅ S3 bucket cleaned"
     '';
 
     # Show developer identity and AWS configuration
@@ -604,7 +764,7 @@ PY
     # Show active AWS profile/region and validate credentials
     "aws:profile".exec = ''
       PROFILE="''${AWS_PROFILE:-default}"
-      REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-west-1")}" 
+      REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-east-1")}"
 
       echo "AWS Profile"
       echo "==========="
@@ -623,13 +783,13 @@ PY
 
     # Ensure EC2 key pair exists locally and in AWS for RKE2 access
     # Usage:
-    #   AWS_PROFILE=default AWS_REGION=us-west-1 devenv tasks run aws:keypair:ensure
+    #   AWS_PROFILE=default AWS_REGION=us-east-1 devenv tasks run aws:keypair:ensure
     #   devenv tasks run aws:keypair:ensure my-key-name
     "aws:keypair:ensure".exec = ''
       set -euo pipefail
 
       PROFILE="''${AWS_PROFILE:-default}"
-      REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-west-1")}" 
+      REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-east-1")}"
 
       KEY_PATH="$HOME/.ssh/cybersec-dask.pem"
 
@@ -651,23 +811,51 @@ PY
       echo "  Key name: $KEY_NAME"
       echo "  Key path: $KEY_PATH"
 
-      if [ -f "$KEY_PATH" ]; then
-        echo "✅ Key file exists locally. Skipping create."
-        exit 0
-      fi
-
       mkdir -p "$(dirname "$KEY_PATH")"
+
+      LOCAL_EXISTS="false"
+      AWS_EXISTS="false"
+
+      if [ -f "$KEY_PATH" ]; then
+        LOCAL_EXISTS="true"
+      fi
 
       if aws ec2 describe-key-pairs \
         --profile "$PROFILE" \
         --region "$REGION" \
         --key-names "$KEY_NAME" >/dev/null 2>&1; then
-        echo "❌ Key pair '$KEY_NAME' already exists in AWS, but no local file was found at $KEY_PATH."
-        echo "   Either copy the PEM file into place or delete/recreate the key pair."
+        AWS_EXISTS="true"
+      fi
+
+      echo "  Local key: $LOCAL_EXISTS"
+      echo "  AWS key:   $AWS_EXISTS"
+      echo ""
+
+      if [ "$LOCAL_EXISTS" = "true" ] && [ "$AWS_EXISTS" = "true" ]; then
+        echo "✅ Key pair exists both locally and in AWS ($REGION)"
+        exit 0
+      fi
+
+      if [ "$LOCAL_EXISTS" = "true" ] && [ "$AWS_EXISTS" = "false" ]; then
+        echo "Importing local key to AWS ($REGION)..."
+        aws ec2 import-key-pair \
+          --profile "$PROFILE" \
+          --region "$REGION" \
+          --key-name "$KEY_NAME" \
+          --public-key-material fileb://<(ssh-keygen -y -f "$KEY_PATH")
+        echo "✅ Key pair imported to AWS ($REGION)"
+        exit 0
+      fi
+
+      if [ "$LOCAL_EXISTS" = "false" ] && [ "$AWS_EXISTS" = "true" ]; then
+        echo "❌ Key pair '$KEY_NAME' exists in AWS ($REGION), but no local file at $KEY_PATH"
+        echo "   Either copy the PEM file into place or delete the AWS key pair:"
+        echo "   aws ec2 delete-key-pair --key-name $KEY_NAME --region $REGION"
         exit 1
       fi
 
-      echo "Creating key pair..."
+      # Neither exists - create new
+      echo "Creating new key pair..."
       aws ec2 create-key-pair \
         --profile "$PROFILE" \
         --region "$REGION" \
@@ -684,8 +872,8 @@ PY
       echo "🔧 AWS setup (region + identity + K8s prep)"
       echo "======================================"
 
-      echo "Setting AWS region to us-west-1..."
-      uv run cybersec "/aws target us-west-1"
+      echo "Setting AWS region to us-east-1..."
+      uv run cybersec "/aws target us-east-1"
 
       echo ""
       echo "Developer identity:"
