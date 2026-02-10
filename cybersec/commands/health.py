@@ -292,23 +292,35 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
     )
 
     # Automatable failure modes (can be fixed without user intervention)
-    # Manual fixes (require user action):
+    #
+    # DESIGN: Health fixes address ROOT CAUSES, not service restarts.
+    # Service lifecycle is devenv/process-compose's job.
+    #
+    # NOT automatable (superficial restarts - use devenv instead):
+    #   - FLINK_001: Flink not running -> devenv tasks run restart:clean
+    #   - INFRA_001: PostgreSQL down -> devenv up postgres
+    #   - INFRA_002: MinIO unhealthy -> devenv up minio
+    #
+    # NOT automatable (require user action):
     #   - PYFLINK_003: kafka-python missing -> uv add kafka-python && uv sync
     #   - PYFLINK_004: FLINK_HOME not set -> environment setup
     #   - PYFLINK_006: Log errors -> diagnostic review
     #   - PYFLINK_010: FLINK_HOME not exported -> shell config
     #   - PYFLINK_013: Submodules not initialized -> git submodule update
     #   - FLINK_005: Job stuck -> manual investigation
+    #
     automatable_fixes = {
-        "FLINK_001",  # Flink not running - start cluster
+        # Root cause fixes (detect issues before services fail)
+        "SYSTEM_001",  # Shared memory limits too low -> increase kern.sysv.*
+        "INFRA_004",  # Orphaned shared memory segments -> ipcrm cleanup
+        # Build/install fixes (submodule-aware)
+        "PYFLINK_001",  # PyFlink not installed -> uv sync from submodule
+        "PYFLINK_011", "PYFLINK_012", "PYFLINK_014",  # Iceberg JARs -> build from submodule
+        "NIFI_001",   # NiFi not installed -> build from submodule
+        # Configuration fixes
+        "PYFLINK_002", "PYFLINK_005", "PYFLINK_009",  # Python path in flink-conf.yaml
+        "PYFLINK_007", "PYFLINK_008",  # Cluster restart for config changes
         "FLINK_004",  # DataGen bounded source fix
-        "PYFLINK_001",  # PyFlink not installed - uv sync with submodule awareness
-        "PYFLINK_002", "PYFLINK_005", "PYFLINK_009",  # Python path config
-        "PYFLINK_007", "PYFLINK_008",  # Cluster restart
-        "PYFLINK_011", "PYFLINK_012", "PYFLINK_014",  # Iceberg JARs
-        "INFRA_004",  # Shared memory cleanup
-        "SYSTEM_001",  # Shared memory limits (requires sudo)
-        "NIFI_001",   # NiFi build from submodule
     }
 
     # Determine what to fix

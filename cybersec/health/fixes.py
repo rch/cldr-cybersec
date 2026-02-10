@@ -6,8 +6,32 @@ Provides automated fixes for detected health issues across all categories:
 
 Uses FMEA tier system to determine which fixes can be auto-applied.
 
-DESIGN PRINCIPLE: Submodule-Aware Development Over Downloads
-=============================================================
+DESIGN PRINCIPLES
+=================
+
+1. Root Cause Detection, Not Service Restarts
+---------------------------------------------
+The health framework should detect ROOT CAUSES that prevent services from
+starting, NOT just restart services. Service lifecycle is devenv/process-compose's
+job.
+
+WRONG: "Flink not running" -> Start Flink
+RIGHT: "Shared memory limits too low" -> Fix limits (PostgreSQL will then start)
+RIGHT: "PyFlink shadowed by conflicting package" -> Remove shadow, run uv sync
+RIGHT: "Iceberg JARs missing" -> Build from submodule
+
+Example of correct detection (from process-compose logs):
+  FATAL: could not create shared memory segment: No space left on device
+  HINT: all available shared memory IDs have been taken...
+
+This leads to SYSTEM_001 which proactively detects low kern.sysv.shmmax/shmall
+BEFORE services try to start, rather than waiting for PostgreSQL to fail.
+
+Avoid superficial "service not running" checks that duplicate what
+`devenv tasks run restart:clean` already handles.
+
+2. Submodule-Aware Development Over Downloads
+---------------------------------------------
 All health fixes, AIOps heuristics, and self-healing automation MUST prefer
 building from thirdparty/ submodules over downloading binaries:
 

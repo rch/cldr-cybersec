@@ -115,7 +115,29 @@ To enable: set `disabled = false` on `cloudtrail-datagen` in devenv.nix.
 - Apache NiFi 2.0.0 (in `thirdparty/nifi/`) for data flow visualization
 - Automatic Polaris bootstrap and catalog initialization
 
-## Submodule-First Design Principle
+## Health Framework Design Principles
+
+### 1. Root Cause Detection, Not Service Restarts
+
+**The health framework detects ROOT CAUSES that prevent services from starting. Service lifecycle is devenv/process-compose's job.**
+
+| Wrong Approach | Right Approach |
+|----------------|----------------|
+| "Flink not running" → Start Flink | "Shared memory limits too low" → Fix limits |
+| "PostgreSQL down" → Restart PostgreSQL | "SHMMNI/SHMMAX exhausted" → Increase kernel limits |
+| "NiFi not responding" → Start NiFi | "NiFi not installed" → Build from submodule |
+
+Example from process-compose logs showing root cause:
+```
+FATAL: could not create shared memory segment: No space left on device
+HINT: all available shared memory IDs have been taken, raise SHMMNI...
+```
+
+This leads to `SYSTEM_001` which **proactively detects** low `kern.sysv.shmmax/shmall` BEFORE services try to start, rather than waiting for PostgreSQL to fail.
+
+**Avoid superficial "service not running" checks** that duplicate what `devenv tasks run restart:clean` already handles.
+
+### 2. Submodule-First Builds
 
 **All components MUST prefer building from `thirdparty/` submodules over downloading binaries.**
 
