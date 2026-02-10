@@ -35,8 +35,17 @@ devenv tasks run docs:build            # Build mdbook documentation
 
 ### K8s Stack (on-demand)
 
-K8s services are provisioned via tasks, not started automatically:
+K8s services are provisioned via tasks, not started automatically.
 
+**Target Preparation** (validates requirements before deployment):
+```bash
+devenv tasks run k8s:prepare           # Auto-detect and prepare target
+devenv tasks run k8s:prepare-aws       # AWS RKE2 with Dask/JupyterHub
+devenv tasks run k8s:prepare-rke2      # Local RKE2 cluster
+devenv tasks run k8s:prepare-k3d       # Local k3d development
+```
+
+**Cluster Provisioning**:
 ```bash
 devenv tasks run k8s:provision         # Provision k3d cluster
 devenv tasks run k8s:deploy-dask       # Deploy Dask operator + cluster
@@ -49,7 +58,26 @@ devenv tasks run k8s:destroy           # Delete k3d cluster
 For existing RKE2 clusters:
 ```bash
 export KUBECONFIG=~/.kube/rke2.yaml
+devenv tasks run k8s:prepare-rke2      # Validate and prepare RKE2 target
 devenv tasks run k8s:deploy-dask       # Deploy to RKE2
+```
+
+### K8s Target Validation
+
+The `k8s:prepare-*` tasks use Conftest policies to validate requirements:
+
+| Target | Validates |
+|--------|-----------|
+| `aws` | AWS creds, ngrok, Cloudflare, SSH key, tofu/terraform |
+| `rke2` | KUBECONFIG points to RKE2, cluster reachable |
+| `k3d` | k3d installed, container runtime (podman/docker) |
+
+CLI/MCP commands:
+```bash
+cybersec "/k8s"                    # Show status and detected target
+cybersec "/k8s validate aws"       # Validate AWS target
+cybersec "/k8s prepare k3d"        # Prepare k3d target
+cybersec "/k8s prepare aws --dry-run"  # Validate without writing config
 ```
 
 ### Service Ports (Core Stack - always started)
@@ -359,6 +387,12 @@ The health system provides FMEA-based diagnostics and automated remediation.
 /bootstrap status          # Check service health
 /bootstrap run             # Run bootstrap process
 /bootstrap info            # Show configuration
+
+# K8s target commands
+/k8s                       # Show status and detected target
+/k8s validate aws          # Validate AWS target
+/k8s prepare k3d           # Prepare k3d target
+/k8s prepare aws --dry-run # Validate without writing config
 ```
 
 ### Categories
