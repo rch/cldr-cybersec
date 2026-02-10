@@ -1,12 +1,13 @@
 # -----------------------------------------------------------------------------
 # S3 Bucket for Dask Data Storage
+# Uses developer prefix for isolation: {project}-{developer_prefix}-data
 # -----------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "cybersec" {
-  bucket = "${var.project}-data"
+  bucket = local.bucket_name
 
   tags = merge(local.common_tags, {
-    Name = "${var.project}-data"
+    Name = local.bucket_name
   })
 }
 

@@ -102,5 +102,9 @@ output "cluster_info" {
       bucket_arn  = aws_s3_bucket.cybersec.arn
       region      = var.aws_region
     }
+    developer = {
+      prefix = var.developer_prefix
+      email  = var.developer_email
+    }
   }
 }

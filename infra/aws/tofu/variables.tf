@@ -116,6 +116,21 @@ variable "bastion_instance_type" {
 }
 
 # -----------------------------------------------------------------------------
+# Developer Isolation
+# -----------------------------------------------------------------------------
+
+variable "developer_prefix" {
+  description = "Developer prefix for resource isolation (8-char hash from git email)"
+  type        = string
+}
+
+variable "developer_email" {
+  description = "Developer email for Owner tag (used for resource isolation)"
+  type        = string
+  default     = ""
+}
+
+# -----------------------------------------------------------------------------
 # Tags
 # -----------------------------------------------------------------------------
 
@@ -130,5 +145,9 @@ locals {
     Project     = var.project
     Environment = var.environment
     ManagedBy   = "opentofu"
+    Owner       = var.developer_email
   })
+
+  # Bucket name with developer isolation
+  bucket_name = "${var.project}-${var.developer_prefix}-data"
 }
