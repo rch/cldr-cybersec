@@ -179,6 +179,11 @@ async def apply_fixes(diagnostics: dict, dry_run: bool = True) -> list[dict[str,
             result = await _fix_shared_memory_exhaustion(dry_run)
             results.append(result)
 
+        elif failure_mode_id == "SYSTEM_001":
+            # macOS shared memory limits too low
+            result = await _fix_shared_memory_limits(dry_run)
+            results.append(result)
+
         elif failure_mode_id == "NIFI_001":
             # NiFi not installed - download and install
             result = await _fix_nifi_not_installed(dry_run)
@@ -972,6 +977,83 @@ async def _fix_shared_memory_exhaustion(dry_run: bool) -> dict[str, Any]:
     except Exception as e:
         result["success"] = False
         result["message"] = f"Error cleaning up shared memory: {e}"
+
+    return result
+
+
+async def _fix_shared_memory_limits(dry_run: bool) -> dict[str, Any]:
+    """Fix: Increase macOS shared memory kernel limits.
+
+    On macOS, the default kern.sysv.shmmax (4MB) is too low for PostgreSQL
+    and other services that use shared memory. This fix applies sysctl
+    settings to increase the limits.
+
+    Note: Requires sudo. For permanent fix, user should create /etc/sysctl.conf.
+    """
+    import platform
+    import subprocess
+
+    result: dict[str, Any] = {
+        "failure_mode_id": "SYSTEM_001",
+        "action": "increase_shared_memory_limits",
+    }
+
+    # Only applies to macOS
+    if platform.system() != "Darwin":
+        result["success"] = True
+        result["message"] = f"Platform {platform.system()} - shared memory limits fix not applicable"
+        return result
+
+    # Recommended values
+    settings = {
+        "kern.sysv.shmmax": "1073741824",  # 1GB
+        "kern.sysv.shmall": "262144",       # pages
+        "kern.sysv.shmmni": "256",          # segments
+    }
+
+    if dry_run:
+        result["success"] = True
+        result["dry_run"] = True
+        result["settings"] = settings
+        result["message"] = (
+            f"Would set shared memory limits: {settings}\n"
+            "Note: This requires sudo. Run with --apply to execute."
+        )
+        return result
+
+    # Apply settings
+    errors = []
+    applied = []
+
+    for key, value in settings.items():
+        try:
+            proc = subprocess.run(
+                ["sudo", "sysctl", "-w", f"{key}={value}"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if proc.returncode == 0:
+                applied.append(f"{key}={value}")
+            else:
+                errors.append(f"{key}: {proc.stderr.strip()}")
+        except subprocess.TimeoutExpired:
+            errors.append(f"{key}: timeout")
+        except Exception as e:
+            errors.append(f"{key}: {e}")
+
+    if errors:
+        result["success"] = False
+        result["applied"] = applied
+        result["errors"] = errors
+        result["message"] = f"Partially applied ({len(applied)}/{len(settings)}): {', '.join(errors)}"
+    else:
+        result["success"] = True
+        result["applied"] = applied
+        result["message"] = (
+            f"Applied shared memory limits: {', '.join(applied)}\n"
+            "Note: For permanent fix, add to /etc/sysctl.conf and reboot."
+        )
 
     return result
 

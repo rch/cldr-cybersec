@@ -344,6 +344,98 @@ async def check_aws_credentials(ctx: HealthContext) -> CheckResult:
         return CheckResult.error(f"Failed to check AWS credentials: {e}", duration_ms=duration)
 
 
+async def check_shared_memory_limits(ctx: HealthContext) -> CheckResult:
+    """SYSTEM_001: Check macOS shared memory kernel limits.
+
+    On macOS, the default kern.sysv.shmmax (4MB) is too low for PostgreSQL
+    and other services that use shared memory. This check verifies limits
+    are set high enough.
+
+    Recommended values:
+    - kern.sysv.shmmax = 1073741824 (1GB)
+    - kern.sysv.shmall = 262144 (pages)
+    - kern.sysv.shmmni = 256 (segments)
+    """
+    import platform
+    import subprocess
+
+    start = time.monotonic()
+
+    # Only relevant on macOS
+    if platform.system() != "Darwin":
+        return CheckResult.skipped("Shared memory limits check only applies to macOS")
+
+    try:
+        # Get current sysctl values
+        result = subprocess.run(
+            ["sysctl", "kern.sysv.shmmax", "kern.sysv.shmall", "kern.sysv.shmmni"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        if result.returncode != 0:
+            duration = int((time.monotonic() - start) * 1000)
+            return CheckResult.error(f"sysctl command failed: {result.stderr}", duration_ms=duration)
+
+        # Parse output: "kern.sysv.shmmax: 4194304"
+        values = {}
+        for line in result.stdout.strip().split('\n'):
+            if ':' in line:
+                key, val = line.split(':', 1)
+                key = key.strip().replace('kern.sysv.', '')
+                values[key] = int(val.strip())
+
+        shmmax = values.get('shmmax', 0)
+        shmall = values.get('shmall', 0)
+        shmmni = values.get('shmmni', 0)
+
+        duration = int((time.monotonic() - start) * 1000)
+
+        # Minimum recommended values
+        MIN_SHMMAX = 1073741824  # 1GB
+        MIN_SHMALL = 262144     # pages (1GB with 4KB pages)
+        MIN_SHMMNI = 256        # segments
+
+        issues = []
+        if shmmax < MIN_SHMMAX:
+            issues.append(f"shmmax={shmmax} (need {MIN_SHMMAX})")
+        if shmall < MIN_SHMALL:
+            issues.append(f"shmall={shmall} (need {MIN_SHMALL})")
+        if shmmni < MIN_SHMMNI:
+            issues.append(f"shmmni={shmmni} (need {MIN_SHMMNI})")
+
+        if issues:
+            from ..catalog import SYSTEM_001
+            rpn = SYSTEM_001.calculate_rpn()
+            return CheckResult.warning(
+                f"Shared memory limits too low: {', '.join(issues)}",
+                failure_mode_id="SYSTEM_001",
+                rpn=rpn,
+                remediation="Run: /health fix SYSTEM_001 --apply (requires sudo)",
+                shmmax=shmmax,
+                shmall=shmall,
+                shmmni=shmmni,
+                duration_ms=duration,
+            )
+
+        result_obj = CheckResult.ok(
+            f"Shared memory limits OK (shmmax={shmmax}, shmall={shmall}, shmmni={shmmni})"
+        )
+        result_obj.duration_ms = duration
+        return result_obj
+
+    except subprocess.TimeoutExpired:
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.error("sysctl command timed out", duration_ms=duration)
+    except FileNotFoundError:
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.skipped("sysctl command not found")
+    except Exception as e:
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.error(f"Failed to check shared memory limits: {e}", duration_ms=duration)
+
+
 # Registry of all infra checks
 CHECKS: dict[str, Any] = {
     "INFRA_001": check_postgres,
@@ -351,4 +443,5 @@ CHECKS: dict[str, Any] = {
     "INFRA_003": check_polaris,
     "INFRA_004": check_shared_memory,
     "INFRA_005": check_aws_credentials,
+    "SYSTEM_001": check_shared_memory_limits,
 }

@@ -565,6 +565,28 @@ INFRA_005 = FailureMode(
     solution_level=AutomationLevel.B,  # Manual env fix needed
 )
 
+# System-level failure modes (OS configuration)
+SYSTEM_001 = FailureMode(
+    failure_mode_id="SYSTEM_001",
+    category="system",
+    name="macOS Shared Memory Limits Too Low",
+    description="macOS kernel shared memory limits are too low for PostgreSQL and other services",
+    base_severity=9,   # Critical - PostgreSQL won't start
+    base_occurrence=7,  # Very common on fresh macOS installs
+    base_detection=1,   # Very easy - sysctl query
+    symptom="PostgreSQL fails with 'could not create shared memory segment' or services hang",
+    cause="macOS default kern.sysv.shmmax (4MB) is too low for PostgreSQL",
+    detection_method="sysctl kern.sysv.shmmax < 1GB",
+    remediation_steps=[
+        "Apply temporary fix: sudo sysctl -w kern.sysv.shmmax=1073741824",
+        "Apply temporary fix: sudo sysctl -w kern.sysv.shmall=262144",
+        "Apply temporary fix: sudo sysctl -w kern.sysv.shmmni=256",
+        "For permanent fix, create /etc/sysctl.conf with these values and reboot",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.B,  # Requires sudo
+)
+
 # NiFi failure modes
 NIFI_001 = FailureMode(
     failure_mode_id="NIFI_001",
@@ -681,6 +703,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "NIFI_002": NIFI_002,
     "NIFI_003": NIFI_003,
     "DATA_001": DATA_001,
+    "SYSTEM_001": SYSTEM_001,
 }
 
 # Category groupings - organized by type
@@ -704,7 +727,7 @@ CATEGORIES: dict[str, list[str]] = {
 
     # Infrastructure
     "postgres": ["INFRA_001"],
-    "system": ["INFRA_004"],     # OS-level: shm, eBPF, nvidia-smi
+    "system": ["INFRA_004", "SYSTEM_001"],  # OS-level: shm segments, shm limits, eBPF
     "aws": ["INFRA_005"],        # AWS credentials and IAM
     "data": ["DATA_001"],
 }
