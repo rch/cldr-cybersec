@@ -1116,16 +1116,17 @@ EOF
       # 4317/4318: OTEL gRPC/HTTP
       # 8888/8889: OTEL internal/Prometheus metrics
       # 9090: Prometheus
+      # 9876: Cost Monitor
       # 8786/8787: Dask scheduler/dashboard (port-forward)
       # 10443: Kubernetes Dashboard (port-forward)
       # 6550: k3d API server (host port)
       # 8000: JupyterHub (port-forward)
-      for port in 8181 8182 5438 9010 9011 8081 5050 8450 4317 4318 8888 8889 9090 8786 8787 10443 6550 8000; do
+      for port in 8181 8182 5438 9010 9011 8081 5050 8450 4317 4318 8888 8889 9090 9876 8786 8787 10443 6550 8000; do
         kill_by_port "$port"
       done
 
       # Kill remaining service processes using portable pattern matching
-      kill_by_pattern "minio|postgres|flink|taskmanager|jobmanager|quarkus|polaris|otelcol|nifi"
+      kill_by_pattern "minio|postgres|flink|taskmanager|jobmanager|quarkus|polaris|otelcol|nifi|cost.monitor"
 
       # Verify critical ports are released
       log_info "Verifying ports are released..."
