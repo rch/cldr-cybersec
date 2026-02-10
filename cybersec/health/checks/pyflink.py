@@ -45,14 +45,25 @@ async def check_pyflink_installed(ctx: HealthContext) -> CheckResult:
         if not python_path.exists():
             continue
         try:
+            # Check import succeeds and get location (version attr may not exist)
             result = subprocess.run(
-                [str(python_path), "-c", "import pyflink; print(pyflink.__version__)"],
+                [str(python_path), "-c", "import pyflink; print(pyflink.__file__)"],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
             if result.returncode == 0:
-                pyflink_found = (name, str(python_path), result.stdout.strip())
+                pyflink_path = result.stdout.strip()
+                # Try to get version, fall back to "installed"
+                ver_result = subprocess.run(
+                    [str(python_path), "-c",
+                     "import pyflink; print(getattr(pyflink, '__version__', 'installed'))"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                version = ver_result.stdout.strip() if ver_result.returncode == 0 else "installed"
+                pyflink_found = (name, str(python_path), version)
                 break
         except (subprocess.TimeoutExpired, Exception):
             continue
