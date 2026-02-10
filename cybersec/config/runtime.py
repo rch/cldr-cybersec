@@ -186,6 +186,30 @@ async def gather_runtime_config() -> dict[str, Any]:
     runtime["services"]["ngrok"] = _check_ngrok_credentials()
     runtime["services"]["cloudflare"] = _check_cloudflare_credentials()
 
+    # Developer identity (for AWS isolation and tagging)
+    try:
+        from ..bootstrap.config import SettingsManager
+        from ..bootstrap.identity import (
+            get_developer_prefix,
+            get_developer_email,
+            get_git_email,
+            get_git_username,
+        )
+
+        settings = SettingsManager()
+        config = settings.load()
+        runtime["developer"] = {
+            "prefix": get_developer_prefix(config),
+            "email": get_developer_email(config),
+            "git_email": get_git_email(),
+            "git_username": get_git_username(),
+        }
+    except Exception:
+        runtime["developer"] = {
+            "prefix": "",
+            "email": "",
+        }
+
     return runtime
 
 
@@ -343,9 +367,20 @@ def _check_aws_credentials() -> dict[str, Any]:
     }
 
     try:
+        profile = os.environ.get("AWS_PROFILE", "default")
+        region = _detect_aws_region()
+
+        def _aws_base_args() -> list[str]:
+            args = ["aws"]
+            if profile:
+                args.extend(["--profile", profile])
+            if region:
+                args.extend(["--region", region])
+            return args
+
         # Check credentials using sts get-caller-identity
         proc = subprocess.run(
-            ["aws", "sts", "get-caller-identity", "--output", "json"],
+            [*_aws_base_args(), "sts", "get-caller-identity", "--output", "json"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -358,12 +393,12 @@ def _check_aws_credentials() -> dict[str, Any]:
             result["arn"] = data.get("Arn")
 
             # Detect current region from AWS config
-            result["current_region"] = _detect_aws_region()
+            result["current_region"] = region
 
             # Check S3 access
             try:
                 s3_proc = subprocess.run(
-                    ["aws", "s3", "ls", "--max-items", "1"],
+                    [*_aws_base_args(), "s3api", "list-buckets", "--max-items", "1"],
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -375,7 +410,7 @@ def _check_aws_credentials() -> dict[str, Any]:
             # Check EC2 describe access
             try:
                 ec2_proc = subprocess.run(
-                    ["aws", "ec2", "describe-instances", "--max-items", "1"],
+                    [*_aws_base_args(), "ec2", "describe-instances", "--max-items", "1"],
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -419,8 +454,12 @@ def _detect_aws_region() -> str | None:
 
     # Try to get from AWS config
     try:
+        profile = os.environ.get("AWS_PROFILE")
+        cmd = ["aws", "configure", "get", "region"]
+        if profile:
+            cmd.extend(["--profile", profile])
         proc = subprocess.run(
-            ["aws", "configure", "get", "region"],
+            cmd,
             capture_output=True,
             text=True,
             timeout=5,

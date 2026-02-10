@@ -319,6 +319,51 @@ print('Environment config written to build/environment.json')
       echo "🚀 Provisioning AWS infrastructure with OpenTofu..."
       cd infra/aws/tofu
 
+      PROFILE="''${AWS_PROFILE:-default}"
+      REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-west-1")}" 
+
+      PREFIX=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_prefix; settings = SettingsManager(); config = settings.load(); print(get_developer_prefix(config))")
+      EMAIL=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_email; settings = SettingsManager(); config = settings.load(); print(get_developer_email(config))")
+      KEY_NAME="cybersec-dask-$PREFIX"
+
+      export TF_VAR_developer_prefix="$PREFIX"
+      export TF_VAR_developer_email="$EMAIL"
+      export TF_VAR_ssh_key_name="$KEY_NAME"
+      export TF_VAR_aws_region="$REGION"
+      export TF_VAR_availability_zones="[\"''${REGION}a\",\"''${REGION}b\",\"''${REGION}c\"]"
+
+      echo "Using profile: $PROFILE"
+      echo "Using region:  $REGION"
+      echo "Using key:     $KEY_NAME"
+
+      # Clear stale state locks (no running tofu/terraform)
+      LOCK_FILE=".terraform.tfstate.lock.info"
+      if [ -f "$LOCK_FILE" ]; then
+        if pgrep -f "tofu|terraform" >/dev/null 2>&1; then
+          echo "❌ Detected running tofu/terraform with an active lock."
+          echo "   Wait for it to finish or terminate it before retrying."
+          exit 1
+        fi
+
+        LOCK_ID=$(python - <<'PY'
+import json
+from pathlib import Path
+path = Path(".terraform.tfstate.lock.info")
+try:
+    data = json.loads(path.read_text())
+    print(data.get("ID", ""))
+except Exception:
+    print("")
+PY
+)
+        echo "🔓 Clearing stale state lock..."
+        if [ -n "$LOCK_ID" ]; then
+          tofu force-unlock -force "$LOCK_ID" || rm -f "$LOCK_FILE"
+        else
+          rm -f "$LOCK_FILE"
+        fi
+      fi
+
       if [ ! -f .terraform.lock.hcl ]; then
         echo "Initializing Tofu..."
         tofu init
@@ -326,13 +371,35 @@ print('Environment config written to build/environment.json')
 
       echo ""
       echo "Running tofu plan..."
-      tofu plan -out=tfplan
+      (
+        tofu plan -out=tfplan -var "ssh_key_name=$KEY_NAME"
+      ) &
+      PLAN_PID=$!
+      START_TS=$(date +%s)
+      while kill -0 "$PLAN_PID" 2>/dev/null; do
+        ELAPSED=$(( $(date +%s) - START_TS ))
+        echo "...tofu plan running (''${ELAPSED}s elapsed)"
+        sleep 30
+      done
+      wait "$PLAN_PID"
 
       echo ""
       read -p "Apply this plan? [y/N] " -n 1 -r
       echo
       if [[ $REPLY =~ ^[Yy]$ ]]; then
-        tofu apply tfplan
+        (
+          # Unset env var to avoid "Mismatch between input and plan variable value" error
+          unset TF_VAR_ssh_key_name
+          tofu apply "tfplan"
+        ) &
+        APPLY_PID=$!
+        START_TS=$(date +%s)
+        while kill -0 "$APPLY_PID" 2>/dev/null; do
+          ELAPSED=$(( $(date +%s) - START_TS ))
+          echo "...tofu apply running (''${ELAPSED}s elapsed)"
+          sleep 30
+        done
+        wait "$APPLY_PID"
         echo ""
         echo "✅ Infrastructure provisioned"
         echo ""
@@ -348,14 +415,62 @@ print('Environment config written to build/environment.json')
       echo "⚠️  Destroying AWS infrastructure..."
       cd infra/aws/tofu
 
+      # Clear stale state locks (no running tofu/terraform)
+      LOCK_FILE=".terraform.tfstate.lock.info"
+      if [ -f "$LOCK_FILE" ]; then
+        if pgrep -f "tofu|terraform" >/dev/null 2>&1; then
+          echo "❌ Detected running tofu/terraform with an active lock."
+          echo "   Wait for it to finish or terminate it before retrying."
+          exit 1
+        fi
+
+        LOCK_ID=$(python - <<'PY'
+import json
+from pathlib import Path
+path = Path(".terraform.tfstate.lock.info")
+try:
+    data = json.loads(path.read_text())
+    print(data.get("ID", ""))
+except Exception:
+    print("")
+PY
+)
+        echo "🔓 Clearing stale state lock..."
+        if [ -n "$LOCK_ID" ]; then
+          tofu force-unlock -force "$LOCK_ID" || rm -f "$LOCK_FILE"
+        else
+          rm -f "$LOCK_FILE"
+        fi
+      fi
+
       echo ""
-      tofu plan -destroy
+      (
+        tofu plan -destroy -var "ssh_key_name=$KEY_NAME"
+      ) &
+      PLAN_PID=$!
+      START_TS=$(date +%s)
+      while kill -0 "$PLAN_PID" 2>/dev/null; do
+        ELAPSED=$(( $(date +%s) - START_TS ))
+        echo "...tofu destroy plan running (''${ELAPSED}s elapsed)"
+        sleep 30
+      done
+      wait "$PLAN_PID"
 
       echo ""
       read -p "Destroy all resources? This cannot be undone! [y/N] " -n 1 -r
       echo
       if [[ $REPLY =~ ^[Yy]$ ]]; then
-        tofu destroy -auto-approve
+        (
+          tofu destroy -auto-approve
+        ) &
+        DESTROY_PID=$!
+        START_TS=$(date +%s)
+        while kill -0 "$DESTROY_PID" 2>/dev/null; do
+          ELAPSED=$(( $(date +%s) - START_TS ))
+          echo "...tofu destroy running (''${ELAPSED}s elapsed)"
+          sleep 30
+        done
+        wait "$DESTROY_PID"
         echo "✅ Infrastructure destroyed"
       else
         echo "Aborted."
@@ -484,6 +599,105 @@ print('Environment config written to build/environment.json')
     # Show developer identity and AWS configuration
     "aws:identity".exec = ''
       uv run cybersec "/aws"
+    '';
+
+    # Show active AWS profile/region and validate credentials
+    "aws:profile".exec = ''
+      PROFILE="''${AWS_PROFILE:-default}"
+      REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-west-1")}" 
+
+      echo "AWS Profile"
+      echo "==========="
+      echo "Profile: $PROFILE"
+      echo "Region:  $REGION"
+      echo ""
+
+      if aws sts get-caller-identity --profile "$PROFILE" --region "$REGION" >/dev/null 2>&1; then
+        echo "✅ Credentials OK"
+      else
+        echo "❌ Credentials not valid for profile '$PROFILE'"
+        echo "   Run: aws configure --profile $PROFILE"
+        exit 1
+      fi
+    '';
+
+    # Ensure EC2 key pair exists locally and in AWS for RKE2 access
+    # Usage:
+    #   AWS_PROFILE=default AWS_REGION=us-west-1 devenv tasks run aws:keypair:ensure
+    #   devenv tasks run aws:keypair:ensure my-key-name
+    "aws:keypair:ensure".exec = ''
+      set -euo pipefail
+
+      PROFILE="''${AWS_PROFILE:-default}"
+      REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-west-1")}" 
+
+      KEY_PATH="$HOME/.ssh/cybersec-dask.pem"
+
+      # Derive a stable key name from developer prefix (matches bucket isolation)
+      PREFIX=$(uv run python - <<'PY'
+from cybersec.bootstrap.config import SettingsManager
+from cybersec.bootstrap.identity import get_developer_prefix
+
+settings = SettingsManager()
+config = settings.load()
+print(get_developer_prefix(config))
+PY
+)
+      KEY_NAME="''${1:-cybersec-dask-$PREFIX}"
+
+      echo "🔐 Ensuring EC2 key pair"
+      echo "  Profile:  $PROFILE"
+      echo "  Region:   $REGION"
+      echo "  Key name: $KEY_NAME"
+      echo "  Key path: $KEY_PATH"
+
+      if [ -f "$KEY_PATH" ]; then
+        echo "✅ Key file exists locally. Skipping create."
+        exit 0
+      fi
+
+      mkdir -p "$(dirname "$KEY_PATH")"
+
+      if aws ec2 describe-key-pairs \
+        --profile "$PROFILE" \
+        --region "$REGION" \
+        --key-names "$KEY_NAME" >/dev/null 2>&1; then
+        echo "❌ Key pair '$KEY_NAME' already exists in AWS, but no local file was found at $KEY_PATH."
+        echo "   Either copy the PEM file into place or delete/recreate the key pair."
+        exit 1
+      fi
+
+      echo "Creating key pair..."
+      aws ec2 create-key-pair \
+        --profile "$PROFILE" \
+        --region "$REGION" \
+        --key-name "$KEY_NAME" \
+        --query 'KeyMaterial' \
+        --output text > "$KEY_PATH"
+
+      chmod 600 "$KEY_PATH"
+      echo "✅ Key pair created and saved to $KEY_PATH"
+    '';
+
+    # Bootstrap AWS dev config for K8s (region + identity + prepare)
+    "aws:setup".exec = ''
+      echo "🔧 AWS setup (region + identity + K8s prep)"
+      echo "======================================"
+
+      echo "Setting AWS region to us-west-1..."
+      uv run cybersec "/aws target us-west-1"
+
+      echo ""
+      echo "Developer identity:"
+      devenv tasks run aws:identity
+
+      echo ""
+      echo "Ensuring EC2 key pair:"
+      devenv tasks run aws:keypair:ensure
+
+      echo ""
+      echo "Preparing AWS K8s target..."
+      devenv tasks run k8s:prepare-aws
     '';
 
     # Verify S3 bucket ownership tags before operations
@@ -666,8 +880,23 @@ EOF
       export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
       export AWS_SESSION_TOKEN=$(aws configure get aws_session_token --profile ''${AWS_PROFILE:-default} 2>/dev/null || echo "")
 
-      cd infra/aws/ansible
-      ansible-playbook playbooks/site.yml
+      # Prevent conflict with local MinIO
+      unset S3_ENDPOINT
+
+      cd infra/aws/tofu
+      BUCKET_NAME=$(tofu output -raw s3_bucket_name 2>/dev/null || echo "")
+      
+      if [ -z "$BUCKET_NAME" ]; then
+        echo "❌ Error: Could not determine S3 bucket name from Tofu."
+        echo "   This usually means the infrastructure has not been provisioned yet."
+        echo "   Please run: devenv tasks run aws:provision"
+        exit 1
+      fi
+      
+      echo "Using S3 Bucket: $BUCKET_NAME"
+
+      cd ../ansible
+      ansible-playbook playbooks/site.yml -e "s3_bucket_name=$BUCKET_NAME"
       echo ""
       echo "✅ Cluster deployment complete"
       echo ""
@@ -1100,6 +1329,10 @@ EOF
       log_info "=== AWS K8s Target Preparation ==="
       log_info "Validating AWS deployment requirements..."
 
+      # Ensure local kubeconfig doesn't cause AWS validation failures
+      unset KUBECONFIG
+      export CYBERSEC_K8S_TARGET=aws
+
       # Generate environment config for conftest
       uv run python -c "
 import asyncio
@@ -1116,6 +1349,7 @@ async def main():
         'kubernetes': config.get('kubernetes', {}),
         'aws': config.get('aws', {}),
         'services': config.get('services', {}),
+    'developer': config.get('developer', {}),
     }
     Path('build').mkdir(exist_ok=True)
     Path('build/environment.json').write_text(json.dumps(env, indent=2))

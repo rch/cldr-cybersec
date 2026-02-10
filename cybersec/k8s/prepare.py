@@ -265,6 +265,7 @@ def _flatten_for_policy(runtime_config: dict[str, Any]) -> dict[str, Any]:
         "kubernetes": runtime_config.get("kubernetes", {}),
         "aws": runtime_config.get("aws", {}),
         "services": runtime_config.get("services", {}),
+        "developer": runtime_config.get("developer", {}),
         "paths": runtime_config.get("paths", {}),
     }
 
