@@ -43,6 +43,8 @@ Available command groups:
 - /health - FMEA-based health diagnostics
 - /bootstrap - Environment setup and configuration
 - /policy - Conftest policy validation
+- /aws - AWS developer identity and target configuration
+- /k8s - Kubernetes target preparation
 """,
 )
 

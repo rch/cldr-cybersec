@@ -21,6 +21,8 @@ def init_commands():
     from .schema import register_schema_commands
     from .benchmark import register_benchmark_commands
     from .cost import register_cost_commands
+    from .k8s import register_k8s_commands
+    from .aws import register_aws_commands
 
     register_health_commands()
     register_bootstrap_commands()
@@ -28,5 +30,7 @@ def init_commands():
     register_schema_commands()
     register_benchmark_commands()
     register_cost_commands()
+    register_k8s_commands()
+    register_aws_commands()
 
     _initialized = True

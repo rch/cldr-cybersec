@@ -6,6 +6,7 @@ and merges with static HOCON config for complete validation.
 
 import os
 import platform
+import shutil
 import socket
 import subprocess
 import sys
@@ -175,6 +176,16 @@ async def gather_runtime_config() -> dict[str, Any]:
     # Kubernetes target detection
     runtime["kubernetes"] = _detect_kubernetes_target()
 
+    # Tool availability for K8s targets
+    runtime["tools"] = _check_tools()
+
+    # AWS credentials for AWS target
+    runtime["aws"] = _check_aws_credentials()
+
+    # ngrok and Cloudflare for external access
+    runtime["services"]["ngrok"] = _check_ngrok_credentials()
+    runtime["services"]["cloudflare"] = _check_cloudflare_credentials()
+
     return runtime
 
 
@@ -268,6 +279,189 @@ def _detect_kubernetes_target() -> dict[str, Any]:
     )
 
     return result
+
+
+def _check_tools() -> dict[str, Any]:
+    """Check availability of tools needed for K8s targets.
+
+    Returns:
+        Dictionary with tool availability flags.
+    """
+    result: dict[str, Any] = {
+        "kubectl": shutil.which("kubectl") is not None,
+        "helm": shutil.which("helm") is not None,
+        "k3d": shutil.which("k3d") is not None,
+        "docker": shutil.which("docker") is not None,
+        "podman": shutil.which("podman") is not None,
+        "podman_machine_running": False,
+        "ansible_playbook": shutil.which("ansible-playbook") is not None,
+        "iac_tool": None,  # tofu or terraform
+        "ssh_key_exists": Path("~/.ssh/cybersec-dask.pem").expanduser().exists(),
+    }
+
+    # Check for IaC tool (prefer tofu over terraform)
+    if shutil.which("tofu"):
+        result["iac_tool"] = "tofu"
+    elif shutil.which("terraform"):
+        result["iac_tool"] = "terraform"
+
+    # Check if podman machine is running (macOS)
+    if result["podman"] and platform.system() == "Darwin":
+        try:
+            proc = subprocess.run(
+                ["podman", "machine", "info", "--format", "{{.Host.MachineState}}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if proc.returncode == 0 and "Running" in proc.stdout:
+                result["podman_machine_running"] = True
+        except Exception:
+            pass
+
+    return result
+
+
+def _check_aws_credentials() -> dict[str, Any]:
+    """Check AWS credentials configuration.
+
+    Returns:
+        Dictionary with AWS credential status and permissions.
+    """
+    result: dict[str, Any] = {
+        "credentials_configured": False,
+        "account_id": None,
+        "arn": None,
+        "current_region": None,
+        "error": None,
+        "remediation": None,
+        "permissions": {
+            "s3_access": False,
+            "ec2_describe": False,
+        },
+        "target_bucket_exists": False,
+    }
+
+    try:
+        # Check credentials using sts get-caller-identity
+        proc = subprocess.run(
+            ["aws", "sts", "get-caller-identity", "--output", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode == 0:
+            import json
+            data = json.loads(proc.stdout)
+            result["credentials_configured"] = True
+            result["account_id"] = data.get("Account")
+            result["arn"] = data.get("Arn")
+
+            # Detect current region from AWS config
+            result["current_region"] = _detect_aws_region()
+
+            # Check S3 access
+            try:
+                s3_proc = subprocess.run(
+                    ["aws", "s3", "ls", "--max-items", "1"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                result["permissions"]["s3_access"] = s3_proc.returncode == 0
+            except Exception:
+                pass
+
+            # Check EC2 describe access
+            try:
+                ec2_proc = subprocess.run(
+                    ["aws", "ec2", "describe-instances", "--max-items", "1"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                result["permissions"]["ec2_describe"] = ec2_proc.returncode == 0
+            except Exception:
+                pass
+        else:
+            result["error"] = proc.stderr.strip() if proc.stderr else "AWS credentials not configured"
+            result["remediation"] = (
+                "Configure AWS credentials:\n"
+                "  aws configure\n"
+                "  # or set environment variables:\n"
+                "  export AWS_ACCESS_KEY_ID=...\n"
+                "  export AWS_SECRET_ACCESS_KEY=..."
+            )
+    except FileNotFoundError:
+        result["error"] = "AWS CLI not installed"
+        result["remediation"] = "Install AWS CLI: brew install awscli (macOS) or pip install awscli"
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def _detect_aws_region() -> str | None:
+    """Detect the current AWS region from environment or config.
+
+    Priority:
+    1. AWS_REGION environment variable
+    2. AWS_DEFAULT_REGION environment variable
+    3. Region from 'aws configure get region'
+
+    Returns:
+        Region string or None if not detected.
+    """
+    # Check environment variables first
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if region:
+        return region
+
+    # Try to get from AWS config
+    try:
+        proc = subprocess.run(
+            ["aws", "configure", "get", "region"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except Exception:
+        pass
+
+    return None
+
+
+def _check_ngrok_credentials() -> dict[str, Any]:
+    """Check ngrok credential configuration.
+
+    Returns:
+        Dictionary with ngrok credential status.
+    """
+    auth_token_set = bool(os.environ.get("NGROK_AUTH_TOKEN"))
+    api_key_set = bool(os.environ.get("NGROK_API_KEY"))
+
+    return {
+        "auth_token_set": auth_token_set,
+        "api_key_set": api_key_set,
+        "credentials_complete": auth_token_set and api_key_set,
+        "domains": {
+            "dask": os.environ.get("NGROK_DASK_DOMAIN", "dask.zndx.org"),
+            "jupyterhub": os.environ.get("NGROK_JUPYTERHUB_DOMAIN", "jupyter.zndx.org"),
+        },
+    }
+
+
+def _check_cloudflare_credentials() -> dict[str, Any]:
+    """Check Cloudflare credential configuration.
+
+    Returns:
+        Dictionary with Cloudflare credential status.
+    """
+    return {
+        "api_token_set": bool(os.environ.get("CLOUDFLARE_API_TOKEN")),
+    }
 
 
 async def _check_tcp(host: str, port: int) -> dict[str, Any]:

@@ -100,6 +100,13 @@ class BootstrapConfig:
     fsn_iceberg_auto_refresh: bool = False
     fsn_iceberg_refresh_interval: int = 60  # seconds
 
+    # AWS configuration
+    aws_profile: str = "default"
+    aws_region: str = "us-east-1"
+    aws_project: str = "cybersec-dask"
+    developer_prefix: str = ""  # Empty = auto-generate from git email
+    developer_email: str = ""  # Empty = auto-detect from git config
+
     def get_minio_data_dir(self) -> Path:
         """Get MinIO data directory, using default if not set."""
         if self.minio_data_dir:
@@ -176,6 +183,29 @@ class BootstrapConfig:
         if default.exists():
             return default
         return None
+
+    def get_developer_prefix(self) -> str:
+        """Get developer prefix, auto-generating if not set."""
+        from .identity import get_developer_prefix
+        return get_developer_prefix(self)
+
+    def get_developer_email(self) -> str:
+        """Get developer email, auto-detecting if not set."""
+        from .identity import get_developer_email
+        return get_developer_email(self)
+
+    def get_aws_bucket_name(self) -> str:
+        """Get AWS bucket name with developer prefix."""
+        from .identity import get_aws_bucket_name
+        return get_aws_bucket_name(self.aws_project, self)
+
+    def get_expected_tags(self) -> dict:
+        """Get expected tags for ownership verification."""
+        return {
+            "ManagedBy": "opentofu",
+            "Owner": self.get_developer_email(),
+            "Project": self.aws_project,
+        }
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -309,6 +339,14 @@ class SettingsManager:
             flat["fsn_iceberg_auto_refresh"] = data["fsn"].get("iceberg_auto_refresh", False)
             flat["fsn_iceberg_refresh_interval"] = data["fsn"].get("iceberg_refresh_interval", 60)
 
+        # AWS section
+        if "aws" in data:
+            flat["aws_profile"] = data["aws"].get("profile", "default")
+            flat["aws_region"] = data["aws"].get("region", "us-east-1")
+            flat["aws_project"] = data["aws"].get("project", "cybersec-dask")
+            flat["developer_prefix"] = data["aws"].get("developer_prefix", "")
+            flat["developer_email"] = data["aws"].get("developer_email", "")
+
         return BootstrapConfig.from_dict(flat)
 
     def _apply_env_overrides(self):
@@ -332,6 +370,12 @@ class SettingsManager:
             "NIFI_HOME": ("nifi_home", str),
             "NIFI_STATE_DIR": ("nifi_state_dir", str),
             "POLARIS_HOME": ("polaris_home", str),
+            # AWS configuration
+            "AWS_PROFILE": ("aws_profile", str),
+            "AWS_REGION": ("aws_region", str),
+            "CYBERSEC_AWS_PROJECT": ("aws_project", str),
+            "CYBERSEC_DEVELOPER_PREFIX": ("developer_prefix", str),
+            "CYBERSEC_DEVELOPER_EMAIL": ("developer_email", str),
         }
 
         for env_var, (field_name, converter) in env_map.items():
@@ -428,6 +472,13 @@ class SettingsManager:
                 "remember_mode": self._config.fsn_remember_mode,
                 "iceberg_auto_refresh": self._config.fsn_iceberg_auto_refresh,
                 "iceberg_refresh_interval": self._config.fsn_iceberg_refresh_interval,
+            },
+            "aws": {
+                "profile": self._config.aws_profile,
+                "region": self._config.aws_region,
+                "project": self._config.aws_project,
+                "developer_prefix": self._config.developer_prefix,
+                "developer_email": self._config.developer_email,
             },
         }
 

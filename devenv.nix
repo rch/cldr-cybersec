@@ -481,62 +481,90 @@ print('Environment config written to build/environment.json')
       fi
     '';
 
-    # Empty a specific S3 bucket by name - useful when tofu state is destroyed
-    # Usage: S3_BUCKET=bucket-name devenv tasks run aws:s3:empty
+    # Show developer identity and AWS configuration
+    "aws:identity".exec = ''
+      uv run cybersec "/aws"
+    '';
+
+    # Verify S3 bucket ownership tags before operations
+    # Uses developer prefix and ownership tags for safety
+    "aws:s3:verify".exec = ''
+      BUCKET="''${1:-}"
+      if [ -n "$BUCKET" ]; then
+        uv run cybersec "/aws s3:verify $BUCKET"
+      else
+        uv run cybersec "/aws s3:verify"
+      fi
+    '';
+
+    # Empty S3 bucket with tag verification for safety
+    # Verifies ManagedBy=opentofu and Owner tags to prevent accidents
+    # Usage: devenv tasks run aws:s3:empty [bucket] [--apply] [--skip-verify]
     "aws:s3:empty".exec = ''
-      BUCKET_NAME="''${S3_BUCKET:-cybersec-dask-data}"
-      AWS_REGION="''${AWS_REGION:-us-east-1}"
+      # Parse arguments
+      BUCKET=""
+      APPLY=""
+      SKIP_VERIFY=""
 
-      echo "🗑️  Emptying S3 bucket: $BUCKET_NAME (region: $AWS_REGION)"
-      echo ""
+      for arg in "$@"; do
+        case "$arg" in
+          --apply) APPLY="--apply" ;;
+          --skip-verify) SKIP_VERIFY="--skip-verify" ;;
+          -*) echo "Unknown option: $arg"; exit 1 ;;
+          *) BUCKET="$arg" ;;
+        esac
+      done
 
-      # Check if bucket exists
-      if ! aws s3api head-bucket --bucket "$BUCKET_NAME" --region "$AWS_REGION" 2>/dev/null; then
-        echo "❌ Bucket '$BUCKET_NAME' does not exist or is not accessible."
+      # Build command
+      CMD="/aws s3:empty"
+      [ -n "$BUCKET" ] && CMD="$CMD $BUCKET"
+      [ -n "$APPLY" ] && CMD="$CMD --apply"
+      [ -n "$SKIP_VERIFY" ] && CMD="$CMD --skip-verify"
+
+      uv run cybersec "$CMD"
+    '';
+
+    # =========================================================================
+    # AWS Target Region Configuration
+    # =========================================================================
+    # These tasks manage AWS region selection with conftest validation.
+    # Flow: validate region -> update .cybersec/config.toml
+
+    # Show current AWS target configuration
+    "aws:target".exec = ''
+      uv run cybersec "/aws target"
+    '';
+
+    # Set AWS target region with validation
+    # Usage: devenv tasks run aws:target:set us-west-1
+    "aws:target:set".exec = ''
+      REGION="''${1:-}"
+      if [ -z "$REGION" ]; then
+        echo "Usage: devenv tasks run aws:target:set <region>"
+        echo ""
+        echo "Allowed regions:"
+        echo "  us-east-1, us-east-2, us-west-1, us-west-2"
+        echo "  eu-west-1, eu-central-1, ap-southeast-1"
+        echo ""
+        echo "Run 'devenv tasks run aws:target:list' for full list."
         exit 1
       fi
+      uv run cybersec "/aws target $REGION"
+    '';
 
-      # Count objects
-      OBJECT_COUNT=$(aws s3 ls "s3://$BUCKET_NAME" --recursive --region "$AWS_REGION" 2>/dev/null | wc -l || echo "0")
-      echo "Objects in bucket: ~$OBJECT_COUNT"
-      echo ""
-
-      read -p "Delete ALL objects from s3://$BUCKET_NAME? [y/N] " -n 1 -r
-      echo
-      if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Aborted."
-        exit 0
-      fi
-
-      echo ""
-      echo "Step 1: Deleting all object versions..."
-      aws s3api list-object-versions --bucket "$BUCKET_NAME" --region "$AWS_REGION" --output json 2>/dev/null | \
-        jq -r '.Versions[]? | "\(.Key)\t\(.VersionId)"' | \
-        while IFS=$'\t' read -r key version; do
-          [ -n "$key" ] && [ -n "$version" ] && \
-            aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" --region "$AWS_REGION" 2>/dev/null
-        done
-
-      echo "Step 2: Deleting delete markers..."
-      aws s3api list-object-versions --bucket "$BUCKET_NAME" --region "$AWS_REGION" --output json 2>/dev/null | \
-        jq -r '.DeleteMarkers[]? | "\(.Key)\t\(.VersionId)"' | \
-        while IFS=$'\t' read -r key version; do
-          [ -n "$key" ] && [ -n "$version" ] && \
-            aws s3api delete-object --bucket "$BUCKET_NAME" --key "$key" --version-id "$version" --region "$AWS_REGION" 2>/dev/null
-        done
-
-      echo "Step 3: Final cleanup with aws s3 rm..."
-      aws s3 rm "s3://$BUCKET_NAME" --recursive --region "$AWS_REGION" 2>/dev/null || true
-
-      # Verify bucket is empty
-      REMAINING=$(aws s3 ls "s3://$BUCKET_NAME" --recursive --region "$AWS_REGION" 2>/dev/null | wc -l || echo "0")
-      if [ "$REMAINING" -eq 0 ]; then
-        echo ""
-        echo "✅ S3 bucket emptied successfully"
+    # Validate current AWS target without changes (dry-run)
+    "aws:target:validate".exec = ''
+      REGION="''${1:-}"
+      if [ -n "$REGION" ]; then
+        uv run cybersec "/aws target $REGION --dry-run"
       else
-        echo ""
-        echo "⚠️  Warning: $REMAINING objects may remain. Run again if needed."
+        uv run cybersec "/aws target --dry-run"
       fi
+    '';
+
+    # List allowed AWS regions
+    "aws:target:list".exec = ''
+      uv run cybersec "/aws target --list"
     '';
 
     "aws:inventory".exec = ''
@@ -1014,6 +1042,249 @@ EOF
       rm -f "$PWD/.devenv/state/kubeconfig"
 
       log_success "k3d cluster destroyed"
+    '';
+
+    # =========================================================================
+    # K8s Target Preparation Tasks
+    # =========================================================================
+    # These tasks validate and configure K8s targets using conftest policies.
+    # Each target has specific requirements validated before deployment.
+
+    "k8s:prepare".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+
+      log_info "=== K8s Target Preparation ==="
+
+      # Auto-detect target from environment
+      if [ -n "''${CYBERSEC_K8S_TARGET:-}" ]; then
+        TARGET="$CYBERSEC_K8S_TARGET"
+      elif [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+        if grep -q "rke2\|rancher" "$KUBECONFIG" 2>/dev/null; then
+          TARGET="rke2"
+        elif grep -q "k3d\|k3s" "$KUBECONFIG" 2>/dev/null; then
+          TARGET="k3d"
+        else
+          TARGET=""
+        fi
+      elif [ -n "''${AWS_ACCESS_KEY_ID:-}" ] && [ -n "''${NGROK_AUTH_TOKEN:-}" ]; then
+        TARGET="aws"
+      else
+        TARGET=""
+      fi
+
+      if [ -z "$TARGET" ]; then
+        log_info "No target auto-detected. Available targets:"
+        echo "  devenv tasks run k8s:prepare-aws   # AWS RKE2 with Dask/JupyterHub"
+        echo "  devenv tasks run k8s:prepare-rke2  # Local RKE2 cluster"
+        echo "  devenv tasks run k8s:prepare-k3d   # Local k3d development"
+        echo ""
+        echo "Set CYBERSEC_K8S_TARGET or KUBECONFIG to auto-detect."
+        exit 0
+      fi
+
+      log_info "Detected target: $TARGET"
+      case "$TARGET" in
+        aws)  devenv tasks run k8s:prepare-aws ;;
+        rke2) devenv tasks run k8s:prepare-rke2 ;;
+        k3d)  devenv tasks run k8s:prepare-k3d ;;
+        *)
+          log_error "Unknown target: $TARGET"
+          exit 1
+          ;;
+      esac
+    '';
+
+    "k8s:prepare-aws".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+
+      log_info "=== AWS K8s Target Preparation ==="
+      log_info "Validating AWS deployment requirements..."
+
+      # Generate environment config for conftest
+      uv run python -c "
+import asyncio
+import json
+from pathlib import Path
+from cybersec.config.runtime import gather_runtime_config
+
+async def main():
+    config = await gather_runtime_config()
+    # Flatten for policy consumption
+    env = {
+        'platform': config.get('platform', {}),
+        'tools': config.get('tools', {}),
+        'kubernetes': config.get('kubernetes', {}),
+        'aws': config.get('aws', {}),
+        'services': config.get('services', {}),
+    }
+    Path('build').mkdir(exist_ok=True)
+    Path('build/environment.json').write_text(json.dumps(env, indent=2))
+    print('Environment config written to build/environment.json')
+
+asyncio.run(main())
+"
+
+      # Run conftest validation
+      log_info "Running policy validation..."
+      if conftest test build/environment.json \
+          --policy policy/k8s/base.rego \
+          --policy policy/k8s/aws/ \
+          --all-namespaces; then
+        log_success "Validation passed!"
+
+        # Generate target config
+        log_info "Generating target configuration..."
+        uv run python -c "
+import asyncio
+from cybersec.k8s.prepare import prepare_target, K8sTarget
+
+async def main():
+    result = await prepare_target(K8sTarget.AWS, dry_run=False)
+    if result.success:
+        print(f'Config written to: {result.config_path}')
+    else:
+        print(f'Failed: {result.message}')
+        for deny in result.validation.denies:
+            print(f'  - {deny}')
+        exit(1)
+
+asyncio.run(main())
+"
+        log_success "AWS target prepared. Run: devenv tasks run aws:provision"
+      else
+        log_error "Validation failed. Fix the issues above and retry."
+        exit 1
+      fi
+    '';
+
+    "k8s:prepare-rke2".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+
+      log_info "=== RKE2 K8s Target Preparation ==="
+      log_info "Validating RKE2 deployment requirements..."
+
+      # Ensure KUBECONFIG is set
+      if [ -z "''${KUBECONFIG:-}" ]; then
+        log_warn "KUBECONFIG not set. Using default ~/.kube/rke2.yaml"
+        export KUBECONFIG="$HOME/.kube/rke2.yaml"
+      fi
+
+      # Generate environment config for conftest
+      uv run python -c "
+import asyncio
+import json
+import os
+from pathlib import Path
+from cybersec.config.runtime import gather_runtime_config
+
+os.environ.setdefault('CYBERSEC_K8S_TARGET', 'rke2')
+
+async def main():
+    config = await gather_runtime_config()
+    env = {
+        'platform': config.get('platform', {}),
+        'tools': config.get('tools', {}),
+        'kubernetes': config.get('kubernetes', {}),
+        'services': config.get('services', {}),
+    }
+    Path('build').mkdir(exist_ok=True)
+    Path('build/environment.json').write_text(json.dumps(env, indent=2))
+    print('Environment config written to build/environment.json')
+
+asyncio.run(main())
+"
+
+      # Run conftest validation
+      log_info "Running policy validation..."
+      if conftest test build/environment.json \
+          --policy policy/k8s/base.rego \
+          --policy policy/k8s/rke2/ \
+          --all-namespaces; then
+        log_success "Validation passed!"
+
+        # Generate target config
+        log_info "Generating target configuration..."
+        uv run python -c "
+import asyncio
+from cybersec.k8s.prepare import prepare_target, K8sTarget
+
+async def main():
+    result = await prepare_target(K8sTarget.RKE2, dry_run=False)
+    if result.success:
+        print(f'Config written to: {result.config_path}')
+    else:
+        print(f'Failed: {result.message}')
+        exit(1)
+
+asyncio.run(main())
+"
+        log_success "RKE2 target prepared. Run: devenv tasks run k8s:deploy-dask"
+      else
+        log_error "Validation failed. Fix the issues above and retry."
+        exit 1
+      fi
+    '';
+
+    "k8s:prepare-k3d".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+
+      log_info "=== k3d K8s Target Preparation ==="
+      log_info "Validating k3d deployment requirements..."
+
+      # Generate environment config for conftest
+      uv run python -c "
+import asyncio
+import json
+import os
+from pathlib import Path
+from cybersec.config.runtime import gather_runtime_config
+
+os.environ.setdefault('CYBERSEC_K8S_TARGET', 'k3d')
+
+async def main():
+    config = await gather_runtime_config()
+    env = {
+        'platform': config.get('platform', {}),
+        'tools': config.get('tools', {}),
+        'kubernetes': config.get('kubernetes', {}),
+        'services': config.get('services', {}),
+    }
+    Path('build').mkdir(exist_ok=True)
+    Path('build/environment.json').write_text(json.dumps(env, indent=2))
+    print('Environment config written to build/environment.json')
+
+asyncio.run(main())
+"
+
+      # Run conftest validation
+      log_info "Running policy validation..."
+      if conftest test build/environment.json \
+          --policy policy/k8s/base.rego \
+          --policy policy/k8s/k3d/ \
+          --all-namespaces; then
+        log_success "Validation passed!"
+
+        # Generate target config
+        log_info "Generating target configuration..."
+        uv run python -c "
+import asyncio
+from cybersec.k8s.prepare import prepare_target, K8sTarget
+
+async def main():
+    result = await prepare_target(K8sTarget.K3D, dry_run=False)
+    if result.success:
+        print(f'Config written to: {result.config_path}')
+    else:
+        print(f'Failed: {result.message}')
+        exit(1)
+
+asyncio.run(main())
+"
+        log_success "k3d target prepared. Run: devenv tasks run k8s:provision"
+      else
+        log_error "Validation failed. Fix the issues above and retry."
+        exit 1
+      fi
     '';
 
     "restart:clean".exec = ''
