@@ -74,6 +74,9 @@ async def check_catalog(ctx: HealthContext) -> CheckResult:
 
     Verifies connection to Polaris REST catalog.
     """
+    if not ctx.devenv_running:
+        return CheckResult.skipped("devenv not running")
+
     start = time.monotonic()
 
     try:

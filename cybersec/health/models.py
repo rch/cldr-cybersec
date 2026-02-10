@@ -324,22 +324,34 @@ class CheckResult:
 def is_devenv_running() -> bool:
     """Check if devenv/process-compose is running.
 
-    Returns True if process-compose is detected, indicating devenv services
-    should be running. Used to skip service connectivity checks when devenv
-    is not active.
-    """
-    import subprocess
+    Returns True if we're in an active devenv shell with process-compose running.
+    Used to skip service connectivity checks when devenv is not active.
 
-    try:
-        # Check for process-compose process
-        result = subprocess.run(
-            ["pgrep", "-f", "process-compose"],
-            capture_output=True,
-            timeout=2,
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    Detection strategy:
+    1. Check DEVENV_STATE env var (set when in devenv shell)
+    2. Look for process-compose socket in XDG_RUNTIME_DIR/devenv-*/
+    """
+    import os
+    from pathlib import Path
+
+    # Primary check: DEVENV_STATE environment variable
+    devenv_state = os.environ.get("DEVENV_STATE")
+    if not devenv_state:
         return False
+
+    # Check for process-compose socket in runtime directory
+    # Socket is at: /run/user/<uid>/devenv-<hash>/pc.sock
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    runtime_path = Path(runtime_dir)
+
+    if runtime_path.exists():
+        # Look for devenv-*/pc.sock
+        for devenv_dir in runtime_path.glob("devenv-*"):
+            pc_socket = devenv_dir / "pc.sock"
+            if pc_socket.exists():
+                return True
+
+    return False
 
 
 @dataclass
