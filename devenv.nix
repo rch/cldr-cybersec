@@ -495,7 +495,38 @@ PY
 
       # Get developer identity and AWS config
       PROFILE="''${AWS_PROFILE:-default}"
-      REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-east-1")}"
+
+      # Auto-detect region from tfstate (resources have ARNs with region)
+      # This ensures destroy targets the same region where resources were created
+      STATE_REGION=""
+      if [ -f terraform.tfstate ]; then
+        STATE_REGION=$(python3 - <<'PY'
+import json, re
+try:
+    state = json.load(open("terraform.tfstate"))
+    for resource in state.get("resources", []):
+        for instance in resource.get("instances", []):
+            attrs = instance.get("attributes", {})
+            # Check ARN fields for region (arn:aws:service:REGION:account:...)
+            for key in ["arn", "id"]:
+                val = attrs.get(key, "")
+                if isinstance(val, str) and val.startswith("arn:aws:"):
+                    match = re.search(r"arn:aws:[^:]+:([a-z]{2}-[a-z]+-\d+):", val)
+                    if match:
+                        print(match.group(1))
+                        exit(0)
+except Exception:
+    pass
+PY
+)
+      fi
+
+      if [ -n "$STATE_REGION" ]; then
+        REGION="$STATE_REGION"
+        echo "📍 Detected region from tfstate: $REGION"
+      else
+        REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-east-1")}"
+      fi
       PREFIX=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_prefix; settings = SettingsManager(); config = settings.load(); print(get_developer_prefix(config))")
       EMAIL=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_email; settings = SettingsManager(); config = settings.load(); print(get_developer_email(config))")
       ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "unknown")
