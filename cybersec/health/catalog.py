@@ -162,11 +162,11 @@ PYFLINK_002 = FailureMode(
     base_occurrence=6,  # High on macOS - common issue
     base_detection=4,   # Moderate - need to compare paths
     symptom="'Python process exits with code: 1', PyFlink import errors in TaskManager logs",
-    cause="PYFLINK_CLIENT_EXECUTABLE not set or points to wrong Python",
-    detection_method="Compare sys.executable with flink-conf.yaml python settings",
+    cause="python.executable not set in config.yaml or points to wrong Python",
+    detection_method="Compare sys.executable with config.yaml python settings (Flink 1.20+)",
     remediation_steps=[
         "Run: /health fix --apply",
-        "Or manually add to flink-conf.yaml: python.client.executable: /path/to/python",
+        "Or manually add python section to config.yaml",
         "Then restart: devenv tasks run restart:clean",
     ],
     observation_level=AutomationLevel.A,
@@ -222,10 +222,10 @@ PYFLINK_005 = FailureMode(
     base_detection=3,   # Good - can detect platform
     symptom="PyFlink works locally but fails in Flink cluster on macOS",
     cause="macOS has multiple Python installations, Flink picks wrong one",
-    detection_method="Platform is Darwin AND python settings not in flink-conf.yaml",
+    detection_method="Platform is Darwin AND python settings not in config.yaml",
     remediation_steps=[
         "Run: /health fix --apply",
-        "Or manually edit $FLINK_HOME/conf/flink-conf.yaml with devenv Python path",
+        "Or manually add python section to $FLINK_HOME/conf/config.yaml",
         "Then restart: devenv tasks run restart:clean",
     ],
     observation_level=AutomationLevel.A,
@@ -257,7 +257,7 @@ PYFLINK_007 = FailureMode(
     failure_mode_id="PYFLINK_007",
     category="pyflink",
     name="Config Written But Not Applied",
-    description="flink-conf.yaml has Python settings but Flink not using them",
+    description="config.yaml has Python settings but Flink not using them",
     base_severity=8,   # High - fix appears successful but doesn't work
     base_occurrence=6,  # High - common after fix without restart
     base_detection=3,   # Moderate - need to check both config and runtime
@@ -266,7 +266,7 @@ PYFLINK_007 = FailureMode(
     detection_method="Config has python.executable but TaskManager logs show wrong Python",
     remediation_steps=[
         "Stop Flink cluster: $FLINK_HOME/bin/stop-cluster.sh",
-        "Verify config: grep python $FLINK_HOME/conf/flink-conf.yaml",
+        "Verify config: cat $FLINK_HOME/conf/config.yaml | grep -A2 python",
         "Start Flink cluster: $FLINK_HOME/bin/start-cluster.sh",
         "Or run: devenv tasks run restart:clean",
     ],
@@ -283,8 +283,8 @@ PYFLINK_008 = FailureMode(
     base_occurrence=5,  # Moderate - happens when restart skipped
     base_detection=4,   # Moderate - need to compare timestamps
     symptom="Config file newer than Flink process start time",
-    cause="Flink cluster not restarted after flink-conf.yaml modification",
-    detection_method="Compare flink-conf.yaml mtime vs TaskManager process start time",
+    cause="Flink cluster not restarted after config.yaml modification",
+    detection_method="Compare config.yaml mtime vs TaskManager process start time",
     remediation_steps=[
         "Stop Flink: $FLINK_HOME/bin/stop-cluster.sh",
         "Start Flink: $FLINK_HOME/bin/start-cluster.sh",
@@ -299,15 +299,15 @@ PYFLINK_009 = FailureMode(
     failure_mode_id="PYFLINK_009",
     category="pyflink",
     name="Python Executable Not Found by Flink",
-    description="Configured Python path in flink-conf.yaml does not exist or is not executable",
+    description="Configured Python path in config.yaml does not exist or is not executable",
     base_severity=8,   # High - jobs fail immediately
     base_occurrence=3,  # Low-moderate - config error
     base_detection=2,   # Easy - check file exists
     symptom="'Python process exits with code: 1', Python path in config invalid",
     cause="Configured python.executable path does not exist or changed",
-    detection_method="Check if python.executable path from flink-conf.yaml exists and is executable",
+    detection_method="Check if python.executable path from config.yaml exists and is executable",
     remediation_steps=[
-        "Check configured path: grep python.executable $FLINK_HOME/conf/flink-conf.yaml",
+        "Check configured path: cat $FLINK_HOME/conf/config.yaml | grep -A2 python",
         "Verify path exists: ls -la /path/to/python3",
         "Re-run fix: /health fix --apply",
         "Restart cluster: devenv tasks run restart:clean",

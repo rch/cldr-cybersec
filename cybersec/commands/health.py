@@ -318,7 +318,7 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
         "PYFLINK_011", "PYFLINK_012", "PYFLINK_014",  # Iceberg JARs -> build from submodule
         "NIFI_001",   # NiFi not installed -> build from submodule
         # Configuration fixes
-        "PYFLINK_002", "PYFLINK_005", "PYFLINK_009",  # Python path in flink-conf.yaml
+        "PYFLINK_002", "PYFLINK_005", "PYFLINK_009",  # Python path in config.yaml
         "PYFLINK_007", "PYFLINK_008",  # Cluster restart for config changes
         "FLINK_004",  # DataGen bounded source fix
     }
@@ -543,7 +543,7 @@ def _format_health_fixes(fix_results: list, dry_run: bool, target_desc: str, non
             if action == "install_package":
                 lines.append(f"  + [{fm_id}] Would install: {fix.get('package', 'unknown')}")
             elif action == "update_flink_config":
-                lines.append(f"  ~ [{fm_id}] Would update flink-conf.yaml")
+                lines.append(f"  ~ [{fm_id}] Would update config.yaml")
             elif action == "rebuild_iceberg_jars":
                 lines.append(f"  ~ [{fm_id}] Would rebuild Iceberg JARs")
             elif action == "cleanup_shared_memory":
@@ -697,11 +697,11 @@ def _format_pyflink_diagnostics(data: dict) -> str:
 
     python_settings = flink_cfg.get("python_settings", [])
     if python_settings and python_settings != ["none configured"]:
-        lines.append("  Python settings in flink-conf.yaml:")
+        lines.append("  Python settings in config.yaml:")
         for setting in python_settings:
             lines.append(f"    {setting}")
     else:
-        lines.append("  No Python settings in flink-conf.yaml")
+        lines.append("  No Python settings in config.yaml")
 
     # Logs
     logs = data.get("logs", {})
@@ -823,7 +823,7 @@ def _format_pyflink_diagnostics(data: dict) -> str:
                 lines.append(f"      Command: {fix.get('command', '')}")
 
             elif action == "update_flink_config":
-                lines.append(f"  ~ [{fm_id}] Update flink-conf.yaml")
+                lines.append(f"  ~ [{fm_id}] Update config.yaml")
                 lines.append(f"      Config: {fix.get('config_file', 'unknown')}")
                 if fix.get("lines_to_add"):
                     lines.append("      Add:")
@@ -922,7 +922,7 @@ def _format_pyflink_fixes(fix_results: list, dry_run: bool) -> str:
                 lines.append(f"      Command: {fix.get('command', '')}")
 
             elif action == "update_flink_config":
-                lines.append(f"  ~ [{fm_id}] Would update flink-conf.yaml")
+                lines.append(f"  ~ [{fm_id}] Would update config.yaml")
                 lines.append(f"      Config: {fix.get('config_file', 'unknown')}")
                 if fix.get("lines_to_add"):
                     lines.append("      Add:")

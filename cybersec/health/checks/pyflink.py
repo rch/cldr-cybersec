@@ -97,8 +97,10 @@ async def check_pyflink_installed(ctx: HealthContext) -> CheckResult:
 async def check_flink_python_config(ctx: HealthContext) -> CheckResult:
     """PYFLINK_002: Check Flink is configured to use a Python with pyflink.
 
-    Verifies python.executable in flink-conf.yaml points to a Python that has pyflink.
+    Verifies python.executable in config.yaml (Flink 1.20+) points to a Python that has pyflink.
     """
+    import yaml
+
     start = time.monotonic()
 
     # Get Flink home
@@ -107,21 +109,28 @@ async def check_flink_python_config(ctx: HealthContext) -> CheckResult:
         devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
         flink_home = Path(devenv_root) / "thirdparty" / "flink" / "flink-dist" / "target" / "flink-1.20.1-bin" / "flink-1.20.1"
 
-    flink_conf = flink_home / "conf" / "flink-conf.yaml"
+    # Flink 1.20+ uses config.yaml
+    flink_conf = flink_home / "conf" / "config.yaml"
 
     if not flink_conf.exists():
         duration = int((time.monotonic() - start) * 1000)
-        result = CheckResult.skipped(f"flink-conf.yaml not found: {flink_conf}")
+        result = CheckResult.skipped(f"config.yaml not found: {flink_conf}")
         result.duration_ms = duration
         return result
 
-    # Read configured Python path
-    content = flink_conf.read_text()
-    configured_python = None
-    for line in content.split('\n'):
-        if line.strip().startswith('python.executable:'):
-            configured_python = line.split(':', 1)[1].strip()
-            break
+    # Read configured Python path from YAML structure
+    try:
+        content = flink_conf.read_text()
+        config = yaml.safe_load(content) or {}
+        python_config = config.get("python", {})
+        # Check both python.executable and python.client.executable
+        configured_python = python_config.get("executable")
+        if not configured_python:
+            client_config = python_config.get("client", {})
+            configured_python = client_config.get("executable")
+    except yaml.YAMLError:
+        duration = int((time.monotonic() - start) * 1000)
+        return CheckResult.error(f"Failed to parse config.yaml", duration_ms=duration)
 
     duration = int((time.monotonic() - start) * 1000)
 
@@ -129,7 +138,7 @@ async def check_flink_python_config(ctx: HealthContext) -> CheckResult:
         fm = get_failure_mode("PYFLINK_002")
         rpn = fm.calculate_rpn() if fm else None
         return CheckResult.warning(
-            "python.executable not configured in flink-conf.yaml",
+            "python.executable not configured in config.yaml",
             failure_mode_id="PYFLINK_002",
             rpn=rpn,
             remediation="Run: /health fix --apply",

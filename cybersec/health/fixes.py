@@ -138,7 +138,7 @@ async def apply_fixes(diagnostics: dict, dry_run: bool = True) -> list[dict[str,
             results.append(result)
 
         elif failure_mode_id == "PYFLINK_002":
-            # Python path mismatch - fix flink-conf.yaml
+            # Python path mismatch - fix config.yaml
             result = await _fix_python_path_mismatch(diagnostics, flink_home, dry_run)
             results.append(result)
 
@@ -186,7 +186,7 @@ async def apply_fixes(diagnostics: dict, dry_run: bool = True) -> list[dict[str,
             # Python executable not found - re-run config fix
             result = await _fix_python_path_mismatch(diagnostics, flink_home, dry_run)
             result["failure_mode_id"] = "PYFLINK_009"
-            result["message"] = "Re-detected Python path and updated flink-conf.yaml"
+            result["message"] = "Re-detected Python path and updated config.yaml"
             results.append(result)
 
         elif failure_mode_id == "PYFLINK_011":
@@ -246,7 +246,8 @@ async def _fix_python_path_mismatch(
     flink_home: Path | None,
     dry_run: bool
 ) -> dict[str, Any]:
-    """Fix: Update flink-conf.yaml with correct Python path."""
+    """Fix: Update config.yaml (Flink 1.20+) with correct Python path."""
+    import yaml
 
     result = {
         "failure_mode_id": "PYFLINK_002",
@@ -258,10 +259,11 @@ async def _fix_python_path_mismatch(
         result["message"] = "FLINK_HOME not found - cannot update config"
         return result
 
-    flink_conf_path = flink_home / "conf" / "flink-conf.yaml"
+    # Flink 1.20+ uses config.yaml
+    flink_conf_path = flink_home / "conf" / "config.yaml"
     if not flink_conf_path.exists():
         result["success"] = False
-        result["message"] = f"flink-conf.yaml not found at {flink_conf_path}"
+        result["message"] = f"config.yaml not found at {flink_conf_path}"
         return result
 
     # Determine the correct Python path - must have pyflink installed
@@ -275,55 +277,47 @@ async def _fix_python_path_mismatch(
     result["python_path"] = python_path
     result["config_file"] = str(flink_conf_path)
 
-    # Lines to add
-    lines_to_add = [
-        f"python.client.executable: {python_path}",
-        f"python.executable: {python_path}",
-    ]
-    result["lines_to_add"] = lines_to_add
+    # YAML structure to add
+    python_config = {
+        "executable": python_path,
+        "client": {
+            "executable": python_path,
+        },
+    }
+    result["python_config"] = python_config
 
     if dry_run:
         result["success"] = True
         result["dry_run"] = True
-        result["message"] = f"Would add Python configuration to {flink_conf_path}"
+        result["message"] = f"Would update config.yaml with python.executable: {python_path}"
         return result
 
-    # Read existing config
+    # Read and update YAML config
     try:
         content = flink_conf_path.read_text()
-        lines = content.split("\n")
-
-        # Check if settings already exist
-        has_client_exec = any("python.client.executable:" in line and not line.strip().startswith("#") for line in lines)
-        has_exec = any("python.executable:" in line and "client" not in line and not line.strip().startswith("#") for line in lines)
 
         # Backup original
         backup_path = flink_conf_path.with_suffix(".yaml.bak")
         shutil.copy(flink_conf_path, backup_path)
         result["backup"] = str(backup_path)
 
-        # Update or append settings
-        new_lines = []
-        for line in lines:
-            # Skip existing python executable settings (we'll add new ones)
-            if "python.client.executable:" in line and not line.strip().startswith("#"):
-                continue
-            if "python.executable:" in line and "client" not in line and not line.strip().startswith("#"):
-                continue
-            new_lines.append(line)
+        # Parse existing config
+        config = yaml.safe_load(content) or {}
 
-        # Add new settings at end (before any trailing empty lines)
-        while new_lines and new_lines[-1].strip() == "":
-            new_lines.pop()
+        # Update python section
+        config["python"] = python_config
 
-        new_lines.append("")
-        new_lines.append("# PyFlink Python configuration (added by cybersec health fix)")
-        for line in lines_to_add:
-            new_lines.append(line)
-        new_lines.append("")
+        # Preserve the file structure: append python config as YAML block at end
+        # This maintains comments in the original file
+        if "python:" not in content:
+            # Append new section
+            python_yaml = yaml.dump({"python": python_config}, default_flow_style=False)
+            new_content = content.rstrip() + "\n\n# PyFlink Python configuration (added by cybersec health fix)\n" + python_yaml
+        else:
+            # Full rewrite (loses comments but updates correctly)
+            new_content = yaml.dump(config, default_flow_style=False, sort_keys=False)
 
-        # Write updated config
-        flink_conf_path.write_text("\n".join(new_lines))
+        flink_conf_path.write_text(new_content)
 
         result["success"] = True
         result["message"] = f"Updated {flink_conf_path} with Python configuration"

@@ -62,7 +62,7 @@ async def gather_runtime_config() -> dict[str, Any]:
         "flink_home_exists": Path(flink_home).exists(),
         "flink_home_env_set": bool(os.environ.get("FLINK_HOME")),
         "flink_binary_exists": Path(flink_home, "bin", "flink").exists(),
-        "flink_conf_exists": Path(flink_home, "conf", "flink-conf.yaml").exists(),
+        "flink_conf_exists": Path(flink_home, "conf", "config.yaml").exists(),
     }
 
     # Python environment
@@ -86,8 +86,8 @@ async def gather_runtime_config() -> dict[str, Any]:
         "devenv_python_exists": Path(devenv_python).exists(),
     }
 
-    # Flink configuration state
-    flink_conf_path = Path(flink_home, "conf", "flink-conf.yaml")
+    # Flink configuration state (Flink 1.20+ uses config.yaml)
+    flink_conf_path = Path(flink_home, "conf", "config.yaml")
     python_configured = False
     configured_python_path = ""
     configured_python_exists = False
@@ -95,22 +95,23 @@ async def gather_runtime_config() -> dict[str, Any]:
 
     if flink_conf_path.exists():
         try:
+            import yaml
+
             config_mtime = os.path.getmtime(flink_conf_path)
             content = flink_conf_path.read_text()
+            config = yaml.safe_load(content) or {}
+            python_config = config.get("python", {})
 
-            for line in content.split("\n"):
-                line = line.strip()
-                if line.startswith("#"):
-                    continue
-                if "python.executable:" in line and "client" not in line:
-                    python_configured = True
-                    configured_python_path = line.split(":", 1)[1].strip()
-                    configured_python_exists = Path(configured_python_path).exists()
-                    break
-                elif "python.client.executable:" in line and not configured_python_path:
-                    python_configured = True
-                    configured_python_path = line.split(":", 1)[1].strip()
-                    configured_python_exists = Path(configured_python_path).exists()
+            # Check python.executable
+            if python_config.get("executable"):
+                python_configured = True
+                configured_python_path = python_config["executable"]
+                configured_python_exists = Path(configured_python_path).exists()
+            # Fall back to python.client.executable
+            elif python_config.get("client", {}).get("executable"):
+                python_configured = True
+                configured_python_path = python_config["client"]["executable"]
+                configured_python_exists = Path(configured_python_path).exists()
         except Exception:
             pass
 

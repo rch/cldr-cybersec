@@ -325,28 +325,32 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
                 "aws_bundle": [j.name for j in iceberg_aws_bundle_jars] if iceberg_aws_bundle_jars else "MISSING",
             }
 
-        flink_conf = flink_home / "conf" / "flink-conf.yaml"
+        # Flink 1.20+ uses config.yaml
+        flink_conf = flink_home / "conf" / "config.yaml"
         if flink_conf.exists():
             try:
+                import yaml
+
                 flink_conf_mtime = os.path.getmtime(flink_conf)
                 diagnostics["flink_config"]["config_mtime"] = flink_conf_mtime
 
                 content = flink_conf.read_text()
-                python_settings = [
-                    line.strip() for line in content.split("\n")
-                    if ("python.executable" in line.lower() or "python.client.executable" in line.lower())
-                    and not line.strip().startswith("#")
-                ]
+                config = yaml.safe_load(content) or {}
+                python_config = config.get("python", {})
+
+                # Extract Python settings from YAML structure
+                python_settings = []
+                if python_config.get("executable"):
+                    python_settings.append(f"python.executable: {python_config['executable']}")
+                    configured_python_path = python_config["executable"]
+                client_config = python_config.get("client", {})
+                if client_config.get("executable"):
+                    python_settings.append(f"python.client.executable: {client_config['executable']}")
+                    if not configured_python_path:
+                        configured_python_path = client_config["executable"]
+
                 diagnostics["flink_config"]["python_settings"] = python_settings or ["none configured"]
                 python_settings_configured = len(python_settings) > 0
-
-                # Extract the configured Python path
-                for setting in python_settings:
-                    if "python.executable:" in setting and "client" not in setting:
-                        configured_python_path = setting.split(":", 1)[1].strip()
-                        break
-                    elif "python.client.executable:" in setting and not configured_python_path:
-                        configured_python_path = setting.split(":", 1)[1].strip()
 
                 if configured_python_path:
                     configured_python_exists = Path(configured_python_path).exists()
@@ -508,9 +512,11 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
             # Provide specific path for macOS
             if devenv_python_exists:
                 devenv_path = diagnostics["python_environment"].get("devenv_python", "")
-                recommendations.append(f"Add to $FLINK_HOME/conf/flink-conf.yaml:")
-                recommendations.append(f"  python.client.executable: {devenv_path}")
-                recommendations.append(f"  python.executable: {devenv_path}")
+                recommendations.append(f"Add python section to $FLINK_HOME/conf/config.yaml:")
+                recommendations.append(f"  python:")
+                recommendations.append(f"    executable: {devenv_path}")
+                recommendations.append(f"    client:")
+                recommendations.append(f"      executable: {devenv_path}")
             else:
                 recommendations.extend(fm.remediation_steps)
 
@@ -605,7 +611,7 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
                 "symptom": fm.symptom,
                 "rpn": rpn.rpn,
                 "remediation": fm.remediation_steps,
-                "details": ["flink-conf.yaml modified after TaskManager started"],
+                "details": ["config.yaml modified after TaskManager started"],
             })
             recommendations.insert(0, "Restart Flink cluster to apply config: devenv tasks run restart:clean")
 
@@ -623,7 +629,7 @@ async def gather_pyflink_diagnostics() -> dict[str, Any]:
                 "remediation": fm.remediation_steps,
                 "details": [f"Configured path does not exist: {configured_python_path}"],
             })
-            recommendations.insert(0, f"Fix Python path in flink-conf.yaml: {configured_python_path} not found")
+            recommendations.insert(0, f"Fix Python path in config.yaml: {configured_python_path} not found")
 
     # PYFLINK_010: FLINK_HOME Not Exported
     if flink_home_exists and not flink_home_env_set:

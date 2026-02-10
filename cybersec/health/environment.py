@@ -98,33 +98,37 @@ async def gather_environment_config() -> dict[str, Any]:
         flink_bin = flink_home / "bin" / "flink"
         config["flink"]["binary_exists"] = flink_bin.exists()
 
-        flink_conf = flink_home / "conf" / "flink-conf.yaml"
+        # Flink 1.20+ uses config.yaml
+        flink_conf = flink_home / "conf" / "config.yaml"
         if flink_conf.exists():
             try:
+                import yaml
+
                 content = flink_conf.read_text()
                 config_mtime = os.path.getmtime(flink_conf)
                 config["flink"]["config_mtime"] = config_mtime
 
-                python_settings = [
-                    line.strip() for line in content.split("\n")
-                    if ("python.executable" in line.lower() or "python.client.executable" in line.lower())
-                    and not line.strip().startswith("#")
-                ]
+                # Parse YAML to extract Python settings
+                yaml_config = yaml.safe_load(content) or {}
+                python_config = yaml_config.get("python", {})
+
+                python_settings = []
+                configured_path = None
+
+                if python_config.get("executable"):
+                    python_settings.append(f"python.executable: {python_config['executable']}")
+                    configured_path = python_config["executable"]
+                if python_config.get("client", {}).get("executable"):
+                    python_settings.append(f"python.client.executable: {python_config['client']['executable']}")
+                    if not configured_path:
+                        configured_path = python_config["client"]["executable"]
+
                 config["flink"]["python_configured"] = len(python_settings) > 0
                 config["flink"]["python_settings"] = python_settings
 
-                # Extract configured path
-                for setting in python_settings:
-                    if "python.executable:" in setting and "client" not in setting:
-                        configured_path = setting.split(":", 1)[1].strip()
-                        config["flink"]["configured_python_path"] = configured_path
-                        config["flink"]["configured_python_exists"] = Path(configured_path).exists()
-                        break
-                    elif "python.client.executable:" in setting:
-                        configured_path = setting.split(":", 1)[1].strip()
-                        if not config["flink"]["configured_python_path"]:
-                            config["flink"]["configured_python_path"] = configured_path
-                            config["flink"]["configured_python_exists"] = Path(configured_path).exists()
+                if configured_path:
+                    config["flink"]["configured_python_path"] = configured_path
+                    config["flink"]["configured_python_exists"] = Path(configured_path).exists()
 
                 # Check if process is stale
                 try:
