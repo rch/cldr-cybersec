@@ -339,6 +339,38 @@ print('Environment config written to build/environment.json')
       echo "Using region:  $REGION"
       echo "Using key:     $KEY_NAME"
 
+      # Pre-flight quota check - fail fast before creating any infrastructure
+      echo ""
+      echo "🔍 Running pre-flight quota validation..."
+      PREFLIGHT_OUTPUT=$(uv run python -c "
+import asyncio
+from cybersec.aws.quota import check_deployment_quotas
+
+async def main():
+    result = await check_deployment_quotas('$REGION', required_eips=1, required_vpcs=1)
+    print(result.format_report())
+    return 0 if result.success else 1
+
+exit(asyncio.run(main()))
+" 2>&1) || PREFLIGHT_FAILED=1
+
+      echo "$PREFLIGHT_OUTPUT"
+      echo ""
+
+      if [ "''${PREFLIGHT_FAILED:-0}" = "1" ]; then
+        echo "❌ Pre-flight quota check FAILED. Provisioning blocked."
+        echo ""
+        echo "Fix quota issues before provisioning:"
+        echo "  - Release unused EIPs shown above"
+        echo "  - Or request a quota increase from AWS"
+        echo ""
+        echo "Run 'cybersec \"/aws preflight $REGION\"' for details."
+        exit 1
+      fi
+
+      echo "✅ Pre-flight quota check PASSED"
+      echo ""
+
       # Clear stale state locks (no running tofu/terraform)
       LOCK_FILE=".terraform.tfstate.lock.info"
       if [ -f "$LOCK_FILE" ]; then
