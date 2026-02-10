@@ -5,6 +5,26 @@ Provides automated fixes for detected health issues across all categories:
 - Infrastructure issues (shared memory, etc.)
 
 Uses FMEA tier system to determine which fixes can be auto-applied.
+
+DESIGN PRINCIPLE: Submodule-Aware Development Over Downloads
+=============================================================
+All health fixes, AIOps heuristics, and self-healing automation MUST prefer
+building from thirdparty/ submodules over downloading binaries:
+
+- Flink: Build from thirdparty/flink (mvn install)
+- PyFlink: Install from thirdparty/flink/flink-python (uv sync editable)
+- Iceberg: Build JARs from thirdparty/iceberg (gradlew shadowJar)
+- NiFi: Build from thirdparty/nifi (mvn install)
+- Polaris: Build from thirdparty/polaris (gradlew assemble)
+
+This ensures:
+1. Reproducible builds across developer machines
+2. Consistent versions tied to git commits
+3. Ability to apply patches and customizations
+4. No external download dependencies during development
+
+When implementing new fixes or health checks, always check for submodule
+availability before falling back to download-based installation.
 """
 
 import os
@@ -86,6 +106,11 @@ async def apply_fixes(diagnostics: dict, dry_run: bool = True) -> list[dict[str,
             # Flink JobManager not running - diagnose and attempt to start
             result = await _fix_flink_not_running(flink_home, dry_run)
             result["failure_mode_id"] = "FLINK_001"
+            results.append(result)
+
+        elif failure_mode_id == "PYFLINK_001":
+            # PyFlink not installed - run uv sync with submodule awareness
+            result = await _fix_pyflink_not_installed(dry_run)
             results.append(result)
 
         elif failure_mode_id == "PYFLINK_002":
@@ -1071,63 +1096,249 @@ async def _fix_shared_memory_limits(dry_run: bool) -> dict[str, Any]:
 
 
 async def _fix_nifi_not_installed(dry_run: bool) -> dict[str, Any]:
-    """Fix: Download and install NiFi binary.
+    """Fix: Build NiFi from thirdparty/nifi submodule.
 
-    On macOS (Apple Silicon), NiFi must be downloaded manually since nixpkgs
-    doesn't provide a native binary. This runs the setup script.
+    Builds NiFi from source using the thirdparty/nifi git submodule,
+    following the same pattern as Flink and Iceberg submodule builds.
     """
     import subprocess
 
-    result = {
+    result: dict[str, Any] = {
         "failure_mode_id": "NIFI_001",
-        "action": "install_nifi",
+        "action": "build_nifi",
     }
 
     devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
-    setup_script = Path(devenv_root) / "scripts" / "setup_nifi_bin.sh"
+    nifi_dir = Path(devenv_root) / "thirdparty" / "nifi"
     nifi_version = "2.0.0"
 
-    if not setup_script.exists():
+    result["version"] = nifi_version
+
+    # Check if submodule exists
+    if not nifi_dir.exists():
         result["success"] = False
-        result["message"] = f"Setup script not found: {setup_script}"
+        result["message"] = f"NiFi submodule not found at {nifi_dir}"
+        result["command"] = "git submodule update --init thirdparty/nifi"
         return result
 
-    result["script"] = str(setup_script)
-    result["version"] = nifi_version
+    # Check if submodule is initialized (has pom.xml)
+    pom_file = nifi_dir / "pom.xml"
+    if not pom_file.exists():
+        result["success"] = False
+        result["message"] = "NiFi submodule not initialized"
+        result["command"] = "git submodule update --init thirdparty/nifi"
+        return result
+
+    # Check for mvnw
+    mvnw = nifi_dir / "mvnw"
+    if not mvnw.exists():
+        result["success"] = False
+        result["message"] = "Maven wrapper not found in NiFi submodule"
+        return result
+
+    # Expected build output location
+    build_output = nifi_dir / "nifi-assembly" / "target" / f"nifi-{nifi_version}-bin" / f"nifi-{nifi_version}"
+    result["build_output"] = str(build_output)
+
+    # Check if already built
+    if build_output.exists() and (build_output / "bin" / "nifi.sh").exists():
+        result["success"] = True
+        result["message"] = f"NiFi already built at {build_output}"
+        result["already_built"] = True
+        return result
+
+    result["source_dir"] = str(nifi_dir)
 
     if dry_run:
         result["success"] = True
         result["dry_run"] = True
-        result["message"] = f"Would download and install NiFi {nifi_version}"
-        result["command"] = f"./scripts/setup_nifi_bin.sh {nifi_version}"
+        result["message"] = f"Would build NiFi {nifi_version} from thirdparty/nifi submodule"
+        result["steps"] = [
+            f"cd {nifi_dir}",
+            "./mvnw clean install -DskipTests -T2C -Pinclude-grpc",
+            f"NiFi will be built to: {build_output}",
+        ]
         return result
 
-    # Execute the setup script
+    # Build NiFi from source
     try:
+        result["build_output_log"] = []
+
+        # Maven build command
+        # -DskipTests: Skip tests for faster build
+        # -T2C: Use 2 threads per CPU core
+        # -Pinclude-grpc: Include gRPC support for OTLP
+        build_cmd = [
+            "./mvnw",
+            "clean",
+            "install",
+            "-DskipTests",
+            "-T2C",
+            "-Pinclude-grpc",
+            "-pl", "!nifi-external",  # Skip external modules that may have issues
+        ]
+
+        result["build_command"] = " ".join(build_cmd)
+
+        # Run the build
         proc = subprocess.run(
-            [str(setup_script), nifi_version],
+            build_cmd,
             capture_output=True,
             text=True,
-            timeout=600,  # 10 minute timeout for download
-            cwd=devenv_root,
+            timeout=1800,  # 30 minute timeout for build
+            cwd=str(nifi_dir),
         )
 
-        if proc.returncode == 0:
+        if proc.returncode != 0:
+            result["success"] = False
+            result["message"] = "NiFi Maven build failed"
+            result["error"] = proc.stderr[-2000:] if len(proc.stderr) > 2000 else proc.stderr
+            # Include last part of stdout which often has the actual error
+            if proc.stdout:
+                result["build_log_tail"] = proc.stdout[-2000:] if len(proc.stdout) > 2000 else proc.stdout
+            return result
+
+        # Verify build succeeded
+        if build_output.exists() and (build_output / "bin" / "nifi.sh").exists():
             result["success"] = True
-            result["message"] = f"Installed NiFi {nifi_version}"
-            result["output"] = proc.stdout[-1000:] if len(proc.stdout) > 1000 else proc.stdout
+            result["message"] = f"Built NiFi {nifi_version} from source"
+            result["nifi_home"] = str(build_output)
             result["restart_required"] = True
             result["restart_command"] = "devenv up nifi"
         else:
             result["success"] = False
-            result["message"] = f"NiFi setup failed with exit code {proc.returncode}"
-            result["error"] = proc.stderr[-1000:] if len(proc.stderr) > 1000 else proc.stderr
+            result["message"] = "Build succeeded but output not found"
+            result["expected_location"] = str(build_output)
+            # Check what was actually built
+            target_dir = nifi_dir / "nifi-assembly" / "target"
+            if target_dir.exists():
+                result["target_contents"] = [p.name for p in target_dir.iterdir()][:10]
 
     except subprocess.TimeoutExpired:
         result["success"] = False
-        result["message"] = "NiFi download timed out after 10 minutes"
+        result["message"] = "NiFi build timed out after 30 minutes"
     except Exception as e:
         result["success"] = False
-        result["message"] = f"Error installing NiFi: {e}"
+        result["message"] = f"Error building NiFi: {e}"
+
+    return result
+
+
+async def _fix_pyflink_not_installed(dry_run: bool) -> dict[str, Any]:
+    """Fix: Install PyFlink from thirdparty/flink/flink-python submodule.
+
+    PyFlink is installed as an editable package from the Flink submodule.
+    This fix:
+    1. Verifies the Flink submodule is initialized
+    2. Cleans up any shadowing pyflink directory from apache-flink-libraries
+    3. Runs uv sync to install PyFlink from the submodule
+
+    The apache-flink-libraries package can create a pyflink/ directory in
+    site-packages that shadows the editable install, causing pyflink.__file__
+    to be None. This fix removes that directory before running uv sync.
+    """
+    import subprocess
+
+    result: dict[str, Any] = {
+        "failure_mode_id": "PYFLINK_001",
+        "action": "install_pyflink",
+    }
+
+    devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
+    flink_dir = Path(devenv_root) / "thirdparty" / "flink"
+    flink_python_dir = flink_dir / "flink-python"
+
+    # Check if Flink submodule exists
+    if not flink_dir.exists():
+        result["success"] = False
+        result["message"] = f"Flink submodule not found at {flink_dir}"
+        result["command"] = "git submodule update --init thirdparty/flink"
+        return result
+
+    # Check if flink-python directory exists (submodule initialized)
+    if not (flink_python_dir / "setup.py").exists():
+        result["success"] = False
+        result["message"] = "Flink submodule not initialized - flink-python/setup.py not found"
+        result["command"] = "git submodule update --init --recursive thirdparty/flink"
+        result["flink_dir"] = str(flink_dir)
+        return result
+
+    result["flink_python_dir"] = str(flink_python_dir)
+
+    # Check for shadowing pyflink directory in site-packages
+    devenv_state = os.environ.get("DEVENV_STATE", Path(devenv_root) / ".devenv" / "state")
+    site_packages = Path(devenv_state) / "venv" / "lib" / "python3.12" / "site-packages"
+    shadowing_pyflink = site_packages / "pyflink"
+
+    shadow_exists = False
+    if shadowing_pyflink.exists():
+        # Check if it's the problematic apache-flink-libraries directory
+        # (contains bin/lib/opt but no __init__.py at top level)
+        readme = shadowing_pyflink / "README.txt"
+        if readme.exists() or not (shadowing_pyflink / "__init__.py").exists():
+            shadow_exists = True
+            result["shadowing_pyflink"] = str(shadowing_pyflink)
+
+    if dry_run:
+        result["success"] = True
+        result["dry_run"] = True
+        steps = []
+        if shadow_exists:
+            steps.append(f"Remove shadowing directory: {shadowing_pyflink}")
+        steps.append("Run: uv sync (installs PyFlink from thirdparty/flink/flink-python)")
+        result["message"] = "Would install PyFlink from Flink submodule"
+        result["steps"] = steps
+        return result
+
+    try:
+        # Step 1: Remove shadowing pyflink directory if present
+        if shadow_exists:
+            shutil.rmtree(shadowing_pyflink)
+            result["removed_shadow"] = str(shadowing_pyflink)
+
+        # Step 2: Run uv sync
+        uv_proc = subprocess.run(
+            ["uv", "sync"],
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout
+            cwd=devenv_root,
+        )
+
+        if uv_proc.returncode != 0:
+            result["success"] = False
+            result["message"] = "uv sync failed"
+            result["error"] = uv_proc.stderr[-1000:] if len(uv_proc.stderr) > 1000 else uv_proc.stderr
+            return result
+
+        # Step 3: Verify PyFlink is now importable
+        venv_python = site_packages.parent.parent.parent / "bin" / "python3"
+        if venv_python.exists():
+            verify_proc = subprocess.run(
+                [str(venv_python), "-c", "import pyflink; print(pyflink.__version__)"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            if verify_proc.returncode == 0:
+                result["success"] = True
+                result["message"] = f"Installed PyFlink {verify_proc.stdout.strip()} from submodule"
+                result["pyflink_version"] = verify_proc.stdout.strip()
+            else:
+                result["success"] = False
+                result["message"] = "uv sync completed but PyFlink still not importable"
+                result["verify_error"] = verify_proc.stderr[:500]
+        else:
+            # Can't verify but uv sync succeeded
+            result["success"] = True
+            result["message"] = "Installed PyFlink from submodule (unable to verify)"
+
+    except subprocess.TimeoutExpired:
+        result["success"] = False
+        result["message"] = "uv sync timed out after 5 minutes"
+    except Exception as e:
+        result["success"] = False
+        result["message"] = f"Error installing PyFlink: {e}"
 
     return result

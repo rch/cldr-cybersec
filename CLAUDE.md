@@ -112,8 +112,41 @@ To enable: set `disabled = false` on `cloudtrail-datagen` in devenv.nix.
 - MinIO for S3-compatible object storage
 - Apache Polaris REST catalog for Iceberg
 - Custom Flink 1.20.1 build (in `thirdparty/flink/`) for Iceberg compatibility
-- Apache NiFi 2.0.0 binary (in `thirdparty/nifi/`) for data flow visualization
+- Apache NiFi 2.0.0 (in `thirdparty/nifi/`) for data flow visualization
 - Automatic Polaris bootstrap and catalog initialization
+
+## Submodule-First Design Principle
+
+**All components MUST prefer building from `thirdparty/` submodules over downloading binaries.**
+
+This applies to:
+- **Health checks** (`/health`): Verify submodule initialization before component availability
+- **Self-healing fixes** (`/health fix`): Build from source, not download
+- **AIOps automation** (rete rules, heuristics): Submodule-aware detection and remediation
+- **Bootstrap system**: Initialize and build submodules automatically
+
+### Submodule Layout
+
+| Component | Submodule Path | Build Tool |
+|-----------|----------------|------------|
+| Flink | `thirdparty/flink` | Maven (`mvn install -DskipTests -Dfast`) |
+| PyFlink | `thirdparty/flink/flink-python` | uv editable install |
+| Iceberg | `thirdparty/iceberg` | Gradle (`gradlew shadowJar`) |
+| NiFi | `thirdparty/nifi` | Maven (`mvn install -DskipTests`) |
+| Polaris | `thirdparty/polaris` | Gradle (`gradlew assemble`) |
+
+### Benefits
+1. **Reproducible builds** tied to git commits
+2. **Consistent versions** across developer machines
+3. **Patch capability** for customizations
+4. **No external downloads** during development
+
+### Implementation Notes
+When implementing new health checks, fixes, or automation:
+- Check for submodule initialization (`pom.xml`, `build.gradle`, `setup.py`)
+- Build from source before falling back to alternatives
+- Update remediation messages to reference submodule builds
+- Test on both fresh clones and existing checkouts
 
 ## Key Configuration
 

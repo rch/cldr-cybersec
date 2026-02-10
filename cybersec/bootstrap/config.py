@@ -132,13 +132,25 @@ class BootstrapConfig:
         return Path(devenv_state) / "logs"
 
     def get_nifi_home(self) -> Optional[Path]:
-        """Get NiFi home directory."""
+        """Get NiFi home directory.
+
+        Returns path to NiFi installation. Checks in order:
+        1. Configured nifi_home path
+        2. Maven build output from thirdparty/nifi submodule
+        3. Extracted binary from thirdparty/nifi (legacy download approach)
+        """
         if self.nifi_home:
-            return Path(self.nifi_home).expanduser()
-        # Default to thirdparty binary location
-        default = Path(f"thirdparty/nifi/nifi-{self.nifi_version}")
-        if default.exists():
-            return default
+            path = Path(self.nifi_home).expanduser()
+            if path.exists():
+                return path
+        # Default: Maven build output from thirdparty/nifi submodule
+        maven_build = Path(f"thirdparty/nifi/nifi-assembly/target/nifi-{self.nifi_version}-bin/nifi-{self.nifi_version}")
+        if maven_build.exists():
+            return maven_build
+        # Fallback: extracted binary (legacy download approach)
+        extracted = Path(f"thirdparty/nifi/nifi-{self.nifi_version}")
+        if extracted.exists():
+            return extracted
         return None
 
     def get_nifi_state_dir(self) -> Path:

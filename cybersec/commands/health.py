@@ -293,7 +293,6 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
 
     # Automatable failure modes (can be fixed without user intervention)
     # Manual fixes (require user action):
-    #   - PYFLINK_001: PyFlink not installed -> uv sync
     #   - PYFLINK_003: kafka-python missing -> uv add kafka-python && uv sync
     #   - PYFLINK_004: FLINK_HOME not set -> environment setup
     #   - PYFLINK_006: Log errors -> diagnostic review
@@ -301,12 +300,15 @@ async def cmd_health_fix(cmd: ParsedCommand) -> CommandResult:
     #   - PYFLINK_013: Submodules not initialized -> git submodule update
     #   - FLINK_005: Job stuck -> manual investigation
     automatable_fixes = {
+        "FLINK_001",  # Flink not running - start cluster
         "FLINK_004",  # DataGen bounded source fix
+        "PYFLINK_001",  # PyFlink not installed - uv sync with submodule awareness
         "PYFLINK_002", "PYFLINK_005", "PYFLINK_009",  # Python path config
         "PYFLINK_007", "PYFLINK_008",  # Cluster restart
         "PYFLINK_011", "PYFLINK_012", "PYFLINK_014",  # Iceberg JARs
         "INFRA_004",  # Shared memory cleanup
-        "NIFI_001",   # NiFi download/install
+        "SYSTEM_001",  # Shared memory limits (requires sudo)
+        "NIFI_001",   # NiFi build from submodule
     }
 
     # Determine what to fix

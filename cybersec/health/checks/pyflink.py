@@ -21,11 +21,16 @@ async def check_pyflink_installed(ctx: HealthContext) -> CheckResult:
     """PYFLINK_001: Check PyFlink is installed and accessible.
 
     Checks if any Python in the environment has pyflink installed.
-    This is a prerequisite check - PYFLINK_002 checks if Flink is configured correctly.
+    PyFlink should be installed from thirdparty/flink/flink-python submodule
+    as an editable install via uv sync.
     """
     start = time.monotonic()
 
     devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
+
+    # First check if the Flink submodule is set up for PyFlink
+    flink_python_dir = Path(devenv_root) / "thirdparty" / "flink" / "flink-python"
+    flink_submodule_ready = (flink_python_dir / "setup.py").exists()
 
     # Check candidate Python paths in order of preference
     candidates = [
@@ -59,6 +64,7 @@ async def check_pyflink_installed(ctx: HealthContext) -> CheckResult:
             version=version,
             python=python_path,
             location=name,
+            source="thirdparty/flink/flink-python" if flink_submodule_ready else "unknown",
         )
         result_obj.duration_ms = duration
         return result_obj
@@ -66,12 +72,24 @@ async def check_pyflink_installed(ctx: HealthContext) -> CheckResult:
         fm = get_failure_mode("PYFLINK_001")
         rpn = fm.calculate_rpn() if fm else None
 
+        # Provide specific remediation based on submodule state
+        if not flink_submodule_ready:
+            remediation = (
+                "Initialize Flink submodule first:\n"
+                "  git submodule update --init thirdparty/flink\n"
+                "Then run: uv sync"
+            )
+        else:
+            remediation = "Run: /health fix PYFLINK_001 --apply (runs uv sync with submodule cleanup)"
+
         return CheckResult.critical(
             "PyFlink not installed in any Python environment",
             failure_mode_id="PYFLINK_001",
             rpn=rpn,
-            remediation="Run: uv sync",
+            remediation=remediation,
             checked_paths=[str(p) for _, p in candidates if p.exists()],
+            flink_submodule_ready=flink_submodule_ready,
+            flink_python_dir=str(flink_python_dir),
             duration_ms=duration,
         )
 

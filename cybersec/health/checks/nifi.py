@@ -21,31 +21,50 @@ from ..catalog import NIFI_001, NIFI_002, NIFI_003
 async def check_nifi_installed(ctx: HealthContext) -> CheckResult:
     """NIFI_001: Check NiFi binary is installed.
 
-    Verifies NiFi binary exists in the expected location.
-    On Linux, nixpkgs provides NiFi. On macOS, it must be downloaded.
+    Verifies NiFi binary exists in the expected location. Checks:
+    1. Maven build output from thirdparty/nifi submodule
+    2. Extracted binary in thirdparty/nifi (legacy download)
+    3. NIFI_HOME environment variable
     """
     start = time.monotonic()
 
     devenv_root = os.environ.get("DEVENV_ROOT", os.getcwd())
-
-    # Check for NiFi in thirdparty directory (macOS download location)
     nifi_thirdparty = Path(devenv_root) / "thirdparty" / "nifi"
 
-    # Look for nifi-*/bin/nifi.sh pattern
-    nifi_binaries = list(nifi_thirdparty.glob("nifi-*/bin/nifi.sh"))
+    # Check Maven build output location first (preferred - built from source)
+    maven_binaries = list(nifi_thirdparty.glob("nifi-assembly/target/nifi-*-bin/nifi-*/bin/nifi.sh"))
 
-    # Also check NIFI_HOME environment variable
+    # Also check for extracted binary (legacy download location)
+    extracted_binaries = list(nifi_thirdparty.glob("nifi-*/bin/nifi.sh"))
+    # Filter out Maven build paths from extracted list
+    extracted_binaries = [p for p in extracted_binaries if "nifi-assembly" not in str(p)]
+
+    # Check NIFI_HOME environment variable
     nifi_home = os.environ.get("NIFI_HOME", "")
     nifi_home_binary = Path(nifi_home) / "bin" / "nifi.sh" if nifi_home else None
 
     duration = int((time.monotonic() - start) * 1000)
 
-    if nifi_binaries:
-        nifi_version = nifi_binaries[0].parent.parent.name  # e.g., "nifi-2.0.0"
+    if maven_binaries:
+        # Maven build found - this is the preferred source build
+        nifi_path = maven_binaries[0].parent.parent
+        nifi_version = nifi_path.name  # e.g., "nifi-2.0.0"
+        result = CheckResult.ok(
+            f"NiFi installed (built from source): {nifi_version}",
+            version=nifi_version,
+            path=str(nifi_path),
+            source="maven_build",
+        )
+        result.duration_ms = duration
+        return result
+    elif extracted_binaries:
+        # Extracted binary found
+        nifi_version = extracted_binaries[0].parent.parent.name
         result = CheckResult.ok(
             f"NiFi installed: {nifi_version}",
             version=nifi_version,
-            path=str(nifi_binaries[0].parent.parent),
+            path=str(extracted_binaries[0].parent.parent),
+            source="extracted_binary",
         )
         result.duration_ms = duration
         return result
@@ -53,6 +72,7 @@ async def check_nifi_installed(ctx: HealthContext) -> CheckResult:
         result = CheckResult.ok(
             f"NiFi installed at NIFI_HOME",
             nifi_home=nifi_home,
+            source="nifi_home",
         )
         result.duration_ms = duration
         return result
@@ -62,7 +82,7 @@ async def check_nifi_installed(ctx: HealthContext) -> CheckResult:
             "NiFi not installed",
             failure_mode_id="NIFI_001",
             rpn=rpn,
-            remediation="Run: ./scripts/setup_nifi_bin.sh 2.0.0",
+            remediation="Run: /health fix NIFI_001 --apply (builds from thirdparty/nifi submodule)",
             searched_paths=[str(nifi_thirdparty), nifi_home or "(NIFI_HOME not set)"],
             duration_ms=duration,
         )
