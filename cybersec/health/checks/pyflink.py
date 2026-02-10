@@ -34,6 +34,8 @@ async def check_pyflink_installed(ctx: HealthContext) -> CheckResult:
 
     # Check candidate Python paths in order of preference
     candidates = [
+        ("project_venv", Path(devenv_root) / ".venv" / "bin" / "python"),
+        ("project_venv", Path(devenv_root) / ".venv" / "bin" / "python3"),
         ("uv_venv", Path(devenv_root) / ".devenv" / "state" / "venv" / "bin" / "python3"),
         ("devenv_profile", Path(devenv_root) / ".devenv" / "profile" / "bin" / "python3"),
     ]
