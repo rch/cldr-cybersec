@@ -493,13 +493,24 @@ PY
       echo "⚠️  Destroying AWS infrastructure..."
       cd infra/aws/tofu
 
-      # Get developer identity
+      # Get developer identity and AWS config
+      PROFILE="''${AWS_PROFILE:-default}"
+      REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-east-1")}"
       PREFIX=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_prefix; settings = SettingsManager(); config = settings.load(); print(get_developer_prefix(config))")
       EMAIL=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_email; settings = SettingsManager(); config = settings.load(); print(get_developer_email(config))")
       ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "unknown")
+      KEY_NAME="cybersec-dask-$PREFIX"
+
+      # Export TF variables
+      export TF_VAR_developer_prefix="$PREFIX"
+      export TF_VAR_developer_email="$EMAIL"
+      export TF_VAR_ssh_key_name="$KEY_NAME"
+      export TF_VAR_aws_region="$REGION"
+      export TF_VAR_availability_zones="[\"''${REGION}a\",\"''${REGION}b\",\"''${REGION}c\"]"
 
       echo "Developer: $EMAIL (prefix: $PREFIX)"
       echo "AWS Account: $ACCOUNT_ID"
+      echo "Using region:  $REGION"
       echo ""
 
       # Clear stale state locks (no running tofu/terraform)
