@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Monitor AWS infrastructure provisioning progress
-# Usage: ./scripts/monitor_aws_provision.sh [--watch]
+# Monitor AWS infrastructure operations (provision, destroy, etc.)
+# Usage: ./scripts/monitor_aws.sh [--watch]
+#
+# Run in a separate terminal while aws:provision or aws:destroy is running:
+#   ./scripts/monitor_aws.sh --watch
 
 set -euo pipefail
 
@@ -46,6 +49,8 @@ get_phase() {
         echo "validating"
     elif [ -f "$TOFU_DIR/tfplan" ] && [ ! -f "$TOFU_DIR/tfplan.json" ]; then
         echo "planned"
+    elif [ -f "$TOFU_DIR/destroy.tfplan" ] && [ ! -f "$TOFU_DIR/destroy.tfplan.json" ]; then
+        echo "planned"
     elif [ -f "$TOFU_DIR/policy_input.json" ]; then
         echo "validated"
     else
@@ -59,10 +64,18 @@ get_state_resources() {
 }
 
 get_plan_summary() {
-    if [ -f "$TOFU_DIR/tfplan.json" ]; then
-        local add=$(jq '[.resource_changes[]? | select(.change.actions[] == "create")] | length' "$TOFU_DIR/tfplan.json" 2>/dev/null || echo 0)
-        local change=$(jq '[.resource_changes[]? | select(.change.actions[] == "update")] | length' "$TOFU_DIR/tfplan.json" 2>/dev/null || echo 0)
-        local destroy=$(jq '[.resource_changes[]? | select(.change.actions[] == "delete")] | length' "$TOFU_DIR/tfplan.json" 2>/dev/null || echo 0)
+    # Check for destroy plan first (aws:destroy), then regular plan (aws:provision)
+    local plan_file=""
+    if [ -f "$TOFU_DIR/destroy.tfplan.json" ]; then
+        plan_file="$TOFU_DIR/destroy.tfplan.json"
+    elif [ -f "$TOFU_DIR/tfplan.json" ]; then
+        plan_file="$TOFU_DIR/tfplan.json"
+    fi
+
+    if [ -n "$plan_file" ]; then
+        local add=$(jq '[.resource_changes[]? | select(.change.actions[] == "create")] | length' "$plan_file" 2>/dev/null || echo 0)
+        local change=$(jq '[.resource_changes[]? | select(.change.actions[] == "update")] | length' "$plan_file" 2>/dev/null || echo 0)
+        local destroy=$(jq '[.resource_changes[]? | select(.change.actions[] == "delete")] | length' "$plan_file" 2>/dev/null || echo 0)
         echo "+$add ~$change -$destroy"
     else
         echo "no plan"
@@ -156,9 +169,19 @@ check_aws_resources() {
     local sgs=$(aws ec2 describe-security-groups --filters "Name=tag:Project,Values=cybersec-dask" --region "$region" --query 'length(SecurityGroups)' --output text 2>/dev/null || echo 0)
     [ "$sgs" -gt 0 ] && echo -e "  ${GREEN}✓${NC} Security Groups ($sgs)" || echo -e "  ${YELLOW}○${NC} Security Groups"
 
-    # EC2 Instances
-    local instances=$(aws ec2 describe-instances --filters "Name=tag:Project,Values=cybersec-dask" "Name=instance-state-name,Values=running,pending" --region "$region" --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo 0)
-    [ "$instances" -gt 0 ] && echo -e "  ${GREEN}✓${NC} EC2 Instances ($instances)" || echo -e "  ${YELLOW}○${NC} EC2 Instances"
+    # EC2 Instances (running/pending)
+    local running=$(aws ec2 describe-instances --filters "Name=tag:Project,Values=cybersec-dask" "Name=instance-state-name,Values=running,pending" --region "$region" --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo 0)
+    # EC2 Instances (shutting-down/stopping - shown during destroy)
+    local stopping=$(aws ec2 describe-instances --filters "Name=tag:Project,Values=cybersec-dask" "Name=instance-state-name,Values=shutting-down,stopping" --region "$region" --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo 0)
+    if [ "$running" -gt 0 ] && [ "$stopping" -gt 0 ]; then
+        echo -e "  ${YELLOW}⟳${NC} EC2 Instances ($running running, $stopping terminating)"
+    elif [ "$running" -gt 0 ]; then
+        echo -e "  ${GREEN}✓${NC} EC2 Instances ($running)"
+    elif [ "$stopping" -gt 0 ]; then
+        echo -e "  ${RED}⟳${NC} EC2 Instances ($stopping terminating)"
+    else
+        echo -e "  ${YELLOW}○${NC} EC2 Instances"
+    fi
 
     # S3 Bucket
     local bucket="cybersec-dask-${prefix}-data"
@@ -170,7 +193,16 @@ check_aws_resources() {
 
     # NAT Gateway
     local nats=$(aws ec2 describe-nat-gateways --filter "Name=tag:Project,Values=cybersec-dask" "Name=state,Values=available,pending" --region "$region" --query 'length(NatGateways)' --output text 2>/dev/null || echo 0)
-    [ "$nats" -gt 0 ] && echo -e "  ${GREEN}✓${NC} NAT Gateway ($nats)" || echo -e "  ${YELLOW}○${NC} NAT Gateway"
+    local nats_deleting=$(aws ec2 describe-nat-gateways --filter "Name=tag:Project,Values=cybersec-dask" "Name=state,Values=deleting" --region "$region" --query 'length(NatGateways)' --output text 2>/dev/null || echo 0)
+    if [ "$nats" -gt 0 ] && [ "$nats_deleting" -gt 0 ]; then
+        echo -e "  ${YELLOW}⟳${NC} NAT Gateway ($nats active, $nats_deleting deleting)"
+    elif [ "$nats" -gt 0 ]; then
+        echo -e "  ${GREEN}✓${NC} NAT Gateway ($nats)"
+    elif [ "$nats_deleting" -gt 0 ]; then
+        echo -e "  ${RED}⟳${NC} NAT Gateway ($nats_deleting deleting)"
+    else
+        echo -e "  ${YELLOW}○${NC} NAT Gateway"
+    fi
 }
 
 show_status() {
@@ -184,7 +216,7 @@ show_status() {
     local prefix=$(cd "$TOFU_DIR" && tofu output -raw s3_bucket_name 2>/dev/null | sed 's/cybersec-dask-\(.*\)-data/\1/' || echo "00631868")
 
     echo "╔════════════════════════════════════════════════════════════╗"
-    echo "║           AWS Infrastructure Provision Monitor             ║"
+    echo "║              AWS Infrastructure Monitor                    ║"
     echo "╚════════════════════════════════════════════════════════════╝"
     echo ""
 

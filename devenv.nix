@@ -317,6 +317,10 @@ print('Environment config written to build/environment.json')
 
     "aws:provision".exec = ''
       echo "🚀 Provisioning AWS infrastructure with OpenTofu..."
+      echo ""
+      echo "💡 Monitor progress in another terminal:"
+      echo "   ./scripts/monitor_aws.sh --watch"
+      echo ""
       cd infra/aws/tofu
 
       PROFILE="''${AWS_PROFILE:-default}"
@@ -491,6 +495,10 @@ PY
 
     "aws:destroy".exec = ''
       echo "⚠️  Destroying AWS infrastructure..."
+      echo ""
+      echo "💡 Monitor progress in another terminal:"
+      echo "   ./scripts/monitor_aws.sh --watch"
+      echo ""
       cd infra/aws/tofu
 
       # Get developer identity and AWS config
