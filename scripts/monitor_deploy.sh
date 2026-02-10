@@ -117,8 +117,8 @@ check_nodes() {
     fi
 
     local total=$(echo "$nodes" | wc -l | tr -d ' ')
-    local ready=$(echo "$nodes" | grep -c " Ready" || echo 0)
-    local notready=$(echo "$nodes" | grep -c "NotReady" || echo 0)
+    local ready=$(echo "$nodes" | grep -c " Ready" || true)
+    local notready=$(echo "$nodes" | grep -c "NotReady" || true)
 
     if [ "$notready" -gt 0 ]; then
         echo -e "  ${YELLOW}⟳${NC} K8s Nodes ($ready/$total ready, $notready joining)"
@@ -138,8 +138,8 @@ check_dask_operator() {
         return 1
     fi
 
-    local running=$(echo "$pods" | grep -c "Running" || echo 0)
-    local pending=$(echo "$pods" | grep -c "Pending\|ContainerCreating" || echo 0)
+    local running=$(echo "$pods" | grep -c "Running" || true)
+    local pending=$(echo "$pods" | grep -c "Pending\|ContainerCreating" || true)
     local total=$(echo "$pods" | wc -l | tr -d ' ')
 
     if [ "$pending" -gt 0 ]; then
@@ -162,7 +162,7 @@ check_dask_cluster() {
 
     # Get worker count
     local workers=$(run_remote "$kubectl get pods -n dask -l dask.org/component=worker --no-headers 2>/dev/null" | wc -l | tr -d ' ')
-    local running_workers=$(run_remote "$kubectl get pods -n dask -l dask.org/component=worker --no-headers 2>/dev/null" | grep -c "Running" || echo 0)
+    local running_workers=$(run_remote "$kubectl get pods -n dask -l dask.org/component=worker --no-headers 2>/dev/null" | grep -c "Running" || true)
     workers=${workers:-0}
 
     if [ "$workers" -eq 0 ]; then
@@ -183,7 +183,7 @@ check_ngrok() {
         return 1
     fi
 
-    local running=$(echo "$pods" | grep -c "Running" || echo 0)
+    local running=$(echo "$pods" | grep -c "Running" || true)
 
     if [ "$running" -gt 0 ]; then
         # Check for ingresses
@@ -192,6 +192,82 @@ check_ngrok() {
     else
         echo -e "  ${YELLOW}⟳${NC} ngrok Operator (starting)"
     fi
+}
+
+show_diagnostics() {
+    local bastion_ok="$1"
+    local control_ok="$2"
+
+    echo ""
+    echo -e "${CYAN}Diagnostics:${NC}"
+
+    # SSH connectivity issues
+    if [ "$bastion_ok" -eq 0 ]; then
+        echo -e "  ${YELLOW}Bastion unreachable:${NC}"
+        echo "    ssh -i ~/.ssh/cybersec-dask.pem ec2-user@$BASTION_IP"
+        echo "    # Check: security group, instance state, key permissions"
+        return
+    fi
+
+    if [ "$control_ok" -eq 0 ]; then
+        echo -e "  ${YELLOW}Control plane unreachable via bastion:${NC}"
+        echo "    # SSH to bastion first:"
+        echo "    ssh -i ~/.ssh/cybersec-dask.pem ec2-user@$BASTION_IP"
+        echo "    # Then from bastion:"
+        echo "    ssh ec2-user@$CONTROL_IP"
+        return
+    fi
+
+    # Check for ansible failures
+    local ansible_log=$(find /tmp -maxdepth 1 -name "ansible*.log" -mmin -30 2>/dev/null | head -1)
+    if [ -n "$ansible_log" ]; then
+        local failures=$(grep -c "FAILED\|UNREACHABLE" "$ansible_log" 2>/dev/null || true)
+        if [ "$failures" -gt 0 ]; then
+            echo -e "  ${RED}Ansible failures detected:${NC}"
+            echo "    tail -100 $ansible_log | grep -A5 'FAILED\|UNREACHABLE'"
+            return
+        fi
+    fi
+
+    # Build SSH command for copy-paste
+    local ssh_cmd="ssh -i ~/.ssh/cybersec-dask.pem -o ProxyCommand=\"ssh -i ~/.ssh/cybersec-dask.pem -W %h:%p ec2-user@$BASTION_IP\" ec2-user@$CONTROL_IP"
+
+    # RKE2 issues
+    local rke2_status=$(run_remote "systemctl is-active rke2-server 2>/dev/null" || echo "unknown")
+    if [ "$rke2_status" = "failed" ] || [ "$rke2_status" = "inactive" ]; then
+        echo -e "  ${YELLOW}RKE2 not running:${NC}"
+        echo "    # Check RKE2 logs:"
+        echo "    $ssh_cmd 'sudo journalctl -u rke2-server -n 50 --no-pager'"
+        return
+    fi
+
+    # K8s API issues
+    local kubectl="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
+    local api_ok=$(run_remote "$kubectl cluster-info 2>/dev/null" || echo "")
+    if [ -z "$api_ok" ]; then
+        echo -e "  ${YELLOW}K8s API not responding:${NC}"
+        echo "    # Check API server:"
+        echo "    $ssh_cmd 'sudo crictl ps | grep kube-apiserver'"
+        echo "    $ssh_cmd 'sudo journalctl -u rke2-server -n 30 --no-pager'"
+        return
+    fi
+
+    # Pod issues - check for crash loops or pending
+    local problem_pods=$(run_remote "$kubectl get pods -A --no-headers 2>/dev/null" | grep -E "CrashLoop|Error|ImagePull|Pending" || true)
+    if [ -n "$problem_pods" ]; then
+        echo -e "  ${YELLOW}Pods with issues:${NC}"
+        echo "$problem_pods" | head -5 | while read -r line; do
+            echo "    $line"
+        done
+        local ns=$(echo "$problem_pods" | head -1 | awk '{print $1}')
+        local pod=$(echo "$problem_pods" | head -1 | awk '{print $2}')
+        echo "    # Investigate first problem pod:"
+        echo "    $ssh_cmd '$kubectl describe pod $pod -n $ns'"
+        echo "    $ssh_cmd '$kubectl logs $pod -n $ns'"
+        return
+    fi
+
+    echo -e "  ${GREEN}No issues detected${NC}"
 }
 
 check_jupyterhub() {
@@ -203,7 +279,7 @@ check_jupyterhub() {
         return 1
     fi
 
-    local running=$(echo "$pods" | grep -c "Running" || echo 0)
+    local running=$(echo "$pods" | grep -c "Running" || true)
     local total=$(echo "$pods" | wc -l | tr -d ' ')
 
     if [ "$running" -eq "$total" ]; then
@@ -250,8 +326,13 @@ show_status() {
     echo ""
 
     echo -e "${CYAN}Infrastructure:${NC}"
-    check_bastion
-    if ! check_control_plane; then
+    local bastion_ok=0
+    local control_ok=0
+    check_bastion && bastion_ok=1 || true
+    check_control_plane && control_ok=1 || true
+
+    if [ "$control_ok" -eq 0 ]; then
+        show_diagnostics "$bastion_ok" "$control_ok"
         echo ""
         echo -e "${BLUE}─────────────────────────────────────────────────────────────${NC}"
         echo "Refresh: ${REFRESH_INTERVAL}s | Ctrl+C to exit"
@@ -260,15 +341,18 @@ show_status() {
 
     echo ""
     echo -e "${CYAN}Kubernetes:${NC}"
-    check_rke2
-    check_nodes
+    check_rke2 || true
+    check_nodes || true
 
     echo ""
     echo -e "${CYAN}Workloads:${NC}"
-    check_dask_operator
-    check_dask_cluster
-    check_ngrok
-    check_jupyterhub
+    check_dask_operator || true
+    check_dask_cluster || true
+    check_ngrok || true
+    check_jupyterhub || true
+
+    # Show diagnostics if something isn't fully healthy
+    show_diagnostics "$bastion_ok" "$control_ok"
 
     echo ""
     echo -e "${BLUE}─────────────────────────────────────────────────────────────${NC}"
