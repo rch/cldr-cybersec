@@ -52,6 +52,10 @@ class QuotaInfo:
         return (self.current_usage / self.limit) * 100
 
 
+# Tags that indicate purpose/ownership
+OWNERSHIP_TAGS = {"Owner", "Project", "Team", "Environment", "Application", "Service", "Stack", "CreatedBy"}
+
+
 @dataclass
 class EipInfo:
     """Information about an Elastic IP."""
@@ -73,6 +77,37 @@ class EipInfo:
     def is_unused(self) -> bool:
         """Check if EIP is completely unused (no association)."""
         return not self.is_associated
+
+    @property
+    def is_orphaned(self) -> bool:
+        """Check if EIP has no meaningful tags indicating ownership.
+
+        Orphaned EIPs have no Name tag and no ownership tags,
+        making them safe candidates for release.
+        """
+        if self.name:
+            return False
+        # Check if any ownership tag exists
+        return not any(tag in self.tags for tag in OWNERSHIP_TAGS)
+
+    @property
+    def owner_info(self) -> str:
+        """Get ownership information from tags."""
+        for tag in ["Owner", "CreatedBy", "Team", "Project"]:
+            if tag in self.tags:
+                return f"{tag}: {self.tags[tag]}"
+        return ""
+
+    @property
+    def purpose_info(self) -> str:
+        """Get purpose information from tags."""
+        parts = []
+        if self.name:
+            parts.append(self.name)
+        for tag in ["Environment", "Application", "Service", "Stack"]:
+            if tag in self.tags:
+                parts.append(f"{tag}={self.tags[tag]}")
+        return " / ".join(parts) if parts else "-"
 
 
 @dataclass
@@ -110,15 +145,32 @@ class QuotaCheckResult:
 
         # Show unused EIPs that could be released
         if self.unused_eips:
+            orphaned = [e for e in self.unused_eips if e.is_orphaned]
+            tagged = [e for e in self.unused_eips if not e.is_orphaned]
+
             lines.append("")
             lines.append(f"Unused EIPs ({len(self.unused_eips)} found - costing ~${len(self.unused_eips) * 0.005 * 24 * 30:.2f}/month):")
             lines.append("-" * 50)
-            for eip in self.unused_eips:
-                owner = eip.tags.get("Owner", "unknown")
-                name = eip.name or "-"
-                lines.append(f"  {eip.public_ip:<16} {eip.allocation_id:<28} {name} (Owner: {owner})")
-            lines.append("")
-            lines.append("  Release with: aws ec2 release-address --allocation-id <id> --region " + self.region)
+
+            # Orphaned EIPs - safe to release
+            if orphaned:
+                lines.append("")
+                lines.append(f"  ORPHANED - No tags, safe to release ({len(orphaned)}):")
+                for eip in orphaned:
+                    lines.append(f"    {eip.public_ip:<16} {eip.allocation_id}")
+                lines.append("")
+                lines.append("  Release all orphaned:")
+                for eip in orphaned:
+                    lines.append(f"    aws ec2 release-address --allocation-id {eip.allocation_id} --region {self.region}")
+
+            # Tagged EIPs - need review
+            if tagged:
+                lines.append("")
+                lines.append(f"  TAGGED - Review before releasing ({len(tagged)}):")
+                for eip in tagged:
+                    owner = eip.owner_info or "no owner tag"
+                    purpose = eip.purpose_info
+                    lines.append(f"    {eip.public_ip:<16} {eip.allocation_id}  [{purpose}] ({owner})")
 
         if self.errors:
             lines.append("")
