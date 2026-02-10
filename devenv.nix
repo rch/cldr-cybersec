@@ -2602,6 +2602,8 @@ except Exception as e:
         # Try bootstrap - it will fail gracefully if already bootstrapped
         # The admin CLI handles idempotency internally
         # Note: -c= format required (equals sign) per CLI help
+        # Note: The -p flag output shows "admin:null" but this is a display bug -
+        # the credentials are actually set correctly. Verified by OAuth token request.
         echo "🔧 Bootstrapping Polaris realm..."
         if ./bin/admin bootstrap -v=3 -r=POLARIS -c=POLARIS,admin,admin -p 2>&1 | tee /tmp/polaris-bootstrap.log; then
           echo "Polaris realm bootstrapped successfully"

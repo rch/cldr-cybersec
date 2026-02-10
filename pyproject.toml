@@ -32,6 +32,9 @@ dependencies = [
     "ansible>=13.3.0",
     "ansible-navigator>=26.1.2",
     "python-snappy>=0.7.3",
+    # PyFlink - uses patched thirdparty/flink for cloudpickle 3.x compatibility.
+    # See tool.uv.sources below for local path override.
+    "apache-flink>=1.20.0",
 ]
 
 [project.optional-dependencies]
@@ -39,13 +42,6 @@ dev = [
     "pytest>=8.0.0",
     "black>=24.0.0",
     "ruff>=0.2.0",
-]
-
-# Flink extra - install with: uv sync --extra flink
-# Uses patched thirdparty/flink for cloudpickle 3.x compatibility with Dask.
-# See tool.uv.sources below for local path override.
-flink = [
-    "apache-flink>=1.20.0",
 ]
 
 # K8s/Dask stack - install with: uv sync --extra k8s
