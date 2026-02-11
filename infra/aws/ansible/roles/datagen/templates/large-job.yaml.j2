@@ -1,0 +1,319 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: datagen-large
+  namespace: {{ datagen_namespace }}
+  labels:
+    app: datagen
+    phase: large
+spec:
+  # 24 hour maximum runtime
+  activeDeadlineSeconds: {{ datagen_large_deadline_seconds }}
+  # Keep job around for inspection after completion
+  ttlSecondsAfterFinished: 86400
+  # Retry on failure (e.g., node preemption)
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: datagen
+        phase: large
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: datagen
+          image: "{{ datagen_image }}"
+          imagePullPolicy: IfNotPresent
+          command:
+            - "python"
+            - "-c"
+          args:
+            - |
+              """Generate large OTEL dataset for validation testing.
+
+              This runs asynchronously for hours. When complete, it updates
+              the _active_dataset.json marker in S3 so panel-viz auto-swaps.
+              """
+              import json
+              import os
+              import random
+              import sys
+              import time
+              import uuid
+              from datetime import datetime, timedelta, timezone
+              from pathlib import Path
+
+              import pyarrow as pa
+              import pyarrow.parquet as pq
+              from pyarrow import fs
+
+              # Configuration from Ansible
+              BATCHES = {{ datagen_large_batches }}
+              SPANS_PER_BATCH = {{ datagen_large_spans_per_batch }}
+              BUCKET = "{{ datagen_s3_bucket }}"
+              PREFIX = "{{ datagen_large_s3_prefix }}"
+              DURATION_DAYS = {{ datagen_large_duration_days }}
+
+              print("=" * 60)
+              print("OTEL Large Dataset Generator")
+              print("=" * 60)
+              print(f"Target: s3://{BUCKET}/{PREFIX}/")
+              print(f"Batches: {BATCHES}")
+              print(f"Spans per batch: {SPANS_PER_BATCH:,}")
+              print(f"Total spans: {BATCHES * SPANS_PER_BATCH:,}")
+              print(f"Estimated size: ~{(BATCHES * SPANS_PER_BATCH * 100) / (1024**4):.2f} TiB")
+              print("=" * 60)
+              sys.stdout.flush()
+
+              # Schema (inline to avoid dependencies)
+              _span_kind_dict = pa.dictionary(pa.int8(), pa.string())
+              _status_code_dict = pa.dictionary(pa.int8(), pa.string())
+
+              SPANS_SCHEMA = pa.schema([
+                  pa.field("trace_id", pa.string(), nullable=False),
+                  pa.field("span_id", pa.string(), nullable=False),
+                  pa.field("parent_span_id", pa.string(), nullable=True),
+                  pa.field("start_time_unix_nano", pa.int64(), nullable=False),
+                  pa.field("end_time_unix_nano", pa.int64(), nullable=False),
+                  pa.field("duration_ns", pa.int64(), nullable=False),
+                  pa.field("name", pa.string(), nullable=False),
+                  pa.field("kind", _span_kind_dict, nullable=False),
+                  pa.field("status_code", _status_code_dict, nullable=False),
+                  pa.field("status_message", pa.string(), nullable=True),
+                  pa.field("service_name", pa.string(), nullable=False),
+                  pa.field("service_namespace", pa.string(), nullable=True),
+                  pa.field("service_version", pa.string(), nullable=True),
+                  pa.field("host_name", pa.string(), nullable=True),
+                  pa.field("host_ip", pa.string(), nullable=True),
+                  pa.field("attributes_json", pa.string(), nullable=True),
+                  pa.field("resource_attributes_json", pa.string(), nullable=True),
+                  pa.field("http_method", pa.string(), nullable=True),
+                  pa.field("http_status_code", pa.int16(), nullable=True),
+                  pa.field("http_url", pa.string(), nullable=True),
+                  pa.field("http_route", pa.string(), nullable=True),
+                  pa.field("http_target", pa.string(), nullable=True),
+                  pa.field("db_system", pa.string(), nullable=True),
+                  pa.field("db_name", pa.string(), nullable=True),
+                  pa.field("db_operation", pa.string(), nullable=True),
+                  pa.field("db_statement", pa.string(), nullable=True),
+                  pa.field("rpc_system", pa.string(), nullable=True),
+                  pa.field("rpc_service", pa.string(), nullable=True),
+                  pa.field("rpc_method", pa.string(), nullable=True),
+                  pa.field("messaging_system", pa.string(), nullable=True),
+                  pa.field("messaging_destination", pa.string(), nullable=True),
+                  pa.field("messaging_operation", pa.string(), nullable=True),
+                  pa.field("exception_type", pa.string(), nullable=True),
+                  pa.field("exception_message", pa.string(), nullable=True),
+                  pa.field("events_count", pa.int32(), nullable=True),
+                  pa.field("links_count", pa.int32(), nullable=True),
+              ])
+
+              SERVICE_TEMPLATES = [
+                  {"name": "api-gateway", "kind": "SERVER", "operations": ["HTTP request", "route", "rate-limit"]},
+                  {"name": "auth-service", "kind": "SERVER", "operations": ["validate_token", "refresh_token", "login", "logout"]},
+                  {"name": "user-service", "kind": "SERVER", "operations": ["get_user", "update_user", "list_users", "delete_user"]},
+                  {"name": "order-service", "kind": "SERVER", "operations": ["create_order", "get_order", "process_order", "cancel_order"]},
+                  {"name": "inventory-service", "kind": "SERVER", "operations": ["check_stock", "reserve_item", "release_item"]},
+                  {"name": "payment-service", "kind": "SERVER", "operations": ["process_payment", "refund", "validate_card"]},
+                  {"name": "notification-service", "kind": "PRODUCER", "operations": ["send_email", "send_sms", "send_push"]},
+                  {"name": "shipping-service", "kind": "SERVER", "operations": ["calculate_shipping", "create_shipment", "track"]},
+                  {"name": "analytics-service", "kind": "CONSUMER", "operations": ["process_event", "aggregate", "report"]},
+                  {"name": "database", "kind": "CLIENT", "operations": ["SELECT", "INSERT", "UPDATE", "DELETE"]},
+                  {"name": "cache", "kind": "CLIENT", "operations": ["GET", "SET", "DEL", "MGET", "SCAN"]},
+                  {"name": "message-queue", "kind": "PRODUCER", "operations": ["publish", "consume", "ack", "nack"]},
+              ]
+
+              HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH"]
+              HTTP_ROUTES = [
+                  "/api/users", "/api/users/{id}", "/api/orders", "/api/orders/{id}",
+                  "/api/products", "/api/products/{id}", "/api/auth/login", "/api/auth/logout",
+                  "/api/health", "/api/metrics", "/api/cart", "/api/checkout",
+              ]
+              HTTP_STATUS_CODES = [200, 200, 200, 200, 201, 204, 400, 401, 403, 404, 500, 502, 503]
+
+              # Initialize S3
+              s3 = fs.S3FileSystem(
+                  access_key=os.environ["AWS_ACCESS_KEY_ID"],
+                  secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+                  region=os.environ.get("AWS_REGION", "us-east-1"),
+              )
+              base_path = f"{BUCKET}/{PREFIX}"
+
+              # Check for resume state in S3
+              progress_key = f"{base_path}/_progress.json"
+              try:
+                  with s3.open_input_stream(progress_key) as f:
+                      progress = json.loads(f.read().decode())
+                  completed = set(progress.get("completed_batches", []))
+                  print(f"Resuming: {len(completed)} batches already complete")
+              except:
+                  progress = {"completed_batches": [], "total_bytes": 0, "total_spans": 0}
+                  completed = set()
+
+              # Time range
+              end_time = datetime.now(timezone.utc)
+              start_time = end_time - timedelta(days=DURATION_DAYS)
+              time_range_ns = DURATION_DAYS * 24 * 3600 * 1_000_000_000
+              start_ns = int(start_time.timestamp() * 1_000_000_000)
+
+              overall_start = time.time()
+              service_count = len(SERVICE_TEMPLATES)
+
+              for batch_id in range(BATCHES):
+                  if batch_id in completed:
+                      print(f"Batch {batch_id + 1}/{BATCHES}: Already complete, skipping")
+                      continue
+
+                  batch_start = time.time()
+                  print(f"Batch {batch_id + 1}/{BATCHES}: Generating {SPANS_PER_BATCH:,} spans...")
+                  sys.stdout.flush()
+
+                  spans = []
+                  for i in range(SPANS_PER_BATCH):
+                      offset_ns = random.randint(0, time_range_ns)
+                      span_start_ns = start_ns + offset_ns
+                      duration_ns = int(random.expovariate(1 / 50_000_000))
+                      duration_ns = max(1_000_000, min(duration_ns, 30_000_000_000))
+                      span_end_ns = span_start_ns + duration_ns
+
+                      service = SERVICE_TEMPLATES[random.randint(0, service_count - 1)]
+                      operation = random.choice(service["operations"])
+                      is_error = random.random() < 0.05
+
+                      http_method = random.choice(HTTP_METHODS) if service["kind"] == "SERVER" else None
+                      http_route = random.choice(HTTP_ROUTES) if service["kind"] == "SERVER" else None
+                      http_status = random.choice(HTTP_STATUS_CODES) if service["kind"] == "SERVER" else None
+
+                      dt = datetime.fromtimestamp(span_start_ns / 1_000_000_000, tz=timezone.utc)
+
+                      spans.append({
+                          "trace_id": uuid.uuid4().hex,
+                          "span_id": uuid.uuid4().hex[:16],
+                          "parent_span_id": None,
+                          "start_time_unix_nano": span_start_ns,
+                          "end_time_unix_nano": span_end_ns,
+                          "duration_ns": duration_ns,
+                          "name": operation,
+                          "kind": service["kind"],
+                          "status_code": "ERROR" if is_error else "OK",
+                          "status_message": "Error occurred" if is_error else None,
+                          "service_name": service["name"],
+                          "service_namespace": "production",
+                          "service_version": "1.0.0",
+                          "host_name": f"{service['name']}-{random.randint(1, 10)}.example.com",
+                          "host_ip": f"10.0.{random.randint(1, 255)}.{random.randint(1, 255)}",
+                          "attributes_json": json.dumps({"service.name": service["name"]}),
+                          "resource_attributes_json": json.dumps({}),
+                          "http_method": http_method,
+                          "http_status_code": http_status,
+                          "http_url": f"https://api.example.com{http_route}" if http_route else None,
+                          "http_route": http_route,
+                          "http_target": None,
+                          "db_system": "postgresql" if service["kind"] == "CLIENT" else None,
+                          "db_name": "production" if service["kind"] == "CLIENT" else None,
+                          "db_operation": operation if service["kind"] == "CLIENT" else None,
+                          "db_statement": None,
+                          "rpc_system": None,
+                          "rpc_service": None,
+                          "rpc_method": None,
+                          "messaging_system": "kafka" if service["kind"] in ("PRODUCER", "CONSUMER") else None,
+                          "messaging_destination": "events" if service["kind"] in ("PRODUCER", "CONSUMER") else None,
+                          "messaging_operation": "publish" if service["kind"] == "PRODUCER" else ("consume" if service["kind"] == "CONSUMER" else None),
+                          "exception_type": "RuntimeError" if is_error else None,
+                          "exception_message": "Something went wrong" if is_error else None,
+                          "events_count": random.randint(0, 3),
+                          "links_count": 0,
+                          "_date": dt.date(),
+                          "_hour": dt.hour,
+                      })
+
+                      if (i + 1) % 10_000_000 == 0:
+                          print(f"  Batch {batch_id + 1}: Generated {(i+1):,} spans")
+                          sys.stdout.flush()
+
+                  # Group by partition and write
+                  print(f"Batch {batch_id + 1}: Writing to S3...")
+                  sys.stdout.flush()
+
+                  partitions = {}
+                  for span in spans:
+                      key = (span.pop("_date"), span.pop("_hour"))
+                      partitions.setdefault(key, []).append(span)
+
+                  files_written = 0
+                  bytes_written = 0
+
+                  for (date_val, hour_val), partition_spans in partitions.items():
+                      output_dir = f"{base_path}/spans/date={date_val.isoformat()}/hour={hour_val:02d}"
+                      try:
+                          s3.create_dir(output_dir)
+                      except:
+                          pass
+
+                      file_path = f"{output_dir}/batch_{batch_id:04d}_{uuid.uuid4().hex[:8]}.parquet"
+                      table = pa.Table.from_pylist(partition_spans, schema=SPANS_SCHEMA)
+                      pq.write_table(table, file_path, filesystem=s3, row_group_size=100_000, compression="snappy")
+
+                      try:
+                          info = s3.get_file_info(file_path)
+                          bytes_written += info.size
+                      except:
+                          pass
+                      files_written += 1
+
+                  # Update progress in S3
+                  progress["completed_batches"].append(batch_id)
+                  progress["total_bytes"] += bytes_written
+                  progress["total_spans"] += len(spans)
+
+                  with s3.open_output_stream(progress_key) as f:
+                      f.write(json.dumps(progress).encode())
+
+                  batch_elapsed = time.time() - batch_start
+                  total_gib = progress["total_bytes"] / (1024**3)
+
+                  print(f"Batch {batch_id + 1}: Complete in {batch_elapsed:.1f}s - {files_written} files, {bytes_written / (1024**3):.2f} GiB")
+                  print(f"Progress: {len(progress['completed_batches'])}/{BATCHES} batches, {progress['total_spans']:,} spans, {total_gib:.2f} GiB")
+                  sys.stdout.flush()
+
+                  # Clear memory
+                  del spans
+
+              # All complete - update active dataset marker
+              overall_elapsed = time.time() - overall_start
+              hours = overall_elapsed / 3600
+
+              print("=" * 60)
+              print("Generation Complete!")
+              print("=" * 60)
+              print(f"Total time: {hours:.2f} hours")
+              print(f"Total spans: {progress['total_spans']:,}")
+              print(f"Total size: {progress['total_bytes'] / (1024**4):.3f} TiB")
+              print(f"Location: s3://{BUCKET}/{PREFIX}/spans/")
+              print("=" * 60)
+
+              # Update active dataset marker
+              marker = {
+                  "dataset": PREFIX,
+                  "updated_at": datetime.now(timezone.utc).isoformat(),
+                  "phase": "large",
+                  "total_spans": progress["total_spans"],
+                  "total_bytes": progress["total_bytes"],
+              }
+              marker_key = f"{BUCKET}/_active_dataset.json"
+              with s3.open_output_stream(marker_key) as f:
+                  f.write(json.dumps(marker).encode())
+
+              print(f"Updated active dataset marker: s3://{BUCKET}/_active_dataset.json")
+              print("Panel viz will auto-swap to large dataset on next poll")
+              sys.stdout.flush()
+          envFrom:
+            - secretRef:
+                name: datagen-aws-credentials
+          resources:
+            limits:
+              memory: "{{ datagen_large_memory_limit }}"
+              cpu: "{{ datagen_large_cpu_limit }}"
+            requests:
+              memory: "4Gi"
+              cpu: "1"

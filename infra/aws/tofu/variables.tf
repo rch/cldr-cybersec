@@ -31,21 +31,23 @@ variable "vpc_cidr" {
 }
 
 variable "availability_zones" {
-  description = "Availability zones for subnets"
+  description = "Availability zones for subnets (auto-detected by devenv task)"
   type        = list(string)
   default     = ["us-east-1a", "us-east-1b", "us-east-1c"]
 }
 
+# Subnet CIDRs are now computed dynamically based on AZ count
+# This handles regions with 2 AZs (us-west-1) vs 3+ AZs (us-east-1)
 variable "private_subnet_cidrs" {
-  description = "CIDR blocks for private subnets"
+  description = "CIDR blocks for private subnets (optional - computed from AZ count if empty)"
   type        = list(string)
-  default     = ["10.100.1.0/24", "10.100.2.0/24", "10.100.3.0/24"]
+  default     = []
 }
 
 variable "public_subnet_cidrs" {
-  description = "CIDR blocks for public subnets (for bastion/NAT)"
+  description = "CIDR blocks for public subnets (optional - computed from AZ count if empty)"
   type        = list(string)
-  default     = ["10.100.101.0/24", "10.100.102.0/24", "10.100.103.0/24"]
+  default     = []
 }
 
 # -----------------------------------------------------------------------------
@@ -140,6 +142,78 @@ variable "tags" {
   default     = {}
 }
 
+# -----------------------------------------------------------------------------
+# Cloudflare Configuration (for Cloudflare Tunnel ingress)
+# -----------------------------------------------------------------------------
+
+variable "cloudflare_account_id" {
+  description = "Cloudflare account ID (from dashboard)"
+  type        = string
+  default     = ""
+}
+
+variable "cloudflare_zone_id" {
+  description = "Cloudflare zone ID for base domain"
+  type        = string
+  default     = ""
+}
+
+variable "cloudflare_access_open" {
+  description = "Set to true to allow public access (INSECURE - use only for demos). Default requires WARP client enrolled in your Zero Trust org."
+  type        = bool
+  default     = false # Secure by default
+}
+
+variable "cloudflare_warp_posture_rule_id" {
+  description = "ID of existing WARP device posture rule. Find in Cloudflare dashboard: Zero Trust > Settings > WARP Client > Device posture. Required when cloudflare_access_open = false."
+  type        = string
+  default     = ""
+}
+
+variable "ingress_provider" {
+  description = "Ingress provider: 'ngrok' or 'cloudflare'"
+  type        = string
+  default     = "ngrok"
+
+  validation {
+    condition     = contains(["ngrok", "cloudflare"], var.ingress_provider)
+    error_message = "ingress_provider must be 'ngrok' or 'cloudflare'"
+  }
+}
+
+variable "ingress_root_domain" {
+  description = "Root domain for ingress (e.g., zndx.org)"
+  type        = string
+  default     = "zndx.org"
+}
+
+variable "ingress_env_id" {
+  description = "Environment identifier for ingress subdomains (e.g., 'aws', 'cldr')"
+  type        = string
+  default     = "aws"
+}
+
+locals {
+  # Computed base domain: dev.{env_id}.{root_domain}
+  ingress_base_domain = "dev.${var.ingress_env_id}.${var.ingress_root_domain}"
+}
+
+variable "ingress_subdomains" {
+  description = "Subdomain prefixes for services"
+  type = object({
+    dask       = string
+    jupyterhub = string
+    k8s        = string
+    viz        = string
+  })
+  default = {
+    dask       = "dask"
+    jupyterhub = "jupyter"
+    k8s        = "k8s"
+    viz        = "viz"
+  }
+}
+
 locals {
   # Merge base tags with developer identity
   # The merge order ensures developer_email always overrides any Owner in var.tags
@@ -154,4 +228,26 @@ locals {
   # S3 bucket name includes developer prefix for data isolation
   # Each developer gets their own bucket: cybersec-dask-<prefix>-data
   bucket_name = "${var.project}-${var.developer_prefix}-data"
+
+  # Compute subnet CIDRs dynamically based on AZ count
+  # This handles regions with 2 AZs (us-west-1) vs 3+ AZs (us-east-1)
+  az_count = length(var.availability_zones)
+
+  # Use provided CIDRs if available, otherwise compute from VPC CIDR
+  # Private subnets: 10.100.1.0/24, 10.100.2.0/24, ...
+  # Public subnets:  10.100.101.0/24, 10.100.102.0/24, ...
+  private_subnet_cidrs = length(var.private_subnet_cidrs) > 0 ? var.private_subnet_cidrs : [
+    for i in range(local.az_count) : cidrsubnet(var.vpc_cidr, 8, i + 1)
+  ]
+  public_subnet_cidrs = length(var.public_subnet_cidrs) > 0 ? var.public_subnet_cidrs : [
+    for i in range(local.az_count) : cidrsubnet(var.vpc_cidr, 8, i + 101)
+  ]
+
+  # Full FQDNs for ingress services
+  ingress_domains = {
+    dask       = "${var.ingress_subdomains.dask}.${local.ingress_base_domain}"
+    jupyterhub = "${var.ingress_subdomains.jupyterhub}.${local.ingress_base_domain}"
+    k8s        = "${var.ingress_subdomains.k8s}.${local.ingress_base_domain}"
+    viz        = "${var.ingress_subdomains.viz}.${local.ingress_base_domain}"
+  }
 }

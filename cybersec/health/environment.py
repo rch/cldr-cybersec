@@ -186,6 +186,9 @@ async def gather_environment_config() -> dict[str, Any]:
     config["services"]["ngrok"] = _check_ngrok_credentials()
     config["services"]["cloudflare"] = _check_cloudflare_credentials()
 
+    # Ingress provider configuration
+    config["ingress_provider"] = os.environ.get("INGRESS_PROVIDER", "ngrok")
+
     # AWS credentials and IAM permissions
     config["aws"] = _check_aws_credentials()
 
@@ -296,17 +299,28 @@ def _check_ngrok_credentials() -> dict[str, Any]:
 def _check_cloudflare_credentials() -> dict[str, Any]:
     """Check Cloudflare credential availability.
 
-    Cloudflare credentials are required for custom domain DNS management
-    when using ngrok with custom domains.
+    Cloudflare credentials are required for:
+    - Custom domain DNS management (when using ngrok)
+    - Cloudflare Tunnel ingress (when INGRESS_PROVIDER=cloudflare)
+    - Zero Trust Access policies
     """
     api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
     zone_id = os.environ.get("CLOUDFLARE_ZONE_ID", "")
+    tunnel_token = os.environ.get("CLOUDFLARE_TUNNEL_TOKEN", "")
+    tunnel_id = os.environ.get("CLOUDFLARE_TUNNEL_ID", "")
 
     return {
         # Only expose boolean flags, not actual credentials
         "api_token_set": bool(api_token),
+        "account_id_set": bool(account_id),
         "zone_id_set": bool(zone_id),
-        "credentials_complete": bool(api_token),  # zone_id optional for some operations
+        "tunnel_token_set": bool(tunnel_token),
+        "tunnel_id_set": bool(tunnel_id),
+        # Full credentials for Cloudflare Tunnel ingress
+        "credentials_complete": bool(api_token) and bool(account_id) and bool(zone_id),
+        # Tunnel ready for deployment
+        "tunnel_ready": bool(tunnel_token) and bool(tunnel_id),
     }
 
 

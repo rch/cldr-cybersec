@@ -1,0 +1,130 @@
+---
+# Cloudflare Tunnel deployment tasks
+#
+# Deploys cloudflared to connect K8s services to Cloudflare Tunnel.
+# The tunnel and DNS records are created by OpenTofu (cloudflare.tf).
+# This role handles the K8s-side deployment of cloudflared.
+
+- name: Install pip3
+  ansible.builtin.dnf:
+    name: python3-pip
+    state: present
+  become: true
+
+- name: Install Python dependencies for Kubernetes modules
+  ansible.builtin.pip:
+    name:
+      - kubernetes
+      - PyYAML
+    state: present
+  become: true
+
+- name: Validate Cloudflare Tunnel token
+  ansible.builtin.assert:
+    that:
+      - cloudflare_tunnel_token | length > 0
+    fail_msg: |
+      CLOUDFLARE_TUNNEL_TOKEN not set.
+
+      Get it from OpenTofu output:
+        cd infra/aws/tofu && tofu output -raw cloudflare_tunnel_token
+
+      Then export:
+        export CLOUDFLARE_TUNNEL_TOKEN="<token>"
+    success_msg: "Cloudflare Tunnel token validated"
+
+- name: Validate Cloudflare Tunnel ID
+  ansible.builtin.assert:
+    that:
+      - cloudflare_tunnel_id | length > 0
+    fail_msg: |
+      CLOUDFLARE_TUNNEL_ID not set.
+
+      Get it from OpenTofu output:
+        cd infra/aws/tofu && tofu output -raw cloudflare_tunnel_id
+
+      Then export:
+        export CLOUDFLARE_TUNNEL_ID="<tunnel-id>"
+    success_msg: "Cloudflare Tunnel ID validated"
+
+- name: Create cloudflare-system namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ cloudflare_tunnel_namespace }}"
+        labels:
+          app.kubernetes.io/name: cloudflared
+          app.kubernetes.io/component: tunnel
+
+- name: Create Cloudflare Tunnel credentials secret
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cloudflared-credentials
+        namespace: "{{ cloudflare_tunnel_namespace }}"
+      type: Opaque
+      stringData:
+        # Tunnel token contains all credentials needed
+        TUNNEL_TOKEN: "{{ cloudflare_tunnel_token }}"
+
+- name: Apply cloudflared ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'cloudflared-config.yaml.j2') | from_yaml }}"
+
+- name: Apply cloudflared Deployment
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'cloudflared-deployment.yaml.j2') | from_yaml }}"
+
+- name: Wait for cloudflared pods to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Deployment
+    namespace: "{{ cloudflare_tunnel_namespace }}"
+    name: cloudflared
+  register: cloudflared_status
+  until: >
+    cloudflared_status.resources | length > 0 and
+    cloudflared_status.resources[0].status.readyReplicas | default(0) >= 1
+  retries: 30
+  delay: 10
+
+- name: Get cloudflared pod status
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Pod
+    namespace: "{{ cloudflare_tunnel_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/name=cloudflared"
+  register: cloudflared_pods
+
+- name: Display Cloudflare Tunnel status
+  ansible.builtin.debug:
+    msg: |
+      Cloudflare Tunnel deployed successfully!
+
+      Tunnel ID: {{ cloudflare_tunnel_id }}
+      Replicas:  {{ cloudflared_status.resources[0].status.readyReplicas | default(0) }}/{{ cloudflared_replicas }}
+
+      Service URLs (protected by Zero Trust - requires WARP):
+        - Dask Dashboard:  https://{{ cf_dask_domain }}
+        - JupyterHub:      https://{{ cf_jupyterhub_domain }}
+        - K8s Dashboard:   https://{{ cf_k8s_dashboard_domain }}
+
+      Verify tunnel status:
+        kubectl get pods -n {{ cloudflare_tunnel_namespace }}
+        kubectl logs -n {{ cloudflare_tunnel_namespace }} -l app.kubernetes.io/name=cloudflared
+
+      Check tunnel in Cloudflare Dashboard:
+        https://one.dash.cloudflare.com/ -> Network -> Tunnels

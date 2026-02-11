@@ -37,7 +37,7 @@ Automation for Kubernetes-based compute (Dask, JupyterHub) across local and clou
 | Provision cluster | `k8s:provision` | (external) | `aws:provision` |
 | Deploy Dask | `k8s:deploy-dask` | `k8s:deploy-dask` | `aws:deploy:dask` |
 | Deploy JupyterHub | `k8s:deploy-jupyter` | `k8s:deploy-jupyter` | `aws:deploy:jupyterhub` |
-| External HTTPS access | — | — | `aws:deploy:ngrok` |
+| External HTTPS access | — | — | Cloudflare Tunnel (IaC) or ngrok |
 | Port forward services | `k8s:forward` | `k8s:forward` | — |
 | Check status | `k8s:status` | `k8s:status` | `aws:status` |
 | Destroy | `k8s:destroy` | (manual) | `aws:teardown` |
@@ -47,10 +47,10 @@ Automation for Kubernetes-based compute (Dask, JupyterHub) across local and clou
 | Aspect | `k8s:*` Tasks | `aws:*` Tasks |
 |--------|---------------|---------------|
 | **Target** | Local clusters (k3d, existing RKE2) | AWS cloud infrastructure |
-| **Infrastructure** | None (uses existing) or k3d | OpenTofu (EC2, VPC, S3) |
+| **Infrastructure** | None (uses existing) or k3d | OpenTofu (EC2, VPC, S3, Cloudflare) |
 | **Cluster** | k3d (single-node) or external KUBECONFIG | RKE2 (3 CP + 3 workers) |
 | **App Deployment** | Helm charts directly | Ansible playbooks |
-| **External Access** | None (localhost port-forward) | ngrok + OAuth + Cloudflare DNS |
+| **External Access** | None (localhost port-forward) | Cloudflare Tunnel + Zero Trust (WARP) or ngrok |
 | **Cost** | Free | AWS charges |
 
 ## Architecture Overview

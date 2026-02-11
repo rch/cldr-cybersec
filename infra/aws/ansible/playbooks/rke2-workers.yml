@@ -1,0 +1,11 @@
+---
+# Re-configure RKE2 workers (fetch token from control plane automatically)
+# Usage: ansible-playbook playbooks/rke2-workers.yml -i inventory/hosts
+
+- name: Install/reconfigure RKE2 agent (workers)
+  hosts: workers
+  become: true
+  vars:
+    rke2_role: agent
+  roles:
+    - rke2-agent

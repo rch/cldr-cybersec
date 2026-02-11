@@ -1,6 +1,19 @@
 ---
 # RKE2 agent (worker) installation
 
+# Fetch token from control plane if not already set
+- name: Fetch node token from control plane
+  slurp:
+    src: /var/lib/rancher/rke2/server/node-token
+  register: fetched_token
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  when: rke2_token == ""
+
+- name: Set token fact from control plane
+  set_fact:
+    rke2_token: "{{ fetched_token.content | b64decode | trim }}"
+  when: rke2_token == "" and fetched_token is defined and fetched_token.content is defined
+
 - name: Download RKE2 installer
   get_url:
     url: https://get.rke2.io

@@ -1,0 +1,23 @@
+---
+# Standalone playbook for Cloudflare Tunnel deployment
+#
+# Usage:
+#   # Get tunnel token from OpenTofu
+#   export CLOUDFLARE_TUNNEL_TOKEN=$(cd infra/aws/tofu && tofu output -raw cloudflare_tunnel_token)
+#   export CLOUDFLARE_TUNNEL_ID=$(cd infra/aws/tofu && tofu output -raw cloudflare_tunnel_id)
+#
+#   # Deploy cloudflared
+#   ansible-playbook playbooks/cloudflare-tunnel.yml
+#
+# Or use with site.yml:
+#   export INGRESS_PROVIDER=cloudflare
+#   ansible-playbook playbooks/site.yml --tags ingress
+
+- name: Deploy Cloudflare Tunnel
+  hosts: control_plane[0]
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+  roles:
+    - role: cloudflare-tunnel
+      tags: [cloudflare, ingress]

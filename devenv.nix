@@ -18,6 +18,11 @@
   env.FLINK_HOME = "${config.devenv.root}/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1";
   env.KUBECONFIG = "${config.devenv.root}/.devenv/state/kubeconfig";
 
+  # AWS S3 bucket for OTEL data - populated by `devenv tasks run aws:env` from tofu output
+  # These are picked up by datagen and panel-viz ansible roles
+  # Default to empty string so dotenv can override from .env file
+  env.OTEL_S3_BUCKET = "";  # Set by aws:env task or .env file
+
 
   # https://devenv.sh/packages/
   packages = with pkgs; [
@@ -335,13 +340,29 @@ print('Environment config written to build/environment.json')
       export TF_VAR_developer_email="$EMAIL"
       export TF_VAR_ssh_key_name="$KEY_NAME"
       export TF_VAR_aws_region="$REGION"
-      export TF_VAR_availability_zones="[\"''${REGION}a\",\"''${REGION}b\",\"''${REGION}c\"]"
+
+      # Ingress provider: cloudflare (default) or ngrok
+      # Override with INGRESS_PROVIDER env var if needed
+      export TF_VAR_ingress_provider="''${INGRESS_PROVIDER:-cloudflare}"
+
+      # Cloudflare configuration (required when ingress_provider=cloudflare)
+      export TF_VAR_cloudflare_account_id="''${CLOUDFLARE_ACCOUNT_ID:-}"
+      export TF_VAR_cloudflare_zone_id="''${CLOUDFLARE_ZONE_ID:-}"
+
+      # Dynamically detect available AZs (some regions like us-west-1 only have 2)
+      AVAILABLE_AZS=$(aws ec2 describe-availability-zones --region "$REGION" --query 'AvailabilityZones[?State==`available`].ZoneName' --output json 2>/dev/null || echo '[]')
+      if [ "$AVAILABLE_AZS" = "[]" ]; then
+        # Fallback to common pattern if API call fails
+        AVAILABLE_AZS="[\"''${REGION}a\",\"''${REGION}b\",\"''${REGION}c\"]"
+      fi
+      export TF_VAR_availability_zones="$AVAILABLE_AZS"
 
       echo "Developer: $EMAIL (prefix: $PREFIX)"
       echo "AWS Account: $ACCOUNT_ID"
       echo "Using profile: $PROFILE"
       echo "Using region:  $REGION"
       echo "Using key:     $KEY_NAME"
+      echo "Using AZs:     $AVAILABLE_AZS"
 
       # Pre-flight quota check - fail fast before creating any infrastructure
       echo ""
@@ -545,7 +566,19 @@ PY
       export TF_VAR_developer_email="$EMAIL"
       export TF_VAR_ssh_key_name="$KEY_NAME"
       export TF_VAR_aws_region="$REGION"
-      export TF_VAR_availability_zones="[\"''${REGION}a\",\"''${REGION}b\",\"''${REGION}c\"]"
+
+      # Ingress provider: cloudflare (default) or ngrok
+      export TF_VAR_ingress_provider="''${INGRESS_PROVIDER:-cloudflare}"
+      export TF_VAR_cloudflare_account_id="''${CLOUDFLARE_ACCOUNT_ID:-}"
+      export TF_VAR_cloudflare_zone_id="''${CLOUDFLARE_ZONE_ID:-}"
+
+      # Dynamically detect available AZs (some regions like us-west-1 only have 2)
+      AVAILABLE_AZS=$(aws ec2 describe-availability-zones --region "$REGION" --query 'AvailabilityZones[?State==`available`].ZoneName' --output json 2>/dev/null || echo '[]')
+      if [ "$AVAILABLE_AZS" = "[]" ]; then
+        # Fallback to common pattern if API call fails
+        AVAILABLE_AZS="[\"''${REGION}a\",\"''${REGION}b\",\"''${REGION}c\"]"
+      fi
+      export TF_VAR_availability_zones="$AVAILABLE_AZS"
 
       echo "Developer: $EMAIL (prefix: $PREFIX)"
       echo "AWS Account: $ACCOUNT_ID"
@@ -1176,14 +1209,72 @@ EOF
       echo "Using S3 Bucket: $BUCKET_NAME"
       echo "Using Region:    $AWS_REGION"
 
+      # Detect ingress provider from tofu state
+      INGRESS_PROVIDER=$(tofu output -json ingress_info 2>/dev/null | jq -r '.provider // "ngrok"')
+      export INGRESS_PROVIDER
+
+      if [ "$INGRESS_PROVIDER" = "cloudflare" ]; then
+        echo "Using Ingress:   Cloudflare Tunnel (Zero Trust)"
+        # Get tunnel credentials from tofu for Ansible
+        export CLOUDFLARE_TUNNEL_TOKEN=$(tofu output -raw cloudflare_tunnel_token 2>/dev/null || echo "")
+        export CLOUDFLARE_TUNNEL_ID=$(tofu output -raw cloudflare_tunnel_id 2>/dev/null || echo "")
+        if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+          echo "⚠️  Warning: Could not get tunnel token from tofu output"
+        fi
+      else
+        echo "Using Ingress:   ngrok"
+      fi
+
       cd ../ansible
       ansible-playbook playbooks/site.yml -e "s3_bucket_name=$BUCKET_NAME" -e "aws_region=$AWS_REGION"
       echo ""
       echo "✅ Cluster deployment complete"
       echo ""
-      echo "Next steps:"
-      echo "  - Deploy ngrok:      devenv tasks run aws:deploy:ngrok"
-      echo "  - Deploy JupyterHub: devenv tasks run aws:deploy:jupyterhub"
+      if [ "$INGRESS_PROVIDER" = "cloudflare" ]; then
+        INGRESS_URLS=$(cd ../tofu && tofu output -json ingress_urls 2>/dev/null | jq -r 'to_entries[] | "  - \(.key): \(.value)"')
+        echo "Access URLs (requires WARP):"
+        echo "$INGRESS_URLS"
+      else
+        echo "Next steps:"
+        echo "  - Deploy ngrok:      devenv tasks run aws:deploy:ngrok"
+        echo "  - Deploy JupyterHub: devenv tasks run aws:deploy:jupyterhub"
+      fi
+    '';
+
+    # Write AWS environment variables to .env file for consistent use across sessions
+    # This populates OTEL_S3_BUCKET and AWS_REGION from tofu output
+    "aws:env".exec = ''
+      echo "📝 Writing AWS environment to .env file..."
+
+      TOFU_DIR="${config.devenv.root}/infra/aws/tofu"
+      ENV_FILE="${config.devenv.root}/.env"
+
+      # Get values from tofu output
+      BUCKET_NAME=$(cd "$TOFU_DIR" && tofu output -raw s3_bucket_name 2>/dev/null || echo "")
+      REGION=$(cd "$TOFU_DIR" && tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
+
+      if [ -z "$BUCKET_NAME" ]; then
+        echo "❌ Error: Could not determine S3 bucket name from Tofu."
+        echo "   Please run: devenv tasks run aws:provision"
+        exit 1
+      fi
+
+      # Update or create .env file
+      # Remove old values if they exist
+      if [ -f "$ENV_FILE" ]; then
+        grep -v "^OTEL_S3_BUCKET=" "$ENV_FILE" | grep -v "^AWS_REGION=" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+      fi
+
+      # Append new values
+      echo "OTEL_S3_BUCKET=$BUCKET_NAME" >> "$ENV_FILE"
+      echo "AWS_REGION=$REGION" >> "$ENV_FILE"
+
+      echo "✅ Updated .env file:"
+      echo "   OTEL_S3_BUCKET=$BUCKET_NAME"
+      echo "   AWS_REGION=$REGION"
+      echo ""
+      echo "💡 Re-enter devenv shell to pick up changes:"
+      echo "   exit && devenv shell"
     '';
 
     "aws:deploy:dask".exec = ''
@@ -1227,6 +1318,36 @@ EOF
       echo "Access URLs (after DNS propagation):"
       echo "  - Dask Dashboard: https://dask.zndx.org"
       echo "  - K8s Dashboard:  https://k8s.zndx.org"
+    '';
+
+    "aws:deploy:cloudflare".exec = ''
+      echo "🚀 Deploying Cloudflare Tunnel..."
+
+      # Get tunnel credentials from tofu output
+      cd infra/aws/tofu
+      export CLOUDFLARE_TUNNEL_TOKEN=$(tofu output -raw cloudflare_tunnel_token 2>/dev/null || echo "")
+      export CLOUDFLARE_TUNNEL_ID=$(tofu output -raw cloudflare_tunnel_id 2>/dev/null || echo "")
+
+      if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+        echo "❌ Could not get CLOUDFLARE_TUNNEL_TOKEN from tofu output"
+        echo "   Make sure infrastructure was provisioned with INGRESS_PROVIDER=cloudflare"
+        exit 1
+      fi
+
+      # Get region from tofu state
+      export AWS_REGION=$(tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
+      echo "Using Region: $AWS_REGION"
+      echo "Tunnel ID:    $CLOUDFLARE_TUNNEL_ID"
+
+      export INGRESS_PROVIDER=cloudflare
+      cd ../ansible
+      ansible-playbook playbooks/cloudflare-tunnel.yml -e "aws_region=$AWS_REGION"
+      echo ""
+      echo "✅ Cloudflare Tunnel deployed"
+      echo ""
+      INGRESS_URLS=$(cd ../tofu && tofu output -json ingress_urls 2>/dev/null | jq -r 'to_entries[] | "  - \(.key): \(.value)"')
+      echo "Access URLs (requires WARP):"
+      echo "$INGRESS_URLS"
     '';
 
     "aws:deploy:jupyterhub".exec = ''

@@ -78,7 +78,8 @@ spec:
               # -------------------------------------------------------------------------
 
               DASK_SCHEDULER = os.environ.get('DASK_SCHEDULER', '')
-              OTEL_DATA_PATH = os.environ.get('OTEL_DATA_PATH', 's3://cybersec-dask-data/otel/')
+              S3_BUCKET = os.environ.get('S3_BUCKET', 'cybersec-dask-data')
+              OTEL_DATA_PATH = os.environ.get('OTEL_DATA_PATH', f's3://{S3_BUCKET}/otel-minimal/')
               S3_ENDPOINT = os.environ.get('S3_ENDPOINT', '')
               AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
               AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
@@ -87,6 +88,7 @@ spec:
               # Fixed canvas size to prevent collapse
               CANVAS_WIDTH = 800
               CANVAS_HEIGHT = 500
+              MIN_MAIN_HEIGHT = 600  # Minimum height for main content area
 
               # -------------------------------------------------------------------------
               # Dask Client (lazy singleton)
@@ -132,13 +134,56 @@ spec:
                   return {k: v for k, v in opts.items() if v}
 
               # -------------------------------------------------------------------------
+              # Dataset Detection (two-phase: minimal -> large)
+              # -------------------------------------------------------------------------
+
+              def get_active_dataset() -> dict:
+                  """Check which dataset is active/available.
+
+                  Returns dict with 'dataset' (prefix), 'phase', and 'path'.
+                  Falls back to default OTEL_DATA_PATH if marker not found.
+                  """
+                  import json
+                  import s3fs
+
+                  bucket = S3_BUCKET
+
+                  try:
+                      fs = s3fs.S3FileSystem(**get_storage_options())
+                      marker_path = f"{bucket}/_active_dataset.json"
+                      with fs.open(marker_path, 'r') as f:
+                          marker = json.load(f)
+                      dataset = marker.get('dataset', 'otel-minimal')
+                      phase = marker.get('phase', 'unknown')
+                      return {
+                          'dataset': dataset,
+                          'phase': phase,
+                          'path': f"s3://{bucket}/{dataset}/",
+                          'total_spans': marker.get('total_spans'),
+                      }
+                  except FileNotFoundError:
+                      logger.info("No dataset marker found, using default path")
+                  except Exception as e:
+                      logger.warning(f"Error reading dataset marker: {e}")
+
+                  # Fallback to configured path
+                  return {
+                      'dataset': 'otel-minimal',
+                      'phase': 'default',
+                      'path': OTEL_DATA_PATH,
+                      'total_spans': None,
+                  }
+
+              # -------------------------------------------------------------------------
               # Data Loader
               # -------------------------------------------------------------------------
 
-              def load_span_data(start_time: datetime, end_time: datetime, on_progress=None) -> dd.DataFrame:
+              def load_span_data(start_time: datetime, end_time: datetime, data_path: str = None, on_progress=None) -> dd.DataFrame:
                   import s3fs
 
-                  s3_base = OTEL_DATA_PATH.rstrip('/') + '/spans'
+                  # Use provided path or fall back to configured default
+                  base_path = data_path or OTEL_DATA_PATH
+                  s3_base = base_path.rstrip('/') + '/spans'
                   start_date, end_date = start_time.date(), end_time.date()
 
                   if on_progress:
@@ -195,7 +240,7 @@ spec:
               # -------------------------------------------------------------------------
 
               class SpanExplorer(param.Parameterized):
-                  """Auto-loading span explorer with live Dask status."""
+                  """Auto-loading span explorer with live Dask status and dataset auto-swap."""
 
                   # Controls
                   time_preset = param.Selector(
@@ -213,11 +258,23 @@ spec:
                   ready = param.Boolean(default=False)
                   error = param.String(default='')
 
+                  # Dataset state (for two-phase generation)
+                  current_dataset = param.String(default='')
+                  dataset_phase = param.String(default='')
+
                   def __init__(self, **params):
                       super().__init__(**params)
                       self._ddf = None
                       self._poll_thread = None
+                      self._dataset_thread = None
                       self._stop_polling = False
+                      self._current_data_path = None
+
+                      # Initialize dataset info
+                      ds_info = get_active_dataset()
+                      self.current_dataset = ds_info['dataset']
+                      self.dataset_phase = ds_info['phase']
+                      self._current_data_path = ds_info['path']
 
                   def _get_time_range(self):
                       now = datetime.now(timezone.utc)
@@ -248,10 +305,50 @@ spec:
                           self._poll_thread = threading.Thread(target=self._poll_dask_status, daemon=True)
                           self._poll_thread.start()
 
+                  def _poll_dataset_changes(self):
+                      """Background thread to poll for dataset changes (auto-swap)."""
+                      import time as _time
+                      import logging as _logging
+                      _logger = _logging.getLogger(__name__)
+
+                      # Wait for module to be fully initialized
+                      _time.sleep(10)
+
+                      while not self._stop_polling:
+                          try:
+                              # Get function reference from globals to avoid scope issues
+                              _get_active_dataset = globals().get('get_active_dataset')
+                              if _get_active_dataset is None:
+                                  _time.sleep(60)
+                                  continue
+
+                              ds_info = _get_active_dataset()
+                              new_dataset = ds_info['dataset']
+                              if new_dataset != self.current_dataset:
+                                  _logger.info(f"Dataset changed: {self.current_dataset} -> {new_dataset}")
+                                  self.current_dataset = new_dataset
+                                  self.dataset_phase = ds_info['phase']
+                                  self._current_data_path = ds_info['path']
+                                  # Clear cached data to force reload
+                                  self._ddf = None
+                                  self.ready = False
+                                  self.phase = f"Switched to {new_dataset}, reloading..."
+                                  # Trigger reload
+                                  self.load_data()
+                          except Exception as e:
+                              _logger.warning(f"Dataset poll error: {e}")
+                          _time.sleep(60)  # Poll every 60 seconds
+
+                  def start_dataset_watcher(self):
+                      """Start background dataset change polling."""
+                      if self._dataset_thread is None:
+                          self._dataset_thread = threading.Thread(target=self._poll_dataset_changes, daemon=True)
+                          self._dataset_thread.start()
+
                   def load_data(self):
                       """Load data with progress updates."""
                       try:
-                          self.phase = "Connecting to Dask..."
+                          self.phase = f"Connecting to Dask ({self.current_dataset})..."
                           client = get_dask_client()
                           stats = get_dask_stats()
                           self.workers = stats['workers']
@@ -260,21 +357,26 @@ spec:
                               self.phase = msg
 
                           start, end = self._get_time_range()
-                          self._ddf = load_span_data(start, end, on_progress=on_progress)
+                          self._ddf = load_span_data(
+                              start, end,
+                              data_path=self._current_data_path,
+                              on_progress=on_progress,
+                          )
                           self.partitions = self._ddf.npartitions
 
-                          self.phase = f"Rendering {self.partitions} partitions..."
+                          self.phase = f"Ready ({self.current_dataset}: {self.partitions} partitions)"
                           self.ready = True
                           self.start_polling()
+                          self.start_dataset_watcher()
 
                       except Exception as e:
                           logger.exception("Load failed")
                           self.error = str(e)
                           self.phase = f"Error: {e}"
 
-                  @param.depends('phase', 'workers', 'processing', 'partitions', 'error')
+                  @param.depends('phase', 'workers', 'processing', 'partitions', 'error', 'current_dataset', 'dataset_phase')
                   def status_panel(self):
-                      """Live status panel showing Dask activity."""
+                      """Live status panel showing Dask activity and dataset info."""
                       if self.error:
                           return pn.pane.Alert(f"**Error**: {self.error}", alert_type='danger')
 
@@ -289,6 +391,9 @@ spec:
                           activity = "Loading..."
                           activity_style = "color: #007bff;"
 
+                      # Dataset phase indicator
+                      phase_emoji = {"minimal": "🔵", "large": "🟢", "default": "⚪"}.get(self.dataset_phase, "⚪")
+
                       return pn.Column(
                           pn.pane.Markdown(f"### Status", margin=(0, 0, 5, 0)),
                           pn.pane.HTML(f"<div style='{activity_style}'>{activity}</div>"),
@@ -296,6 +401,7 @@ spec:
               **Phase**: {self.phase}
               **Workers**: {self.workers}
               **Partitions**: {self.partitions}
+              **Dataset**: {phase_emoji} {self.current_dataset} ({self.dataset_phase})
                           """, margin=(5, 0, 0, 0)),
                           sizing_mode='stretch_width',
                       )
@@ -303,16 +409,30 @@ spec:
                   @param.depends('ready', 'cmap', 'spread_enabled', 'time_preset')
                   def heatmap_view(self):
                       """Heatmap with fixed size."""
+                      # Wrapper ensures stable sizing during transitions
+                      def wrap_content(content):
+                          return pn.Column(
+                              content,
+                              min_height=CANVAS_HEIGHT,
+                              height=CANVAS_HEIGHT,
+                              sizing_mode='stretch_width',
+                              styles={
+                                  'min-height': f'{CANVAS_HEIGHT}px',
+                                  'height': f'{CANVAS_HEIGHT}px',
+                              },
+                          )
+
                       if self.error:
-                          return pn.Spacer(height=CANVAS_HEIGHT)
+                          return wrap_content(pn.pane.Alert(f"Error: {self.error}", alert_type='danger'))
 
                       if not self.ready or self._ddf is None:
-                          return pn.Column(
-                              pn.indicators.LoadingSpinner(value=True, size=50, color='primary'),
-                              pn.pane.Markdown(f"**{self.phase}**", align='center'),
-                              height=CANVAS_HEIGHT,
-                              align='center',
-                              styles={'display': 'flex', 'justify-content': 'center', 'align-items': 'center'},
+                          return wrap_content(
+                              pn.Column(
+                                  pn.indicators.LoadingSpinner(value=True, size=50, color='primary'),
+                                  pn.pane.Markdown(f"**{self.phase}**", align='center'),
+                                  align='center',
+                                  styles={'display': 'flex', 'justify-content': 'center', 'align-items': 'center', 'height': '100%'},
+                              )
                           )
 
                       try:
@@ -347,16 +467,18 @@ spec:
 
                           result = dynspread(rasterized, max_px=3) if self.spread_enabled else rasterized
 
-                          return pn.pane.HoloViews(
-                              result,
-                              sizing_mode='stretch_width',
-                              min_height=CANVAS_HEIGHT,
-                              height=CANVAS_HEIGHT,
+                          return wrap_content(
+                              pn.pane.HoloViews(
+                                  result,
+                                  sizing_mode='stretch_width',
+                                  min_height=CANVAS_HEIGHT,
+                                  height=CANVAS_HEIGHT,
+                              )
                           )
 
                       except Exception as e:
                           logger.exception("Render failed")
-                          return pn.pane.Alert(f"Render error: {e}", alert_type='warning')
+                          return wrap_content(pn.pane.Alert(f"Render error: {e}", alert_type='warning'))
 
                   def sidebar(self):
                       """Sidebar with status and controls."""
@@ -373,7 +495,7 @@ spec:
                           pn.layout.Divider(),
                           pn.pane.Markdown(f"""
               **Dask**: `{DASK_SCHEDULER.split('.')[0] if DASK_SCHEDULER else 'N/A'}`
-              **Data**: `otel/spans`
+              **Data**: `{self.current_dataset}/spans`
                           """, styles={'font-size': '11px', 'color': '#6c757d'}),
                           width=260,
                       )
@@ -383,10 +505,29 @@ spec:
                       return pn.Column(
                           self.heatmap_view,
                           sizing_mode='stretch_width',
+                          min_height=MIN_MAIN_HEIGHT,
+                          styles={
+                              'min-height': f'{MIN_MAIN_HEIGHT}px',
+                              'overflow': 'visible',
+                          },
                       )
 
                   def servable(self):
                       """Build the app and auto-trigger load."""
+                      # CSS to prevent layout collapse during data loading/refresh
+                      raw_css = """
+                      .main-content, .bk-root, .bk-Column {
+                          min-height: 500px !important;
+                      }
+                      #main {
+                          min-height: calc(100vh - 80px) !important;
+                      }
+                      .pn-loading {
+                          min-height: 500px !important;
+                      }
+                      """
+                      pn.config.raw_css.append(raw_css)
+
                       template = pn.template.FastListTemplate(
                           title="OTEL Span Explorer",
                           sidebar=[self.sidebar()],
@@ -394,6 +535,7 @@ spec:
                           accent_base_color="#0072B5",
                           header_background="#0072B5",
                           sidebar_width=280,
+                          theme="dark",
                       )
 
                       # Auto-load data when page loads

@@ -376,6 +376,35 @@ def save_progress(progress: dict) -> None:
     progress_file.write_text(json.dumps(progress, indent=2))
 
 
+def update_active_dataset(bucket: str, prefix: str, total_spans: int, total_bytes: int) -> None:
+    """Update the active dataset marker in S3.
+
+    This marker is read by panel-viz to auto-swap to the large dataset
+    when generation completes.
+    """
+    region = os.getenv("AWS_REGION", "us-east-1")
+    s3 = fs.S3FileSystem(
+        access_key=os.getenv("AWS_ACCESS_KEY_ID"),
+        secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        region=region,
+    )
+
+    marker = {
+        "dataset": prefix,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "phase": "large",
+        "total_spans": total_spans,
+        "total_bytes": total_bytes,
+    }
+
+    marker_path = f"{bucket}/_active_dataset.json"
+    with s3.open_output_stream(marker_path) as f:
+        f.write(json.dumps(marker).encode())
+
+    logger.info(f"Updated active dataset marker: s3://{bucket}/_active_dataset.json")
+    logger.info("Panel viz will auto-swap to large dataset on next poll")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate validation dataset for OTEL span visualization",
@@ -554,6 +583,15 @@ def main() -> None:
     logger.info(f"Total size: {progress['total_bytes'] / (1024**4):.3f} TiB")
     logger.info(f"Location: s3://{args.bucket}/{args.prefix}/spans/")
     logger.info("=" * 60)
+
+    # Update active dataset marker for panel-viz auto-swap
+    if len(progress.get("completed_batches", [])) == args.batches:
+        update_active_dataset(
+            bucket=args.bucket,
+            prefix=args.prefix,
+            total_spans=progress["total_spans"],
+            total_bytes=progress["total_bytes"],
+        )
 
 
 if __name__ == "__main__":

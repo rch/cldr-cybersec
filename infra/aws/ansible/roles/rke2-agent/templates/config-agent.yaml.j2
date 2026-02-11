@@ -1,8 +1,10 @@
 # RKE2 agent configuration
 # Connect directly to control plane for joining (not via load balancer)
-# groups['control_plane'][0] is the inventory hostname (IP address)
 server: https://{{ groups['control_plane'][0] }}:9345
-token: {{ hostvars[groups['control_plane'][0]]['rke2_cluster_token'] | default(rke2_token) }}
+token: {{ rke2_token }}
+
+# Use unique node ID suffix to avoid conflicts when replacing workers
+with-node-id: true
 
 node-label:
 {% for label in node_labels %}

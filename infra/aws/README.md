@@ -6,12 +6,13 @@ Deploy a production-grade Dask cluster with JupyterHub on RKE2 in AWS, with HTTP
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| Infrastructure | OpenTofu | VPC, EC2, IAM, Security Groups, S3 |
-| Configuration | Ansible | RKE2 installation, Dask, JupyterHub, ngrok |
+| Infrastructure | OpenTofu | VPC, EC2, IAM, Security Groups, S3, Cloudflare |
+| Configuration | Ansible | RKE2 installation, Dask, JupyterHub, cloudflared |
 | Kubernetes | RKE2 | Production-grade K8s distribution |
 | Compute | Dask | Distributed Python computing |
 | Notebooks | JupyterHub | Interactive notebook environment |
-| External Access | ngrok | HTTPS ingress with OAuth |
+| External Access | Cloudflare Zero Trust | HTTPS ingress with WARP device posture (recommended) |
+| External Access | ngrok | HTTPS ingress with OAuth (alternative) |
 
 ## Prerequisites
 
@@ -35,17 +36,22 @@ Deploy a production-grade Dask cluster with JupyterHub on RKE2 in AWS, with HTTP
    chmod 600 ~/.ssh/cybersec-key.pem
    ```
 
-### ngrok Setup (for external access)
+### Cloudflare Setup (recommended for external access)
+
+1. **Zero Trust Organization**: Enable Zero Trust at https://one.dash.cloudflare.com
+2. **API Token**: Create token with permissions:
+   - Zone: DNS Edit
+   - Account: Cloudflare Tunnel Edit
+   - Account: Access: Apps and Policies Edit
+3. **WARP Posture Rule**: Create in dashboard (see External Access section)
+4. **Split Tunnel**: Add service domains to Include list (see External Access section)
+5. **WARP Client**: Install on all access devices and enroll in your organization
+
+### ngrok Setup (alternative for external access)
 
 1. Create an ngrok account at https://ngrok.com
 2. Get your auth token from the dashboard
 3. Get your API key (for operator deployment)
-
-### Cloudflare Setup (optional, for custom domains)
-
-If using a custom domain with Cloudflare:
-1. Get your Cloudflare API token
-2. Configure your zone ID
 
 ---
 
@@ -315,16 +321,150 @@ Notebooks from `build/notebooks/` are deployed via ConfigMap:
 
 ---
 
-## External Access via ngrok
+## External Access
 
-### How It Works
+Two ingress options are available:
+- **Cloudflare Tunnel + Zero Trust** (recommended) — Secure by default, requires WARP enrollment
+- **ngrok** — Simpler setup, OAuth-based access control
+
+### Option 1: Cloudflare Tunnel + Zero Trust (Recommended)
+
+Cloudflare Tunnel provides secure external access with **device-based authentication** via WARP client enrollment in your Zero Trust organization.
+
+#### Architecture
+
+```
+┌─────────────────┐     ┌──────────────────────┐     ┌─────────────────────┐
+│  User Device    │────▶│  Cloudflare Edge     │────▶│  K8s Cluster        │
+│  (WARP Client)  │     │  (Zero Trust)        │     │  (cloudflared)      │
+│                 │     │                      │     │                     │
+│  ✓ Enrolled in  │     │  ✓ Device Posture    │     │  Services:          │
+│    Zero Trust   │     │    Check (WARP)      │     │  - Dask Dashboard   │
+│    Organization │     │  ✓ Access Policy     │     │  - JupyterHub       │
+│                 │     │                      │     │  - K8s Dashboard    │
+│  Traffic routed │     │  Allow if:           │     │  - Panel Viz        │
+│  via Split      │     │  - WARP connected    │     │                     │
+│  Tunnel Include │     │  - Posture check OK  │     │                     │
+└─────────────────┘     └──────────────────────┘     └─────────────────────┘
+```
+
+#### Prerequisites
+
+1. **Cloudflare Account** with Zero Trust enabled
+2. **API Token** with permissions:
+   - Zone: DNS Edit
+   - Account: Cloudflare Tunnel Edit
+   - Account: Access: Apps and Policies Edit
+   - Account: Access: Device Posture Edit (optional, for IaC)
+
+3. **WARP Device Posture Rule** (create manually in dashboard):
+   - Go to: **Team & Resources > Reusable Components > Posture Checks**
+   - Add: WARP client check
+   - Copy the rule ID from the URL
+
+4. **Split Tunnel Configuration** (add domains to Include list):
+   - Go to: **Team & Resources > Devices > Device profiles > Default > Split Tunnels**
+   - Mode: **Include IPs and domains**
+   - Add these domains:
+     - `dask.dev.aws.zndx.org`
+     - `jupyter.dev.aws.zndx.org`
+     - `k8s.dev.aws.zndx.org`
+     - `viz.dev.aws.zndx.org`
+
+#### Configuration
+
+```bash
+# Required environment variables
+export CLOUDFLARE_API_TOKEN="your-token"
+
+# In /tmp/cloudflare.tfvars (or add to your tfvars)
+cloudflare_account_id = "your-account-id"
+cloudflare_zone_id = "your-zone-id"
+ingress_provider = "cloudflare"
+cloudflare_warp_posture_rule_id = "your-posture-rule-id"  # From dashboard URL
+```
+
+#### Tofu Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ingress_provider` | Ingress method: `ngrok` or `cloudflare` | `ngrok` |
+| `cloudflare_account_id` | Cloudflare account ID | — |
+| `cloudflare_zone_id` | Zone ID for base domain | — |
+| `cloudflare_access_open` | `true` = public access (INSECURE) | `false` |
+| `cloudflare_warp_posture_rule_id` | WARP device posture rule ID | — |
+| `ingress_root_domain` | Root domain (e.g., `zndx.org`) | `zndx.org` |
+| `ingress_env_id` | Environment ID (e.g., `aws`) | `aws` |
+
+#### Resources Created
+
+When `ingress_provider = "cloudflare"`:
+
+| Resource | Purpose |
+|----------|---------|
+| `cloudflare_zero_trust_tunnel_cloudflared` | Tunnel connecting cluster to Cloudflare edge |
+| `cloudflare_zero_trust_tunnel_cloudflared_config` | Ingress rules routing to K8s services |
+| `cloudflare_record` (x4) | DNS CNAMEs for each service |
+| `cloudflare_zero_trust_access_application` | Access application protecting all services |
+| `cloudflare_zero_trust_access_policy` | Policy requiring WARP device posture |
+
+#### Service URLs
+
+| Service | URL |
+|---------|-----|
+| Dask Dashboard | `https://dask.dev.aws.zndx.org` |
+| JupyterHub | `https://jupyter.dev.aws.zndx.org` |
+| K8s Dashboard | `https://k8s.dev.aws.zndx.org` |
+| Panel Viz | `https://viz.dev.aws.zndx.org` |
+
+#### Access Modes
+
+**Secure (default)** — `cloudflare_access_open = false`
+- Requires WARP client connected and enrolled in Zero Trust org
+- Uses device posture check to verify WARP status
+- Traffic must be routed through WARP (split tunnel Include list)
+
+**Open (demos only)** — `cloudflare_access_open = true`
+- Anyone can access (still requires Cloudflare login)
+- ⚠️ **INSECURE** — use only for temporary demos
+
+#### Troubleshooting Cloudflare Access
+
+**403 Forbidden with `is_warp: false`**
+
+Traffic isn't routing through WARP. Fix:
+1. Ensure domains are in Split Tunnel **Include** list
+2. Wait 10 minutes for propagation to devices
+3. Reconnect WARP client
+
+Check error details:
+```bash
+curl -s "https://viz.dev.aws.zndx.org/" | grep -o 'value="[^"]*"' | tail -1 | \
+  sed 's/value="//' | sed 's/"$//' | \
+  python3 -c "import sys,html,json; print(json.dumps(json.loads(html.unescape(sys.stdin.read())), indent=2))"
+```
+
+**Device not enrolled**
+
+Ensure WARP client is:
+1. Installed and connected
+2. Enrolled in your Zero Trust organization (not just personal WARP)
+3. Visible in dashboard: **Team & Resources > Devices**
+
+---
+
+### Option 2: ngrok
+
+ngrok provides simpler setup with OAuth-based access control.
+
+#### How It Works
 
 1. **ngrok Operator** deploys as a Kubernetes controller
 2. **NgrokTrafficPolicy** CRD defines OAuth requirements
 3. **Ingress** routes traffic to JupyterHub service
 4. Users authenticate via GitHub/Google OAuth
 
-### Configuration
+#### Configuration
 
 ```yaml
 # ansible/group_vars/all.yml
@@ -332,7 +472,7 @@ ngrok_domain: "jupyter.yourdomain.org"  # Or use auto-generated
 ngrok_allowed_email: "user@company.com"
 ```
 
-### OAuth Providers
+#### OAuth Providers
 
 Supported providers:
 - GitHub
@@ -460,19 +600,21 @@ aws/
 ├── README.md                    # This file
 ├── tofu/
 │   ├── main.tf                  # Root module
-│   ├── variables.tf             # Input variables
+│   ├── variables.tf             # Input variables (incl. Cloudflare)
 │   ├── outputs.tf               # Terraform outputs
 │   ├── vpc.tf                   # VPC, subnets, NAT gateway
 │   ├── ec2.tf                   # EC2 instances
 │   ├── iam.tf                   # IAM roles and policies
 │   ├── s3.tf                    # S3 bucket
 │   ├── security.tf              # Security groups
+│   ├── cloudflare.tf            # Cloudflare Tunnel + Zero Trust Access
 │   └── terraform.tfvars.example # Example configuration
 └── ansible/
     ├── playbooks/
     │   ├── site.yml             # Main playbook (RKE2 + Dask)
     │   ├── dask-only.yml        # Dask operator only
-    │   └── jupyterhub.yml       # JupyterHub deployment
+    │   ├── jupyterhub.yml       # JupyterHub deployment
+    │   └── cloudflare-tunnel.yml # cloudflared deployment
     ├── roles/
     │   ├── rke2/                # RKE2 installation
     │   ├── dask/                # Dask operator and cluster
@@ -482,7 +624,8 @@ aws/
     │   │   ├── defaults/main.yml
     │   │   ├── tasks/main.yml
     │   │   └── templates/jupyterhub-values.yaml.j2
-    │   └── ngrok/               # ngrok operator
+    │   ├── ngrok/               # ngrok operator
+    │   └── cloudflare-tunnel/   # cloudflared connector
     ├── inventory/
     │   └── hosts                # Generated from tofu output
     └── group_vars/
@@ -522,4 +665,20 @@ devenv tasks run k8s:status
 
 4. **Network Isolation**: Workers have no direct internet access (NAT for outbound only).
 
-5. **OAuth**: ngrok enforces authentication before reaching JupyterHub.
+5. **Zero Trust Access (Cloudflare)**:
+   - **Secure by default**: Requires WARP client enrolled in your Zero Trust organization
+   - **Device posture**: Only devices passing WARP posture check can access services
+   - **No VPN needed**: WARP client provides seamless, always-on connectivity
+   - **Audit logging**: All access attempts logged in Cloudflare dashboard
+
+6. **OAuth (ngrok)**: ngrok enforces authentication before reaching JupyterHub.
+
+### Cloudflare Zero Trust vs ngrok
+
+| Aspect | Cloudflare Zero Trust | ngrok |
+|--------|----------------------|-------|
+| Auth method | Device posture (WARP enrollment) | OAuth (email/identity) |
+| Security model | Device-based (corporate-owned devices) | Identity-based (any device) |
+| Setup complexity | Higher (WARP enrollment, split tunnel) | Lower (OAuth config) |
+| Ongoing management | WARP client on all devices | None |
+| Best for | Corporate/team environments | Quick demos, external users |

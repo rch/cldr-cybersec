@@ -23,6 +23,7 @@ ngrok := input.services.ngrok
 cloudflare := input.services.cloudflare
 k8s := input.kubernetes
 developer := input.developer
+ingress_provider := input.ingress_provider
 
 # ==========================================================================
 # AWS Credential Validation
@@ -65,27 +66,30 @@ deny contains msg if {
 }
 
 # ==========================================================================
-# ngrok Credential Validation
+# ngrok Credential Validation (when ingress_provider == "ngrok")
 # ==========================================================================
 
-# Deny if ngrok auth token not set
+# Deny if ngrok auth token not set (when using ngrok)
 deny contains msg if {
+    ingress_provider == "ngrok"
     not ngrok.auth_token_set
     msg := "NGROK_AUTH_TOKEN not set. Required for exposing services. Get from: https://dashboard.ngrok.com/get-started/your-authtoken"
 }
 
-# Deny if ngrok API key not set
+# Deny if ngrok API key not set (when using ngrok)
 deny contains msg if {
+    ingress_provider == "ngrok"
     not ngrok.api_key_set
     msg := "NGROK_API_KEY not set. Required for ngrok Kubernetes operator. Get from: https://dashboard.ngrok.com/api"
 }
 
 # ==========================================================================
-# Cloudflare Validation (Optional but recommended)
+# Cloudflare Validation (for ngrok custom domains)
 # ==========================================================================
 
-# Warn if Cloudflare token not set
+# Warn if Cloudflare token not set when using ngrok with custom domains
 warn contains msg if {
+    ingress_provider == "ngrok"
     ngrok.credentials_complete
     not cloudflare.api_token_set
     msg := "CLOUDFLARE_API_TOKEN not set. Custom domains (dask.zndx.org, etc.) will not work."

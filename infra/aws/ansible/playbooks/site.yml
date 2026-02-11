@@ -50,6 +50,25 @@
   roles:
     - dask
 
+- name: Generate OTEL datasets
+  hosts: control_plane[0]
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+  roles:
+    - role: datagen
+      tags: [datagen]
+      when: datagen_enabled | default(true)
+
+- name: Deploy Panel visualization
+  hosts: control_plane[0]
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+  roles:
+    - role: panel-viz
+      tags: [panel-viz, viz]
+
 - name: Deploy JupyterHub
   hosts: control_plane[0]
   become: true
@@ -59,11 +78,18 @@
     - role: jupyterhub
       tags: [jupyterhub]
 
-- name: Configure ngrok tunnels
+- name: Configure ingress tunnels
   hosts: control_plane[0]
   become: true
   vars_files:
     - ../group_vars/all.yml
+  vars:
+    # Default to ngrok for backwards compatibility
+    ingress_provider: "{{ lookup('env', 'INGRESS_PROVIDER') | default('ngrok') }}"
   roles:
     - role: ngrok
-      tags: [ngrok]
+      when: ingress_provider == 'ngrok'
+      tags: [ngrok, ingress]
+    - role: cloudflare-tunnel
+      when: ingress_provider == 'cloudflare'
+      tags: [cloudflare, ingress]

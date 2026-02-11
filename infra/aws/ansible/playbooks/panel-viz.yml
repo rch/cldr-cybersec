@@ -1,0 +1,14 @@
+---
+# Deploy Panel Visualization service
+# Usage: ansible-playbook playbooks/panel-viz.yml
+
+- name: Deploy Panel Visualization
+  hosts: control_plane[0]
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+  roles:
+    - role: panel-viz
+      vars:
+        panel_ngrok_enabled: false
+      tags: [panel-viz, viz]

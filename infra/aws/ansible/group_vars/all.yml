@@ -14,7 +14,8 @@ aws_region: "us-east-1"
 rke2_version: "v1.34.3+rke2r1"
 
 # Dask configuration
-dask_worker_replicas: 64
-dask_worker_memory_limit: "8GB"
-dask_worker_memory_request: "12Gi"
+# 16 workers for 4x t3.xlarge nodes (4 workers per node @ 2Gi each)
+dask_worker_replicas: 16
+dask_worker_memory_limit: "4Gi"
+dask_worker_memory_request: "2Gi"
 dask_image: "ghcr.io/dask/dask:latest"

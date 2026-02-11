@@ -17,10 +17,11 @@ resource "aws_vpc" "main" {
 # -----------------------------------------------------------------------------
 
 # Private subnets - for RKE2 nodes (no direct internet access)
+# Uses computed CIDRs based on AZ count for regions with 2 or 3+ AZs
 resource "aws_subnet" "private" {
-  count             = length(var.private_subnet_cidrs)
+  count             = length(local.private_subnet_cidrs)
   vpc_id            = aws_vpc.main.id
-  cidr_block        = var.private_subnet_cidrs[count.index]
+  cidr_block        = local.private_subnet_cidrs[count.index]
   availability_zone = var.availability_zones[count.index]
 
   tags = merge(local.common_tags, {
@@ -32,9 +33,9 @@ resource "aws_subnet" "private" {
 
 # Public subnets - for bastion and NAT gateway
 resource "aws_subnet" "public" {
-  count                   = length(var.public_subnet_cidrs)
+  count                   = length(local.public_subnet_cidrs)
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnet_cidrs[count.index]
+  cidr_block              = local.public_subnet_cidrs[count.index]
   availability_zone       = var.availability_zones[count.index]
   map_public_ip_on_launch = true
 

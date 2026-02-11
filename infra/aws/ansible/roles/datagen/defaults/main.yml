@@ -1,0 +1,59 @@
+---
+# Datagen role defaults - two-phase dataset generation
+
+# Namespace for datagen jobs
+datagen_namespace: datagen
+
+# S3 bucket for data storage
+datagen_s3_bucket: "{{ lookup('env', 'OTEL_S3_BUCKET') | default('cybersec-dask-data', true) }}"
+
+# -------------------------------------------------------------------------
+# Minimal Dataset (Phase 1) - runs quickly, provides immediate data
+# -------------------------------------------------------------------------
+
+datagen_minimal_span_count: 100000
+datagen_minimal_services: 5
+datagen_minimal_duration_hours: 24
+datagen_minimal_s3_prefix: "otel-minimal"
+
+# Resource limits for minimal job (completes in ~1 minute)
+datagen_minimal_memory_limit: "4Gi"
+datagen_minimal_cpu_limit: "2"
+
+# -------------------------------------------------------------------------
+# Large Dataset (Phase 2) - runs asynchronously for hours
+# -------------------------------------------------------------------------
+
+# For full TB+ validation dataset: batches=150, spans_per_batch=100000000
+# For smaller validation (fits on limited clusters):
+datagen_large_batches: 10
+datagen_large_spans_per_batch: 10000000  # 10M per batch = 100M total (~10 GiB)
+datagen_large_s3_prefix: "otel-large"
+datagen_large_duration_days: 7
+
+# Resource limits for large job
+# Note: Reduce these if cluster has limited resources
+datagen_large_memory_limit: "8Gi"
+datagen_large_cpu_limit: "2"
+
+# Maximum runtime for large job (24 hours)
+datagen_large_deadline_seconds: 86400
+
+# -------------------------------------------------------------------------
+# Common Configuration
+# -------------------------------------------------------------------------
+
+# AWS credentials (from environment or AWS CLI config)
+datagen_aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') | default(lookup('ini', 'aws_access_key_id', section='default', file='~/.aws/credentials', errors='ignore'), true) }}"
+datagen_aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') | default(lookup('ini', 'aws_secret_access_key', section='default', file='~/.aws/credentials', errors='ignore'), true) }}"
+datagen_aws_region: "{{ lookup('env', 'AWS_REGION') | default('us-east-1', true) }}"
+
+# Container image for datagen jobs
+datagen_image: "ghcr.io/dask/dask:latest"
+
+# Control which datasets to generate
+datagen_minimal_enabled: true
+datagen_large_enabled: true
+
+# Wait for minimal dataset before continuing (recommended for viz deployment)
+datagen_wait_for_minimal: true

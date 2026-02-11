@@ -1,0 +1,227 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: datagen-minimal
+  namespace: {{ datagen_namespace }}
+  labels:
+    app: datagen
+    phase: minimal
+spec:
+  # Auto-cleanup after 1 hour
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: datagen
+        phase: minimal
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: datagen
+          image: "{{ datagen_image }}"
+          imagePullPolicy: IfNotPresent
+          command:
+            - "python"
+            - "-c"
+          args:
+            - |
+              """Generate minimal OTEL dataset for immediate visualization."""
+              import json
+              import os
+              import random
+              import time
+              import uuid
+              from datetime import datetime, timedelta, timezone
+
+              import pyarrow as pa
+              import pyarrow.parquet as pq
+              from pyarrow import fs
+
+              print("=" * 60)
+              print("OTEL Minimal Dataset Generator")
+              print("=" * 60)
+              print(f"Target: s3://{{ datagen_s3_bucket }}/{{ datagen_minimal_s3_prefix }}/")
+              print(f"Spans: {{ datagen_minimal_span_count }}")
+              print(f"Services: {{ datagen_minimal_services }}")
+              print(f"Duration: {{ datagen_minimal_duration_hours }} hours")
+              print("=" * 60)
+
+              # Schema (matches generate_validation_dataset.py)
+              _span_kind_dict = pa.dictionary(pa.int8(), pa.string())
+              _status_code_dict = pa.dictionary(pa.int8(), pa.string())
+
+              SPANS_SCHEMA = pa.schema([
+                  pa.field("trace_id", pa.string(), nullable=False),
+                  pa.field("span_id", pa.string(), nullable=False),
+                  pa.field("parent_span_id", pa.string(), nullable=True),
+                  pa.field("start_time_unix_nano", pa.int64(), nullable=False),
+                  pa.field("end_time_unix_nano", pa.int64(), nullable=False),
+                  pa.field("duration_ns", pa.int64(), nullable=False),
+                  pa.field("name", pa.string(), nullable=False),
+                  pa.field("kind", _span_kind_dict, nullable=False),
+                  pa.field("status_code", _status_code_dict, nullable=False),
+                  pa.field("status_message", pa.string(), nullable=True),
+                  pa.field("service_name", pa.string(), nullable=False),
+                  pa.field("service_namespace", pa.string(), nullable=True),
+                  pa.field("service_version", pa.string(), nullable=True),
+                  pa.field("host_name", pa.string(), nullable=True),
+                  pa.field("host_ip", pa.string(), nullable=True),
+                  pa.field("attributes_json", pa.string(), nullable=True),
+                  pa.field("resource_attributes_json", pa.string(), nullable=True),
+                  pa.field("http_method", pa.string(), nullable=True),
+                  pa.field("http_status_code", pa.int16(), nullable=True),
+                  pa.field("http_url", pa.string(), nullable=True),
+                  pa.field("http_route", pa.string(), nullable=True),
+                  pa.field("http_target", pa.string(), nullable=True),
+                  pa.field("db_system", pa.string(), nullable=True),
+                  pa.field("db_name", pa.string(), nullable=True),
+                  pa.field("db_operation", pa.string(), nullable=True),
+                  pa.field("db_statement", pa.string(), nullable=True),
+                  pa.field("rpc_system", pa.string(), nullable=True),
+                  pa.field("rpc_service", pa.string(), nullable=True),
+                  pa.field("rpc_method", pa.string(), nullable=True),
+                  pa.field("messaging_system", pa.string(), nullable=True),
+                  pa.field("messaging_destination", pa.string(), nullable=True),
+                  pa.field("messaging_operation", pa.string(), nullable=True),
+                  pa.field("exception_type", pa.string(), nullable=True),
+                  pa.field("exception_message", pa.string(), nullable=True),
+                  pa.field("events_count", pa.int32(), nullable=True),
+                  pa.field("links_count", pa.int32(), nullable=True),
+              ])
+
+              SERVICE_TEMPLATES = [
+                  {"name": "api-gateway", "kind": "SERVER", "operations": ["HTTP request", "route"]},
+                  {"name": "auth-service", "kind": "SERVER", "operations": ["validate_token", "login"]},
+                  {"name": "user-service", "kind": "SERVER", "operations": ["get_user", "update_user"]},
+                  {"name": "order-service", "kind": "SERVER", "operations": ["create_order", "get_order"]},
+                  {"name": "database", "kind": "CLIENT", "operations": ["SELECT", "INSERT"]},
+              ][:{{ datagen_minimal_services }}]
+
+              HTTP_METHODS = ["GET", "POST", "PUT", "DELETE"]
+              HTTP_ROUTES = ["/api/users", "/api/orders", "/api/auth/login", "/api/health"]
+              HTTP_STATUS_CODES = [200, 200, 200, 201, 400, 500]
+
+              # Initialize S3
+              s3 = fs.S3FileSystem(
+                  access_key=os.environ["AWS_ACCESS_KEY_ID"],
+                  secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+                  region=os.environ.get("AWS_REGION", "us-east-1"),
+              )
+              base_path = "{{ datagen_s3_bucket }}/{{ datagen_minimal_s3_prefix }}"
+
+              # Time range
+              end_time = datetime.now(timezone.utc)
+              start_time = end_time - timedelta(hours={{ datagen_minimal_duration_hours }})
+              time_range_ns = {{ datagen_minimal_duration_hours }} * 3600 * 1_000_000_000
+              start_ns = int(start_time.timestamp() * 1_000_000_000)
+
+              spans = []
+              print(f"Generating {{ datagen_minimal_span_count }} spans...")
+
+              for i in range({{ datagen_minimal_span_count }}):
+                  offset_ns = random.randint(0, time_range_ns)
+                  span_start_ns = start_ns + offset_ns
+                  duration_ns = int(random.expovariate(1 / 50_000_000))
+                  duration_ns = max(1_000_000, min(duration_ns, 30_000_000_000))
+                  span_end_ns = span_start_ns + duration_ns
+
+                  service = random.choice(SERVICE_TEMPLATES)
+                  operation = random.choice(service["operations"])
+                  is_error = random.random() < 0.05
+
+                  http_method = random.choice(HTTP_METHODS) if service["kind"] == "SERVER" else None
+                  http_route = random.choice(HTTP_ROUTES) if service["kind"] == "SERVER" else None
+                  http_status = random.choice(HTTP_STATUS_CODES) if service["kind"] == "SERVER" else None
+
+                  dt = datetime.fromtimestamp(span_start_ns / 1_000_000_000, tz=timezone.utc)
+
+                  spans.append({
+                      "trace_id": uuid.uuid4().hex,
+                      "span_id": uuid.uuid4().hex[:16],
+                      "parent_span_id": None,
+                      "start_time_unix_nano": span_start_ns,
+                      "end_time_unix_nano": span_end_ns,
+                      "duration_ns": duration_ns,
+                      "name": operation,
+                      "kind": service["kind"],
+                      "status_code": "ERROR" if is_error else "OK",
+                      "status_message": "Error occurred" if is_error else None,
+                      "service_name": service["name"],
+                      "service_namespace": "production",
+                      "service_version": "1.0.0",
+                      "host_name": f"{service['name']}-{random.randint(1, 5)}.example.com",
+                      "host_ip": f"10.0.{random.randint(1, 255)}.{random.randint(1, 255)}",
+                      "attributes_json": json.dumps({"service.name": service["name"]}),
+                      "resource_attributes_json": json.dumps({}),
+                      "http_method": http_method,
+                      "http_status_code": http_status,
+                      "http_url": f"https://api.example.com{http_route}" if http_route else None,
+                      "http_route": http_route,
+                      "http_target": None,
+                      "db_system": "postgresql" if service["kind"] == "CLIENT" else None,
+                      "db_name": "production" if service["kind"] == "CLIENT" else None,
+                      "db_operation": operation if service["kind"] == "CLIENT" else None,
+                      "db_statement": None,
+                      "rpc_system": None,
+                      "rpc_service": None,
+                      "rpc_method": None,
+                      "messaging_system": None,
+                      "messaging_destination": None,
+                      "messaging_operation": None,
+                      "exception_type": "RuntimeError" if is_error else None,
+                      "exception_message": "Something went wrong" if is_error else None,
+                      "events_count": random.randint(0, 3),
+                      "links_count": 0,
+                      "_date": dt.date(),
+                      "_hour": dt.hour,
+                  })
+
+                  if (i + 1) % 10000 == 0:
+                      print(f"  Generated {i + 1:,} spans")
+
+              print(f"Generated {len(spans):,} spans, writing to S3...")
+
+              # Group by partition and write
+              partitions = {}
+              for span in spans:
+                  key = (span.pop("_date"), span.pop("_hour"))
+                  partitions.setdefault(key, []).append(span)
+
+              files_written = 0
+              total_bytes = 0
+
+              for (date_val, hour_val), partition_spans in partitions.items():
+                  output_dir = f"{base_path}/spans/date={date_val.isoformat()}/hour={hour_val:02d}"
+                  try:
+                      s3.create_dir(output_dir)
+                  except:
+                      pass
+
+                  file_path = f"{output_dir}/minimal_{uuid.uuid4().hex[:8]}.parquet"
+                  table = pa.Table.from_pylist(partition_spans, schema=SPANS_SCHEMA)
+                  pq.write_table(table, file_path, filesystem=s3, compression="snappy")
+
+                  try:
+                      info = s3.get_file_info(file_path)
+                      total_bytes += info.size
+                  except:
+                      pass
+                  files_written += 1
+
+              print("=" * 60)
+              print("Generation Complete!")
+              print(f"Files: {files_written}")
+              print(f"Size: {total_bytes / (1024**2):.2f} MiB")
+              print(f"Location: s3://{{ datagen_s3_bucket }}/{{ datagen_minimal_s3_prefix }}/spans/")
+              print("=" * 60)
+          envFrom:
+            - secretRef:
+                name: datagen-aws-credentials
+          resources:
+            limits:
+              memory: "{{ datagen_minimal_memory_limit }}"
+              cpu: "{{ datagen_minimal_cpu_limit }}"
+            requests:
+              memory: "1Gi"
+              cpu: "500m"

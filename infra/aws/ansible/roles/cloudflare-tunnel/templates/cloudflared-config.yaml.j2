@@ -1,0 +1,53 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudflared-config
+  namespace: {{ cloudflare_tunnel_namespace }}
+  labels:
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/component: tunnel
+data:
+  config.yaml: |
+    # Cloudflare Tunnel configuration
+    # Routes traffic from Cloudflare edge to K8s services
+    tunnel: {{ cloudflare_tunnel_id }}
+    credentials-file: /etc/cloudflared/creds/credentials.json
+    metrics: 0.0.0.0:{{ cloudflared_metrics_port }}
+    no-autoupdate: true
+
+    # Ingress rules map hostnames to backend services
+    ingress:
+      # Dask Dashboard
+      - hostname: {{ cf_dask_domain }}
+        service: http://{{ dask_dashboard_service_name }}.{{ dask_dashboard_service_namespace }}.svc.cluster.local:{{ dask_dashboard_service_port }}
+        originRequest:
+          connectTimeout: 30s
+          noTLSVerify: false
+
+      # JupyterHub
+      - hostname: {{ cf_jupyterhub_domain }}
+        service: http://{{ jupyterhub_service_name }}.{{ jupyterhub_service_namespace }}.svc.cluster.local:{{ jupyterhub_service_port }}
+        originRequest:
+          connectTimeout: 30s
+          noTLSVerify: false
+          # JupyterHub uses websockets for terminal/notebook
+          httpHostHeader: {{ cf_jupyterhub_domain }}
+
+      # Kubernetes Dashboard (HTTPS backend)
+      - hostname: {{ cf_k8s_dashboard_domain }}
+        service: https://{{ k8s_dashboard_service_name }}.{{ k8s_dashboard_service_namespace }}.svc.cluster.local:{{ k8s_dashboard_service_port }}
+        originRequest:
+          connectTimeout: 30s
+          # K8s dashboard uses self-signed cert
+          noTLSVerify: true
+
+      # Panel Visualization
+      - hostname: {{ cf_viz_domain }}
+        service: http://{{ panel_viz_service_name }}.{{ panel_viz_service_namespace }}.svc.cluster.local:{{ panel_viz_service_port }}
+        originRequest:
+          connectTimeout: 30s
+          noTLSVerify: false
+
+      # Catch-all: return 404 for unmatched requests
+      - service: http_status:404

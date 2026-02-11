@@ -131,7 +131,8 @@ check_nodes() {
 
 check_dask_operator() {
     local kubectl="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
-    local pods=$(run_remote "$kubectl get pods -n dask-operator --no-headers 2>/dev/null" || echo "")
+    # Operator is deployed in 'dask' namespace, not 'dask-operator'
+    local pods=$(run_remote "$kubectl get pods -n dask -l app.kubernetes.io/name=dask-kubernetes-operator --no-headers 2>/dev/null" || echo "")
 
     if [ -z "$pods" ]; then
         echo -e "  ${YELLOW}○${NC} Dask Operator (not deployed)"

@@ -1,0 +1,124 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: {{ cloudflare_tunnel_namespace }}
+  labels:
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/component: tunnel
+    app.kubernetes.io/version: "{{ cloudflared_version }}"
+spec:
+  replicas: {{ cloudflared_replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudflared
+        app.kubernetes.io/component: tunnel
+      annotations:
+        # Force pod restart when config changes
+        checksum/config: "{% raw %}{{ include (print $.Template.BasePath '/cloudflared-config.yaml.j2') . | sha256sum }}{% endraw %}"
+    spec:
+      # Run as non-root
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+
+      containers:
+        - name: cloudflared
+          image: {{ cloudflared_image }}:{{ cloudflared_version }}
+          imagePullPolicy: IfNotPresent
+
+          args:
+            - tunnel
+            # Use token-based auth (simpler than credentials file)
+            - --no-autoupdate
+            # Use HTTP/2 instead of QUIC to avoid UDP buffer size issues
+            - --protocol
+            - http2
+            - --metrics
+            - 0.0.0.0:{{ cloudflared_metrics_port }}
+            - run
+            - --token
+            - $(TUNNEL_TOKEN)
+
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflared-credentials
+                  key: TUNNEL_TOKEN
+
+          ports:
+            - name: metrics
+              containerPort: {{ cloudflared_metrics_port }}
+              protocol: TCP
+
+          livenessProbe:
+            httpGet:
+              path: {{ cloudflared_liveness_path }}
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: {{ cloudflared_liveness_path }}
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cloudflared/config
+              readOnly: true
+
+      volumes:
+        - name: config
+          configMap:
+            name: cloudflared-config
+
+      # Spread pods across nodes for HA
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: cloudflared
+                topologyKey: kubernetes.io/hostname
+
+      # Tolerate control-plane taint if needed
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule

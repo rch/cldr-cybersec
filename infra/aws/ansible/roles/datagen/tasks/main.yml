@@ -1,0 +1,95 @@
+---
+# Datagen role - two-phase dataset generation for OTEL visualization
+
+- name: Create datagen namespace
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ datagen_namespace }}"
+
+- name: Create AWS credentials secret
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: datagen-aws-credentials
+        namespace: "{{ datagen_namespace }}"
+      type: Opaque
+      stringData:
+        AWS_ACCESS_KEY_ID: "{{ datagen_aws_access_key_id }}"
+        AWS_SECRET_ACCESS_KEY: "{{ datagen_aws_secret_access_key }}"
+        AWS_REGION: "{{ datagen_aws_region }}"
+
+# -------------------------------------------------------------------------
+# Phase 1: Minimal Dataset (quick, synchronous)
+# -------------------------------------------------------------------------
+
+- name: Deploy minimal datagen job
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'minimal-job.yaml.j2') | from_yaml }}"
+  when: datagen_minimal_enabled | default(true)
+
+- name: Wait for minimal datagen job to complete
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kind: Job
+    namespace: "{{ datagen_namespace }}"
+    name: datagen-minimal
+  register: minimal_job
+  until: >
+    (minimal_job.resources | length > 0) and
+    (minimal_job.resources[0].status.succeeded | default(0) >= 1 or
+     minimal_job.resources[0].status.failed | default(0) >= 1)
+  retries: 60
+  delay: 10
+  when:
+    - datagen_minimal_enabled | default(true)
+    - datagen_wait_for_minimal | default(true)
+
+- name: Check minimal job status
+  ansible.builtin.debug:
+    msg: >
+      Minimal datagen job {{ 'succeeded' if (minimal_job.resources[0].status.succeeded | default(0)) >= 1 else 'failed' }}.
+      Generated {{ datagen_minimal_span_count }} spans to s3://{{ datagen_s3_bucket }}/{{ datagen_minimal_s3_prefix }}/
+  when:
+    - datagen_minimal_enabled | default(true)
+    - datagen_wait_for_minimal | default(true)
+
+- name: Write initial active dataset marker to S3
+  ansible.builtin.shell: |
+    export AWS_ACCESS_KEY_ID="{{ datagen_aws_access_key_id }}"
+    export AWS_SECRET_ACCESS_KEY="{{ datagen_aws_secret_access_key }}"
+    export AWS_REGION="{{ datagen_aws_region }}"
+    echo '{"dataset": "{{ datagen_minimal_s3_prefix }}", "updated_at": "'$(date -Iseconds)'", "phase": "minimal"}' | \
+      aws s3 cp - s3://{{ datagen_s3_bucket }}/_active_dataset.json
+  delegate_to: localhost
+  become: false
+  when: datagen_minimal_enabled | default(true)
+
+# -------------------------------------------------------------------------
+# Phase 2: Large Dataset (async, runs in background)
+# -------------------------------------------------------------------------
+
+- name: Deploy large datagen job (async)
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: present
+    definition: "{{ lookup('template', 'large-job.yaml.j2') | from_yaml }}"
+  when: datagen_large_enabled | default(true)
+
+- name: Large datagen job started
+  ansible.builtin.debug:
+    msg: >
+      Large datagen job started asynchronously.
+      Target: {{ datagen_large_batches }} batches x {{ datagen_large_spans_per_batch }} spans = ~{{ (datagen_large_batches * datagen_large_spans_per_batch / 1000000000) | round(1) }}B spans.
+      Monitor with: kubectl logs -f job/datagen-large -n {{ datagen_namespace }}
+  when: datagen_large_enabled | default(true)

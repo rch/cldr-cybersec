@@ -1,0 +1,57 @@
+---
+# Cloudflare Tunnel defaults
+#
+# Deploys cloudflared to connect K8s services to Cloudflare Tunnel.
+# Uses Zero Trust Access for authentication (WARP device requirement).
+
+# Namespace for cloudflared deployment
+cloudflare_tunnel_namespace: cloudflare-system
+
+# Tunnel credentials (from OpenTofu output)
+# Set via environment: CLOUDFLARE_TUNNEL_TOKEN
+cloudflare_tunnel_token: "{{ lookup('env', 'CLOUDFLARE_TUNNEL_TOKEN') }}"
+
+# Tunnel ID (from OpenTofu output, used in config)
+cloudflare_tunnel_id: "{{ lookup('env', 'CLOUDFLARE_TUNNEL_ID') }}"
+
+# cloudflared image configuration
+cloudflared_image: "cloudflare/cloudflared"
+cloudflared_version: "2026.2.0"
+cloudflared_replicas: 2
+
+# Domain configuration
+# ingress_env_id: 'aws' for AWS deployments, 'cldr' for Cloudera, etc.
+ingress_env_id: "{{ lookup('env', 'INGRESS_ENV_ID') | default('aws', true) }}"
+ingress_root_domain: "zndx.org"
+ingress_base_domain: "dev.{{ ingress_env_id }}.{{ ingress_root_domain }}"
+
+# Custom domains (computed from base domain)
+cf_dask_domain: "dask.{{ ingress_base_domain }}"
+cf_jupyterhub_domain: "jupyter.{{ ingress_base_domain }}"
+cf_k8s_dashboard_domain: "k8s.{{ ingress_base_domain }}"
+cf_viz_domain: "viz.{{ ingress_base_domain }}"
+
+# Service references (same as ngrok role)
+# K8s Dashboard service
+k8s_dashboard_service_name: kubernetes-dashboard
+k8s_dashboard_service_namespace: kubernetes-dashboard
+k8s_dashboard_service_port: 443
+
+# Dask Dashboard service
+dask_dashboard_service_name: "{{ dask_cluster_name | default('simple') }}-scheduler"
+dask_dashboard_service_namespace: "{{ dask_namespace | default('dask') }}"
+dask_dashboard_service_port: 8787
+
+# JupyterHub service
+jupyterhub_service_name: proxy-public
+jupyterhub_service_namespace: jupyterhub
+jupyterhub_service_port: 80
+
+# Panel Visualization service
+panel_viz_service_name: panel-viz
+panel_viz_service_namespace: panel-viz
+panel_viz_service_port: 80
+
+# Health check configuration
+cloudflared_liveness_path: /ready
+cloudflared_metrics_port: 2000

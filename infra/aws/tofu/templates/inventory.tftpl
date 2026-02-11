@@ -19,5 +19,6 @@ control_plane
 workers
 
 [all:vars]
-ansible_ssh_common_args='-o ProxyJump=ec2-user@${bastion_ip} -o StrictHostKeyChecking=no'
+ansible_ssh_private_key_file=~/.ssh/${ssh_key_name}.pem
+ansible_ssh_common_args='-o ProxyCommand="ssh -i ~/.ssh/${ssh_key_name}.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@${bastion_ip}" -o StrictHostKeyChecking=no'
 k8s_api_endpoint=${k8s_api_endpoint}

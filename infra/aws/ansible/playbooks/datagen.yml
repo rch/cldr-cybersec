@@ -1,0 +1,26 @@
+---
+# Generate OTEL datasets for visualization
+#
+# Two-phase generation:
+#   1. Minimal dataset (~100K spans) - completes in ~1 minute, provides immediate data
+#   2. Large dataset (TB+) - runs asynchronously for hours, auto-swaps when complete
+#
+# Usage:
+#   ansible-playbook playbooks/datagen.yml
+#
+# Options:
+#   --skip-tags large    # Skip large dataset generation
+#   --tags minimal       # Only generate minimal dataset
+#   -e datagen_minimal_span_count=50000  # Override span count
+#
+# Monitor large job:
+#   kubectl logs -f job/datagen-large -n datagen
+
+- name: Generate OTEL datasets
+  hosts: control_plane[0]
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+  roles:
+    - role: datagen
+      tags: [datagen]
