@@ -218,3 +218,6 @@ kube-state
 kubeconfig
 kubeconfig-dashboard
 process-compose-postgress-err.txt
+
+# Generated Ansible inventory (contains environment-specific IPs)
+infra/aws/ansible/inventory/hosts
