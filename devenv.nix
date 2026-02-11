@@ -695,6 +695,21 @@ PY
       echo "AWS Account: $ACCOUNT_ID"
       echo ""
 
+      # Get region from environment or AWS config
+      REGION="''${AWS_REGION:-$(aws configure get region 2>/dev/null || echo "us-east-1")}"
+      KEY_NAME="cybersec-dask-$PREFIX"
+
+      # Export TF variables required for plan
+      export TF_VAR_developer_prefix="$PREFIX"
+      export TF_VAR_developer_email="$EMAIL"
+      export TF_VAR_ssh_key_name="$KEY_NAME"
+      export TF_VAR_aws_region="$REGION"
+
+      # Ingress provider settings
+      export TF_VAR_ingress_provider="''${INGRESS_PROVIDER:-cloudflare}"
+      export TF_VAR_cloudflare_account_id="''${CLOUDFLARE_ACCOUNT_ID:-}"
+      export TF_VAR_cloudflare_zone_id="''${CLOUDFLARE_ZONE_ID:-}"
+
       # Get bucket name from Tofu state
       BUCKET_NAME=$(tofu output -raw s3_bucket_name 2>/dev/null || echo "")
       OBJECT_COUNT=0
@@ -718,7 +733,7 @@ PY
 
       # Generate destroy plan for policy validation
       echo "Generating destroy plan..."
-      tofu plan -destroy -var "ssh_key_name=cybersec-dask-$PREFIX" -out=destroy.tfplan
+      tofu plan -destroy -out=destroy.tfplan
       tofu show -json destroy.tfplan > destroy.tfplan.json
 
       # Create policy input with plan and S3 context
@@ -776,9 +791,26 @@ PY
         echo "  ✅ S3 bucket emptied"
       fi
 
-      # Step 2: Destroy infrastructure
+      # Step 2: Clean up RKE2-created resources not managed by Tofu
       echo ""
-      echo "Step 2/2: Destroying infrastructure with Tofu..."
+      echo "Step 2/3: Cleaning up RKE2-created resources..."
+
+      # Delete NLB created by RKE2 (blocks subnet deletion if not removed)
+      NLB_NAME="cybersec-dask-k8s-api"
+      NLB_ARN=$(aws elbv2 describe-load-balancers --names "$NLB_NAME" --region "$REGION" --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null || echo "")
+      if [ -n "$NLB_ARN" ] && [ "$NLB_ARN" != "None" ]; then
+        echo "  Deleting NLB: $NLB_NAME"
+        aws elbv2 delete-load-balancer --load-balancer-arn "$NLB_ARN" --region "$REGION"
+        echo "  Waiting for NLB deletion (up to 2 min)..."
+        aws elbv2 wait load-balancers-deleted --load-balancer-arns "$NLB_ARN" --region "$REGION" 2>/dev/null || sleep 30
+        echo "  ✅ NLB deleted"
+      else
+        echo "  No RKE2 NLB found (already deleted or not created)"
+      fi
+
+      # Step 3: Destroy infrastructure
+      echo ""
+      echo "Step 3/3: Destroying infrastructure with Tofu..."
       tofu destroy -auto-approve
 
       # Cleanup temporary files
