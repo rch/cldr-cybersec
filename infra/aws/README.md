@@ -30,10 +30,14 @@ Deploy a production-grade Dask cluster with JupyterHub on RKE2 in AWS, with HTTP
    - IAM (roles, policies)
    - S3 (buckets)
 
-3. SSH key pair created in AWS:
+3. SSH key pair (automatically managed):
    ```bash
-   aws ec2 create-key-pair --key-name cybersec-key --query 'KeyMaterial' --output text > ~/.ssh/cybersec-key.pem
-   chmod 600 ~/.ssh/cybersec-key.pem
+   # The automation handles SSH key creation automatically.
+   # It creates: ~/.ssh/cybersec-dask.pem (local)
+   # And in AWS: cybersec-dask-<your-prefix> (per-developer isolation)
+
+   # To manually ensure the key pair exists:
+   devenv tasks run aws:keypair:ensure
    ```
 
 ### Cloudflare Setup (recommended for external access)
