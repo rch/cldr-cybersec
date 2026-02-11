@@ -238,6 +238,7 @@ async def cmd_aws_preflight(cmd: ParsedCommand) -> CommandResult:
 
     Checks resource quotas to fail fast before deployment starts.
     This prevents partial deployments that fail mid-way due to quota limits.
+    Also checks for existing resources owned by the developer.
 
     Usage:
         /aws preflight              Check quotas in configured region
@@ -249,7 +250,8 @@ async def cmd_aws_preflight(cmd: ParsedCommand) -> CommandResult:
         --json, -j  Output as JSON
     """
     from ..bootstrap.config import SettingsManager
-    from ..aws.quota import check_deployment_quotas, list_eips
+    from ..bootstrap.identity import get_developer_email
+    from ..aws.quota import check_deployment_quotas, list_eips, find_owned_resources
 
     settings = SettingsManager()
     config = settings.load()
@@ -312,6 +314,15 @@ async def cmd_aws_preflight(cmd: ParsedCommand) -> CommandResult:
         profile=config.aws_profile,
     )
 
+    # Check for existing resources owned by this developer
+    email = get_developer_email(config)
+    owned = await find_owned_resources(
+        region=region,
+        owner_email=email,
+        project=config.aws_project,
+        profile=config.aws_profile,
+    )
+
     data = {
         "success": result.success,
         "region": result.region,
@@ -336,12 +347,32 @@ async def cmd_aws_preflight(cmd: ParsedCommand) -> CommandResult:
         ],
         "errors": result.errors,
         "warnings": result.warnings,
+        "owned_resources": {
+            "owner": owned.owner_email,
+            "project": owned.project,
+            "count": owned.resource_count,
+            "resources": [
+                {
+                    "type": r.resource_type,
+                    "id": r.resource_id,
+                    "name": r.name,
+                    "state": r.state,
+                    "details": r.details,
+                }
+                for r in owned.resources
+            ],
+        },
     }
+
+    # Combine reports
+    formatted = result.format_report()
+    if owned.has_resources:
+        formatted += "\n\n" + owned.format_report()
 
     return CommandResult(
         success=result.success,
         data=data,
-        formatted=result.format_report(),
+        formatted=formatted,
     )
 
 

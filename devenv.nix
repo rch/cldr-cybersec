@@ -442,6 +442,18 @@ PY
         sleep 30
       done
       wait "$PLAN_PID"
+      PLAN_EXIT=$?
+
+      if [ "$PLAN_EXIT" -ne 0 ]; then
+        echo ""
+        echo "❌ tofu plan failed."
+        echo ""
+        echo "If you see 'Inconsistent dependency lock file', run:"
+        echo "   cd infra/aws/tofu && tofu init -upgrade"
+        echo ""
+        echo "Then retry: devenv tasks run aws:provision"
+        exit 1
+      fi
 
       # Generate JSON plan for policy validation
       echo ""

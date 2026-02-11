@@ -588,3 +588,310 @@ async def list_eips(
 
     except Exception:
         return []
+
+
+@dataclass
+class OwnedResource:
+    """Information about a resource owned by the developer."""
+
+    resource_type: str
+    resource_id: str
+    name: str
+    region: str
+    tags: dict[str, str]
+    state: str = ""
+    details: str = ""
+
+    @property
+    def display_name(self) -> str:
+        """Get display name for the resource."""
+        return self.name or self.resource_id
+
+
+@dataclass
+class OwnedResourcesResult:
+    """Result from finding owned resources."""
+
+    success: bool
+    owner_email: str
+    project: str
+    region: str
+    resources: list[OwnedResource]
+    errors: list[str]
+
+    @property
+    def has_resources(self) -> bool:
+        """Check if any resources were found."""
+        return len(self.resources) > 0
+
+    @property
+    def resource_count(self) -> int:
+        """Get total resource count."""
+        return len(self.resources)
+
+    @property
+    def resources_by_type(self) -> dict[str, list[OwnedResource]]:
+        """Group resources by type."""
+        result: dict[str, list[OwnedResource]] = {}
+        for r in self.resources:
+            if r.resource_type not in result:
+                result[r.resource_type] = []
+            result[r.resource_type].append(r)
+        return result
+
+    def format_report(self) -> str:
+        """Format a human-readable report."""
+        lines = [
+            f"Existing Resources Owned by {self.owner_email}",
+            "=" * 60,
+            f"Project: {self.project}",
+            f"Region:  {self.region}",
+            "",
+        ]
+
+        if not self.has_resources:
+            lines.append("No existing resources found.")
+            return "\n".join(lines)
+
+        lines.append(f"Found {self.resource_count} resource(s):")
+        lines.append("")
+
+        by_type = self.resources_by_type
+        for rtype, resources in sorted(by_type.items()):
+            lines.append(f"  {rtype} ({len(resources)}):")
+            for r in resources:
+                state_str = f" [{r.state}]" if r.state else ""
+                details_str = f" - {r.details}" if r.details else ""
+                lines.append(f"    - {r.display_name}{state_str}{details_str}")
+            lines.append("")
+
+        lines.append("REMINDER: These resources may incur costs.")
+        lines.append("Run 'devenv tasks run aws:teardown' to clean up.")
+
+        return "\n".join(lines)
+
+
+def _run_aws_cmd(cmd: list[str], timeout: int = 30) -> dict[str, Any] | None:
+    """Run an AWS CLI command and return JSON result."""
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if proc.returncode != 0:
+            return None
+        return json.loads(proc.stdout)
+    except Exception:
+        return None
+
+
+async def find_owned_resources(
+    region: str,
+    owner_email: str,
+    project: str = "cybersec-dask",
+    profile: str | None = None,
+) -> OwnedResourcesResult:
+    """Find AWS resources owned by the developer.
+
+    Searches for resources with matching tags:
+    - ManagedBy=opentofu
+    - Owner=<owner_email>
+    - Project=<project>
+
+    Args:
+        region: AWS region to search
+        owner_email: Developer email (Owner tag value)
+        project: Project name (Project tag value)
+        profile: Optional AWS profile
+
+    Returns:
+        OwnedResourcesResult with found resources
+    """
+    result = OwnedResourcesResult(
+        success=True,
+        owner_email=owner_email,
+        project=project,
+        region=region,
+        resources=[],
+        errors=[],
+    )
+
+    base_cmd = ["aws", "--region", region, "--output", "json"]
+    if profile:
+        base_cmd.extend(["--profile", profile])
+
+    # Tag filter for all queries
+    tag_filters = [
+        {"Name": "tag:ManagedBy", "Values": ["opentofu"]},
+        {"Name": "tag:Owner", "Values": [owner_email]},
+        {"Name": "tag:Project", "Values": [project]},
+    ]
+
+    # 1. Find EC2 instances
+    cmd = base_cmd + [
+        "ec2", "describe-instances",
+        "--filters", json.dumps(tag_filters),
+    ]
+    data = _run_aws_cmd(cmd)
+    if data:
+        for reservation in data.get("Reservations", []):
+            for instance in reservation.get("Instances", []):
+                tags = {t["Key"]: t["Value"] for t in instance.get("Tags", [])}
+                state = instance.get("State", {}).get("Name", "")
+                # Skip terminated instances
+                if state == "terminated":
+                    continue
+                result.resources.append(OwnedResource(
+                    resource_type="EC2 Instance",
+                    resource_id=instance.get("InstanceId", ""),
+                    name=tags.get("Name", ""),
+                    region=region,
+                    tags=tags,
+                    state=state,
+                    details=instance.get("InstanceType", ""),
+                ))
+
+    # 2. Find VPCs
+    cmd = base_cmd + [
+        "ec2", "describe-vpcs",
+        "--filters", json.dumps(tag_filters),
+    ]
+    data = _run_aws_cmd(cmd)
+    if data:
+        for vpc in data.get("Vpcs", []):
+            tags = {t["Key"]: t["Value"] for t in vpc.get("Tags", [])}
+            result.resources.append(OwnedResource(
+                resource_type="VPC",
+                resource_id=vpc.get("VpcId", ""),
+                name=tags.get("Name", ""),
+                region=region,
+                tags=tags,
+                state=vpc.get("State", ""),
+                details=vpc.get("CidrBlock", ""),
+            ))
+
+    # 3. Find NAT Gateways
+    cmd = base_cmd + [
+        "ec2", "describe-nat-gateways",
+        "--filter", json.dumps(tag_filters),
+    ]
+    data = _run_aws_cmd(cmd)
+    if data:
+        for nat in data.get("NatGateways", []):
+            tags = {t["Key"]: t["Value"] for t in nat.get("Tags", [])}
+            state = nat.get("State", "")
+            # Skip deleted NAT gateways
+            if state == "deleted":
+                continue
+            result.resources.append(OwnedResource(
+                resource_type="NAT Gateway",
+                resource_id=nat.get("NatGatewayId", ""),
+                name=tags.get("Name", ""),
+                region=region,
+                tags=tags,
+                state=state,
+            ))
+
+    # 4. Find Load Balancers (ELBv2)
+    # Note: ELBv2 doesn't support tag filtering in describe, need to get all and filter
+    cmd = base_cmd + ["elbv2", "describe-load-balancers"]
+    data = _run_aws_cmd(cmd, timeout=60)
+    if data:
+        lb_arns = [lb["LoadBalancerArn"] for lb in data.get("LoadBalancers", [])]
+        if lb_arns:
+            # Get tags for all load balancers
+            cmd = base_cmd + [
+                "elbv2", "describe-tags",
+                "--resource-arns", *lb_arns,
+            ]
+            tags_data = _run_aws_cmd(cmd, timeout=60)
+            if tags_data:
+                for tag_desc in tags_data.get("TagDescriptions", []):
+                    tags = {t["Key"]: t["Value"] for t in tag_desc.get("Tags", [])}
+                    if (tags.get("ManagedBy") == "opentofu" and
+                        tags.get("Owner") == owner_email and
+                        tags.get("Project") == project):
+                        arn = tag_desc.get("ResourceArn", "")
+                        # Find the LB details
+                        for lb in data.get("LoadBalancers", []):
+                            if lb.get("LoadBalancerArn") == arn:
+                                result.resources.append(OwnedResource(
+                                    resource_type="Load Balancer",
+                                    resource_id=lb.get("LoadBalancerArn", "").split("/")[-2],
+                                    name=lb.get("LoadBalancerName", ""),
+                                    region=region,
+                                    tags=tags,
+                                    state=lb.get("State", {}).get("Code", ""),
+                                    details=lb.get("Type", ""),
+                                ))
+                                break
+
+    # 5. Find Elastic IPs with our tags
+    cmd = base_cmd + [
+        "ec2", "describe-addresses",
+        "--filters", json.dumps(tag_filters),
+    ]
+    data = _run_aws_cmd(cmd)
+    if data:
+        for eip in data.get("Addresses", []):
+            tags = {t["Key"]: t["Value"] for t in eip.get("Tags", [])}
+            assoc = "associated" if eip.get("AssociationId") else "unassociated"
+            result.resources.append(OwnedResource(
+                resource_type="Elastic IP",
+                resource_id=eip.get("AllocationId", ""),
+                name=tags.get("Name", eip.get("PublicIp", "")),
+                region=region,
+                tags=tags,
+                state=assoc,
+                details=eip.get("PublicIp", ""),
+            ))
+
+    # 6. Find S3 buckets (global, but check tags)
+    # S3 bucket names follow pattern: cybersec-dask-{prefix}-data
+    cmd = ["aws", "--output", "json"]
+    if profile:
+        cmd.extend(["--profile", profile])
+    cmd.extend(["s3api", "list-buckets"])
+    data = _run_aws_cmd(cmd)
+    if data:
+        for bucket in data.get("Buckets", []):
+            bucket_name = bucket.get("Name", "")
+            # Check if bucket matches our naming pattern
+            if not bucket_name.startswith(f"{project}-") or not bucket_name.endswith("-data"):
+                continue
+            # Get bucket tags
+            cmd = ["aws", "--output", "json"]
+            if profile:
+                cmd.extend(["--profile", profile])
+            cmd.extend(["s3api", "get-bucket-tagging", "--bucket", bucket_name])
+            tags_data = _run_aws_cmd(cmd)
+            if tags_data:
+                tags = {t["Key"]: t["Value"] for t in tags_data.get("TagSet", [])}
+                if (tags.get("ManagedBy") == "opentofu" and
+                    tags.get("Owner") == owner_email):
+                    # Get bucket region
+                    cmd = ["aws", "--output", "text"]
+                    if profile:
+                        cmd.extend(["--profile", profile])
+                    cmd.extend(["s3api", "get-bucket-location", "--bucket", bucket_name,
+                               "--query", "LocationConstraint"])
+                    try:
+                        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                        bucket_region = proc.stdout.strip()
+                        if bucket_region in ("None", "null", ""):
+                            bucket_region = "us-east-1"
+                    except Exception:
+                        bucket_region = "unknown"
+
+                    result.resources.append(OwnedResource(
+                        resource_type="S3 Bucket",
+                        resource_id=bucket_name,
+                        name=bucket_name,
+                        region=bucket_region,
+                        tags=tags,
+                        details="",
+                    ))
+
+    return result
