@@ -1,0 +1,34 @@
+# Helm values for Dask Kubernetes Operator
+# https://kubernetes.dask.org/en/latest/operator.html
+#
+# Minimal configuration for air-gap deployment
+
+# Operator image configuration
+# Note: Zarf will rewrite the image to use internal registry
+image:
+  repository: ghcr.io/dask/dask-kubernetes-operator
+  tag: "2024.1.0"
+  pullPolicy: IfNotPresent
+
+# Resource limits for the operator pod
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Operator configuration
+operator:
+  # Watch all namespaces for DaskCluster resources
+  watchAllNamespaces: true
+
+# RBAC configuration
+rbac:
+  create: true
+
+# Service account
+serviceAccount:
+  create: true
+  name: dask-operator

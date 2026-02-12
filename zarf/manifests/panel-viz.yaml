@@ -1,0 +1,157 @@
+# OTEL Navigator Deployment for air-gap RKE2 environment
+# Visualization dashboard for OTEL traces using HoloViews + Datashader + Dask
+#
+# Uses the pre-baked cybersec-dask image with:
+# - All Python dependencies pre-installed
+# - OTEL Navigator application at /app/otel-navigator.py
+# - Numba JIT cache pre-compiled
+#
+# Startup time: ~10-15 seconds (no pip install required)
+#
+# Zarf template variables:
+#   ###ZARF_VAR_S3_ENDPOINT### - S3-compatible endpoint
+#   ###ZARF_VAR_S3_ACCESS_KEY### - S3 access key
+#   ###ZARF_VAR_S3_SECRET_KEY### - S3 secret key
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: panel-viz
+  labels:
+    app.kubernetes.io/managed-by: zarf
+    app.kubernetes.io/part-of: cybersec
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-navigator-config
+  namespace: panel-viz
+  labels:
+    app: otel-navigator
+    app.kubernetes.io/managed-by: zarf
+data:
+  # S3 bucket containing OTEL data
+  S3_BUCKET: "cybersec-dask-data"
+  # Path to OTEL span data (Parquet files)
+  OTEL_DATA_PATH: "s3://cybersec-dask-data/otel-minimal/"
+  # AWS region for S3 access
+  AWS_REGION: "us-east-1"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: otel-navigator-credentials
+  namespace: panel-viz
+  labels:
+    app: otel-navigator
+    app.kubernetes.io/managed-by: zarf
+type: Opaque
+stringData:
+  # S3/MinIO credentials - populated by Zarf variables
+  AWS_ACCESS_KEY_ID: "###ZARF_VAR_S3_ACCESS_KEY###"
+  AWS_SECRET_ACCESS_KEY: "###ZARF_VAR_S3_SECRET_KEY###"
+  # Optional: S3 endpoint for MinIO (leave empty for AWS S3)
+  S3_ENDPOINT: "###ZARF_VAR_S3_ENDPOINT###"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-navigator
+  namespace: panel-viz
+  labels:
+    app: otel-navigator
+    app.kubernetes.io/name: otel-navigator
+    app.kubernetes.io/component: visualization
+    app.kubernetes.io/managed-by: zarf
+    app.kubernetes.io/part-of: cybersec
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-navigator
+  template:
+    metadata:
+      labels:
+        app: otel-navigator
+        app.kubernetes.io/name: otel-navigator
+    spec:
+      # Prefer scheduling near Dask workers for data locality
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    dask.org/component: worker
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: otel-navigator
+          # Image will be rewritten by Zarf to use internal registry
+          image: cybersec-dask:2024.8.0
+          imagePullPolicy: IfNotPresent
+          # Serve OTEL Navigator application with Panel
+          command:
+            - panel
+            - serve
+            - /app/otel-navigator.py
+            - --port=5006
+            - --address=0.0.0.0
+            - --allow-websocket-origin=*
+            - --warm
+          ports:
+            - containerPort: 5006
+              name: http
+              protocol: TCP
+          env:
+            # Dask scheduler address (deployed in same cluster)
+            - name: DASK_SCHEDULER
+              value: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
+          envFrom:
+            - configMapRef:
+                name: otel-navigator-config
+            - secretRef:
+                name: otel-navigator-credentials
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: 2
+              memory: 4Gi
+          # Fast readiness - no pip install needed
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 5006
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 5006
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-navigator
+  namespace: panel-viz
+  labels:
+    app: otel-navigator
+    app.kubernetes.io/name: otel-navigator
+    app.kubernetes.io/managed-by: zarf
+spec:
+  type: NodePort
+  selector:
+    app: otel-navigator
+  ports:
+    - name: http
+      port: 5006
+      targetPort: 5006
+      nodePort: 30506

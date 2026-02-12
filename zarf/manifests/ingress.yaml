@@ -1,0 +1,83 @@
+# Ingress resources for external access
+# Uses RKE2's bundled Traefik IngressController by default
+#
+# Zarf template variables:
+#   ###ZARF_VAR_INGRESS_CLASS### - Ingress controller class (traefik, nginx)
+#   ###ZARF_VAR_INGRESS_DOMAIN### - Base domain for hostnames
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dask-dashboard
+  namespace: dask
+  labels:
+    app.kubernetes.io/name: dask-dashboard
+    app.kubernetes.io/managed-by: zarf
+  annotations:
+    # Traefik-specific annotations
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: "###ZARF_VAR_INGRESS_CLASS###"
+  rules:
+    - host: dask.###ZARF_VAR_INGRESS_DOMAIN###
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cybersec-dask-scheduler
+                port:
+                  number: 8787
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jupyterhub
+  namespace: jupyterhub
+  labels:
+    app.kubernetes.io/name: jupyterhub
+    app.kubernetes.io/managed-by: zarf
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    # WebSocket support for JupyterHub
+    traefik.ingress.kubernetes.io/service.sticky.cookie: "true"
+spec:
+  ingressClassName: "###ZARF_VAR_INGRESS_CLASS###"
+  rules:
+    - host: jupyter.###ZARF_VAR_INGRESS_DOMAIN###
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: proxy-public
+                port:
+                  number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: panel-viz
+  namespace: panel-viz
+  labels:
+    app.kubernetes.io/name: panel-viz
+    app.kubernetes.io/managed-by: zarf
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    # WebSocket support for Panel
+    traefik.ingress.kubernetes.io/service.sticky.cookie: "true"
+spec:
+  ingressClassName: "###ZARF_VAR_INGRESS_CLASS###"
+  rules:
+    - host: panel.###ZARF_VAR_INGRESS_DOMAIN###
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: panel-viz
+                port:
+                  number: 5006

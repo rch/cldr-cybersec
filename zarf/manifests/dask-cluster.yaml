@@ -1,0 +1,102 @@
+# DaskCluster for Cybersec air-gap deployment
+# Uses the custom cybersec-dask image with pre-baked Python dependencies
+#
+# Zarf template variables:
+#   ###ZARF_VAR_DASK_WORKER_REPLICAS### - Number of worker replicas
+#   ###ZARF_REGISTRY### - Zarf-injected registry URL (for image rewriting)
+---
+apiVersion: kubernetes.dask.org/v1
+kind: DaskCluster
+metadata:
+  name: cybersec-dask
+  namespace: dask
+  labels:
+    app.kubernetes.io/name: cybersec-dask
+    app.kubernetes.io/component: cluster
+    app.kubernetes.io/managed-by: zarf
+    app.kubernetes.io/part-of: cybersec
+spec:
+  scheduler:
+    service:
+      type: NodePort
+      selector:
+        dask.org/cluster-name: cybersec-dask
+        dask.org/component: scheduler
+      ports:
+        - name: tcp-comm
+          port: 8786
+          targetPort: tcp-comm
+          nodePort: 30086
+        - name: tcp-dashboard
+          port: 8787
+          targetPort: tcp-dashboard
+          nodePort: 30087
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: scheduler
+          # Image will be rewritten by Zarf to use internal registry
+          image: cybersec-dask:2024.8.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - dask-scheduler
+          ports:
+            - containerPort: 8786
+              name: tcp-comm
+            - containerPort: 8787
+              name: tcp-dashboard
+          env:
+            - name: S3_ENDPOINT
+              value: "###ZARF_VAR_S3_ENDPOINT###"
+            - name: AWS_ACCESS_KEY_ID
+              value: "###ZARF_VAR_S3_ACCESS_KEY###"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "###ZARF_VAR_S3_SECRET_KEY###"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          readinessProbe:
+            tcpSocket:
+              port: tcp-comm
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: tcp-comm
+            initialDelaySeconds: 15
+            periodSeconds: 30
+  worker:
+    replicas: ###ZARF_VAR_DASK_WORKER_REPLICAS###
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: worker
+          # Image will be rewritten by Zarf to use internal registry
+          image: cybersec-dask:2024.8.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - dask-worker
+            - --nthreads
+            - "2"
+            - --memory-limit
+            - 4Gi
+          env:
+            - name: DASK_DASHBOARD_ADDRESS
+              value: ":8787"
+            - name: S3_ENDPOINT
+              value: "###ZARF_VAR_S3_ENDPOINT###"
+            - name: AWS_ACCESS_KEY_ID
+              value: "###ZARF_VAR_S3_ACCESS_KEY###"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "###ZARF_VAR_S3_SECRET_KEY###"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi

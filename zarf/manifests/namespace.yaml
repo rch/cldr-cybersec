@@ -1,0 +1,18 @@
+# Namespaces for Cybersec Dask deployment
+# Created by Zarf package deployment
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dask
+  labels:
+    app.kubernetes.io/managed-by: zarf
+    app.kubernetes.io/part-of: cybersec
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: panel-viz
+  labels:
+    app.kubernetes.io/managed-by: zarf
+    app.kubernetes.io/part-of: cybersec

@@ -1,0 +1,152 @@
+kind: ZarfPackageConfig
+metadata:
+  name: cybersec-dask
+  description: Air-gap deployment package for Dask, JupyterHub, and Panel-Viz on RKE2
+  version: "1.0.0"
+  architecture: amd64
+  authors: Cybersec Toolkit Team
+  url: https://github.com/cloudera/cybersec
+  documentation: https://cloudera.github.io/cybersec/airgap-deployment.html
+
+variables:
+  # Registry configuration
+  - name: REGISTRY_URL
+    description: External registry URL (empty = use Zarf internal registry)
+    default: ""
+
+  # Ingress configuration
+  - name: INGRESS_CLASS
+    description: Kubernetes ingress controller class
+    default: traefik
+  - name: INGRESS_DOMAIN
+    description: Base domain for ingress hostnames
+    default: cybersec.local
+
+  # Dask configuration
+  - name: DASK_WORKER_REPLICAS
+    description: Number of Dask worker replicas
+    default: "4"
+
+  # S3 storage configuration (for Iceberg/data access)
+  - name: S3_ENDPOINT
+    description: S3-compatible endpoint URL
+    default: ""
+  - name: S3_ACCESS_KEY
+    description: S3 access key
+    default: ""
+    sensitive: true
+  - name: S3_SECRET_KEY
+    description: S3 secret key
+    default: ""
+    sensitive: true
+
+components:
+  # ===========================================================================
+  # Core images - always included
+  # ===========================================================================
+  - name: cybersec-images
+    required: true
+    description: Container images for Cybersec Dask deployment
+    images:
+      # Custom Dask image with pre-baked Python dependencies (Panel, HoloViews, etc.)
+      # Note: Use localhost:5555 for local builds, will be rewritten by Zarf during deploy
+      - localhost:5555/cybersec-dask:2024.8.0
+      # Dask Kubernetes Operator
+      - ghcr.io/dask/dask-kubernetes-operator:2024.1.0
+
+  # ===========================================================================
+  # Dask Operator - Helm chart deployment
+  # ===========================================================================
+  - name: dask-operator
+    required: true
+    description: Dask Kubernetes Operator (manages DaskCluster CRDs)
+    charts:
+      - name: dask-kubernetes-operator
+        namespace: dask-operator
+        url: https://helm.dask.org
+        version: 2024.1.0
+        valuesFiles:
+          - manifests/dask-operator-values.yaml
+
+  # ===========================================================================
+  # Dask Cluster - DaskCluster CRD manifest
+  # ===========================================================================
+  - name: dask-cluster
+    required: true
+    description: DaskCluster deployment for distributed computing
+    manifests:
+      - name: dask-namespace-and-cluster
+        files:
+          - manifests/namespace.yaml
+          - manifests/dask-cluster.yaml
+    actions:
+      onDeploy:
+        after:
+          - wait:
+              cluster:
+                kind: Pod
+                name: app.kubernetes.io/name=dask-scheduler
+                namespace: dask
+                condition: Ready
+
+  # ===========================================================================
+  # JupyterHub - optional, on by default
+  # ===========================================================================
+  - name: jupyterhub
+    required: false
+    default: true
+    description: JupyterHub for interactive notebooks with Dask integration
+    images:
+      - quay.io/jupyterhub/k8s-hub:4.0.0
+      - quay.io/jupyterhub/configurable-http-proxy:4.5.5
+      # User notebook environment uses the custom cybersec-dask image
+      - localhost:5555/cybersec-dask:2024.8.0
+    charts:
+      - name: jupyterhub
+        namespace: jupyterhub
+        url: https://jupyterhub.github.io/helm-chart
+        version: 4.0.0
+        valuesFiles:
+          - manifests/jupyterhub-values.yaml
+    actions:
+      onDeploy:
+        after:
+          - wait:
+              cluster:
+                kind: Pod
+                name: app.kubernetes.io/component=hub
+                namespace: jupyterhub
+                condition: Ready
+
+  # ===========================================================================
+  # Panel-Viz - optional, on by default
+  # ===========================================================================
+  - name: panel-viz
+    required: false
+    default: true
+    description: Panel visualization dashboard for OTEL traces and metrics
+    manifests:
+      - name: panel-viz-deployment
+        files:
+          - manifests/panel-viz.yaml
+    actions:
+      onDeploy:
+        after:
+          - wait:
+              cluster:
+                kind: Pod
+                name: app=panel-viz
+                namespace: panel-viz
+                condition: Ready
+
+  # ===========================================================================
+  # Ingress - optional, enables external access via Traefik
+  # ===========================================================================
+  - name: ingress
+    required: false
+    default: true
+    description: Ingress resources for external access (requires Traefik or nginx)
+    manifests:
+      - name: ingress-resources
+        files:
+          - manifests/ingress.yaml
