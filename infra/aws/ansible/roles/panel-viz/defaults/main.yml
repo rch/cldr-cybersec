@@ -27,16 +27,16 @@ panel_dask_scheduler: "simple-scheduler.dask.svc.cluster.local:8786"
 # S3/MinIO configuration for data access
 # Empty endpoint = use real AWS S3 (not MinIO)
 panel_s3_endpoint: ""
-# S3 bucket for OTEL data - uses OTEL_S3_BUCKET env var or defaults to cybersec-dask-data
-panel_s3_bucket: "{{ lookup('env', 'OTEL_S3_BUCKET') | default('cybersec-dask-data', true) }}"
+# S3 bucket for OTEL data - uses s3_bucket_name from aws:deploy, OTEL_S3_BUCKET env var, or defaults
+panel_s3_bucket: "{{ s3_bucket_name | default(lookup('env', 'OTEL_S3_BUCKET') | default('cybersec-dask-data', true), true) }}"
 panel_otel_data_path: "s3://{{ panel_s3_bucket }}/otel-minimal/"
 
 # AWS credentials (from environment, AWS CLI config, or vault)
 # Priority: 1. Environment vars, 2. AWS CLI credentials file, 3. MinIO fallback
 panel_aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') | default(lookup('ini', 'aws_access_key_id', section='default', file='~/.aws/credentials', errors='ignore'), true) | default(lookup('env', 'MINIO_ACCESS_KEY'), true) }}"
 panel_aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') | default(lookup('ini', 'aws_secret_access_key', section='default', file='~/.aws/credentials', errors='ignore'), true) | default(lookup('env', 'MINIO_SECRET_KEY'), true) }}"
-# Note: cybersec-dask-data bucket is in us-east-1; override via PANEL_AWS_REGION env var if needed
-panel_aws_region: "{{ lookup('env', 'PANEL_AWS_REGION') | default(lookup('env', 'AWS_REGION'), true) | default('us-east-1', true) }}"
+# Note: Uses aws_region from deploy task, PANEL_AWS_REGION env var, or defaults
+panel_aws_region: "{{ aws_region | default(lookup('env', 'PANEL_AWS_REGION') | default(lookup('env', 'AWS_REGION'), true) | default('us-east-1', true), true) }}"
 
 # Rendering configuration
 panel_canvas_width: 800
@@ -44,8 +44,12 @@ panel_canvas_height: 400
 panel_cache_size: 100
 panel_debounce_ms: 100
 
-# ngrok ingress configuration
-panel_ngrok_enabled: true
+# ============================================================================
+# DEPRECATED: ngrok ingress is deprecated in favor of Cloudflare Tunnel.
+# Use ingress_provider=cloudflare (the default) instead.
+# ============================================================================
+# ngrok ingress configuration (disabled when using Cloudflare)
+panel_ngrok_enabled: "{{ ingress_provider | default('cloudflare') == 'ngrok' }}"
 panel_ngrok_domain: "viz.zndx.org"
 ngrok_oauth_policy_name: "oauth-policy"
 ngrok_access_mode: "{{ lookup('env', 'NGROK_ACCESS_MODE') | default('oauth') }}"

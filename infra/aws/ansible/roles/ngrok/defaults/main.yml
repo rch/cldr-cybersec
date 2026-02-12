@@ -1,4 +1,10 @@
 ---
+# ============================================================================
+# DEPRECATED: ngrok ingress is deprecated in favor of Cloudflare Tunnel.
+# This role will be removed in a future release.
+# Use ingress_provider=cloudflare and the cloudflare-tunnel role instead.
+# ============================================================================
+
 # ngrok operator defaults
 
 # ngrok operator Helm chart version

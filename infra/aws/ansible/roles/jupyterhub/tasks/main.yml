@@ -179,7 +179,11 @@
     name: proxy-public
   register: proxy_service
 
-# ngrok integration (optional)
+# ============================================================================
+# DEPRECATED: ngrok ingress is deprecated in favor of Cloudflare Tunnel.
+# These tasks only run when ingress_provider == 'ngrok'.
+# Use ingress_provider=cloudflare (the default) instead.
+# ============================================================================
 - name: Create ngrok Domain for JupyterHub
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
@@ -192,7 +196,7 @@
         namespace: "{{ ngrok_namespace }}"
       spec:
         domain: "{{ jupyterhub_ngrok_domain }}"
-  when: jupyterhub_ngrok_enabled | bool
+  when: ingress_provider | default('cloudflare') == 'ngrok'
 
 - name: Wait for ngrok domain to be ready
   kubernetes.core.k8s_info:
@@ -207,14 +211,14 @@
     jupyterhub_domain.resources[0].status.cnameTarget is defined
   retries: 30
   delay: 10
-  when: jupyterhub_ngrok_enabled | bool
+  when: ingress_provider | default('cloudflare') == 'ngrok'
 
 - name: Extract JupyterHub domain CNAME target
   set_fact:
     jupyterhub_cname_target: "{{ jupyterhub_domain.resources[0].status.cnameTarget }}"
-  when: jupyterhub_ngrok_enabled | bool
+  when: ingress_provider | default('cloudflare') == 'ngrok'
 
-- name: Create Cloudflare CNAME for JupyterHub
+- name: Create Cloudflare CNAME for JupyterHub (ngrok)
   community.general.cloudflare_dns:
     zone: "{{ jupyterhub_ngrok_domain.split('.')[-2:] | join('.') }}"
     record: "{{ jupyterhub_ngrok_domain.split('.')[0] }}"
@@ -223,7 +227,7 @@
     proxied: false
     api_token: "{{ cloudflare_api_token }}"
     state: present
-  when: jupyterhub_ngrok_enabled | bool
+  when: ingress_provider | default('cloudflare') == 'ngrok'
 
 - name: Apply Google OAuth traffic policy to JupyterHub namespace
   kubernetes.core.k8s:
@@ -243,14 +247,14 @@
                 - type: oauth
                   config:
                     provider: google
-  when: jupyterhub_ngrok_enabled | bool and ngrok_oauth_enabled | default(false) | bool
+  when: ingress_provider | default('cloudflare') == 'ngrok' and ngrok_oauth_enabled | default(false) | bool
 
 - name: Apply JupyterHub ngrok ingress
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
     state: present
     definition: "{{ lookup('template', 'jupyterhub-ingress.yaml.j2') | from_yaml }}"
-  when: jupyterhub_ngrok_enabled | bool
+  when: ingress_provider | default('cloudflare') == 'ngrok'
 
 - name: Display JupyterHub info
   debug:
@@ -275,10 +279,16 @@
             import os
             client = Client(os.environ['DASK_SCHEDULER_ADDRESS'])
 
-      {% if jupyterhub_ngrok_enabled %}
-      External Access (ngrok):
+      Ingress Provider: {{ ingress_provider | default('cloudflare') }}
+      {% if ingress_provider | default('cloudflare') == 'cloudflare' %}
+      External Access (Cloudflare):
+        URL: https://jupyter.dev.aws.zndx.org (managed by Tofu)
+        Auth: Cloudflare Access (WARP required unless cloudflare_access_open=true)
+      {% elif ingress_provider | default('cloudflare') == 'ngrok' %}
+      External Access (ngrok - DEPRECATED):
         URL: https://{{ jupyterhub_ngrok_domain }}
         OAuth: Google ({{ ngrok_allowed_email | default('any') }})
+        NOTE: ngrok is deprecated, migrate to ingress_provider=cloudflare
       {% endif %}
 
       Verify:

@@ -1,6 +1,10 @@
 ---
 # JupyterHub defaults
 
+# Ingress provider: 'cloudflare' (default) or 'ngrok' (deprecated)
+# Set via -e ingress_provider=cloudflare when running ansible-playbook
+ingress_provider: "{{ ingress_provider | default('cloudflare') }}"
+
 # JupyterHub Helm chart version
 jupyterhub_chart_version: "4.0.0"
 
@@ -19,15 +23,20 @@ jupyterhub_google_client_id: "{{ lookup('env', 'JUPYTERHUB_GOOGLE_CLIENT_ID') }}
 jupyterhub_google_client_secret: "{{ lookup('env', 'JUPYTERHUB_GOOGLE_CLIENT_SECRET') }}"
 jupyterhub_google_allowed_email: "{{ ngrok_allowed_email | default('') }}"
 
-# ngrok integration (optional external access)
-jupyterhub_ngrok_enabled: false
+# ============================================================================
+# DEPRECATED: ngrok ingress is deprecated in favor of Cloudflare Tunnel.
+# Use ingress_provider=cloudflare (the default) instead.
+# ngrok support will be removed in a future release.
+# ============================================================================
+# ngrok integration (deprecated - use ingress_provider instead)
+jupyterhub_ngrok_enabled: "{{ ingress_provider | default('cloudflare') == 'ngrok' }}"
 jupyterhub_ngrok_domain: "jupyter.zndx.org"
 
-# Cloudflare DNS (used when ngrok is enabled)
+# Cloudflare DNS (used when ngrok is enabled - deprecated)
 cloudflare_api_token: "{{ lookup('env', 'CLOUDFLARE_API_TOKEN') }}"
 cloudflare_zone_id: "{{ lookup('env', 'CLOUDFLARE_ZONE_ID') }}"
 
-# ngrok operator namespace (from ngrok role)
+# ngrok operator namespace (from ngrok role - deprecated)
 ngrok_namespace: ngrok-system
 ngrok_oauth_policy_name: google-oauth-policy
 

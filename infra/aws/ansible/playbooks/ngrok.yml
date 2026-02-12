@@ -1,4 +1,10 @@
 ---
+# ============================================================================
+# DEPRECATED: ngrok ingress is deprecated in favor of Cloudflare Tunnel.
+# This playbook will be removed in a future release.
+# Use ingress_provider=cloudflare and cloudflare-tunnel.yml instead.
+# ============================================================================
+#
 # Deploy ngrok operator with OAuth-protected ingresses
 # Requires: NGROK_AUTHTOKEN and NGROK_API_KEY environment variables
 #
@@ -7,8 +13,11 @@
 #
 # Optional overrides:
 #   ansible-playbook playbooks/ngrok.yml -e ngrok_allowed_email=user@example.com
+#
+# RECOMMENDED: Use Cloudflare Tunnel instead:
+#   ansible-playbook playbooks/cloudflare-tunnel.yml -e ingress_provider=cloudflare
 
-- name: Deploy ngrok operator with OAuth
+- name: Deploy ngrok operator with OAuth (DEPRECATED)
   hosts: control_plane[0]
   become: true
   roles:

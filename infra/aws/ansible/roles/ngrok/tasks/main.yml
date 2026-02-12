@@ -1,5 +1,27 @@
 ---
+# ============================================================================
+# DEPRECATED: ngrok ingress is deprecated in favor of Cloudflare Tunnel.
+# This role will be removed in a future release.
+# Use ingress_provider=cloudflare and the cloudflare-tunnel role instead.
+# ============================================================================
+
 # ngrok Kubernetes Operator deployment with Google OAuth
+
+- name: Display ngrok deprecation warning
+  ansible.builtin.debug:
+    msg: |
+      ⚠️  WARNING: ngrok ingress is DEPRECATED
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      This role will be removed in a future release.
+
+      Migration steps:
+        1. Set ingress_provider=cloudflare in your deployment
+        2. Use the cloudflare-tunnel role instead
+        3. Access services at *.dev.aws.zndx.org (managed by Tofu)
+
+      To continue with ngrok (not recommended):
+        ansible-playbook playbooks/ngrok.yml -e acknowledge_deprecation=true
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 - name: Install pip3
   ansible.builtin.dnf:

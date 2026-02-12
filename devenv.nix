@@ -50,7 +50,8 @@
     protobuf
     presenterm
     tilt
-    zlib  # Required for numpy C extensions   
+    zarf  # Air-gap packaging for K8s deployments
+    zlib  # Required for numpy C extensions
   ];
 
   services.minio = {
@@ -1407,8 +1408,14 @@ EOF
       export AWS_REGION=$(cd infra/aws/tofu && tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
       echo "Using Region: $AWS_REGION"
 
+      # Ingress provider: cloudflare (default) or ngrok (deprecated)
+      INGRESS_PROVIDER="''${INGRESS_PROVIDER:-cloudflare}"
+      echo "Using Ingress Provider: $INGRESS_PROVIDER"
+
       cd infra/aws/ansible
-      ansible-playbook playbooks/jupyterhub.yml -e "aws_region=$AWS_REGION"
+      ansible-playbook playbooks/jupyterhub.yml \
+        -e "aws_region=$AWS_REGION" \
+        -e "ingress_provider=$INGRESS_PROVIDER"
       echo "✅ JupyterHub deployed"
     '';
 
@@ -1987,6 +1994,142 @@ asyncio.run(main())
         log_error "Validation failed. Fix the issues above and retry."
         exit 1
       fi
+    '';
+
+    # ============================================================================
+    # Zarf Air-Gap Deployment Tasks
+    # ============================================================================
+    # These tasks manage Zarf package creation and deployment for air-gap environments.
+    # Target: RKE2 clusters without internet access.
+
+    "zarf:preflight".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Zarf Air-Gap Preflight Validation ==="
+      uv run cybersec "/zarf preflight"
+    '';
+
+    "zarf:image".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Building Cybersec Dask Image ==="
+
+      # Prefer podman, fallback to docker
+      if command -v podman &>/dev/null; then
+        BUILDER="podman"
+      elif command -v docker &>/dev/null; then
+        BUILDER="docker"
+      else
+        log_error "No container runtime found. Install podman or docker."
+        exit 1
+      fi
+
+      log_info "Using $BUILDER to build image..."
+      cd zarf/images
+
+      $BUILDER build \
+        -t cybersec-dask:2024.8.0 \
+        -f Dockerfile.cybersec-dask \
+        --build-arg BASE_IMAGE=ghcr.io/dask/dask:2024.8.0 \
+        .
+
+      if [ $? -eq 0 ]; then
+        log_success "Image built: cybersec-dask:2024.8.0"
+        echo ""
+        echo "Next: devenv tasks run zarf:package"
+      else
+        log_error "Image build failed"
+        exit 1
+      fi
+    '';
+
+    "zarf:package".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Creating Zarf Package ==="
+
+      # Check if custom image exists
+      if command -v podman &>/dev/null; then
+        IMG=$(podman images -q cybersec-dask:2024.8.0 2>/dev/null)
+      elif command -v docker &>/dev/null; then
+        IMG=$(docker images -q cybersec-dask:2024.8.0 2>/dev/null)
+      fi
+
+      if [ -z "$IMG" ]; then
+        log_error "Custom image not found. Run: devenv tasks run zarf:image"
+        exit 1
+      fi
+
+      cd zarf
+      log_info "Running zarf package create..."
+      zarf package create --confirm
+
+      if [ $? -eq 0 ]; then
+        PKG=$(ls -t zarf-package-cybersec-dask-*.tar.zst 2>/dev/null | head -1)
+        log_success "Package created: $PKG"
+        echo ""
+        echo "Transfer package to air-gap environment and deploy with:"
+        echo "  zarf init --confirm"
+        echo "  zarf package deploy $PKG --confirm"
+      else
+        log_error "Package creation failed"
+        exit 1
+      fi
+    '';
+
+    "zarf:deploy".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Deploying Zarf Package ==="
+
+      cd zarf
+      PKG=$(ls -t zarf-package-cybersec-dask-*.tar.zst 2>/dev/null | head -1)
+
+      if [ -z "$PKG" ]; then
+        log_error "No Zarf package found. Run: devenv tasks run zarf:package"
+        exit 1
+      fi
+
+      log_info "Deploying: $PKG"
+      zarf package deploy "$PKG" --confirm
+
+      if [ $? -eq 0 ]; then
+        log_success "Package deployed successfully!"
+        echo ""
+        echo "Verify deployment:"
+        echo "  kubectl get pods -n dask"
+        echo "  kubectl get pods -n jupyterhub"
+        echo "  kubectl get pods -n panel-viz"
+      else
+        log_error "Deployment failed"
+        exit 1
+      fi
+    '';
+
+    "zarf:status".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Zarf Deployment Status ==="
+
+      # Check for Zarf init
+      if kubectl get ns zarf &>/dev/null; then
+        log_success "Zarf initialized (zarf namespace exists)"
+      else
+        log_warn "Zarf not initialized. Run: zarf init --confirm"
+      fi
+
+      echo ""
+      echo "Dask namespace:"
+      kubectl get pods -n dask 2>/dev/null || echo "  (namespace not found)"
+
+      echo ""
+      echo "JupyterHub namespace:"
+      kubectl get pods -n jupyterhub 2>/dev/null || echo "  (namespace not found)"
+
+      echo ""
+      echo "Panel-Viz namespace:"
+      kubectl get pods -n panel-viz 2>/dev/null || echo "  (namespace not found)"
+
+      echo ""
+      echo "Services:"
+      echo "  Dask Dashboard: http://<node-ip>:30087"
+      echo "  JupyterHub:     http://<node-ip>:30080"
+      echo "  Panel-Viz:      http://<node-ip>:30506"
     '';
 
     "restart:clean".exec = ''
