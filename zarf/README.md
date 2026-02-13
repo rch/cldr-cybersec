@@ -91,27 +91,14 @@ spec:
     name: zarf-docker-registry
 EOF
 
-# === PHASE 4: Create Helper Pod for Zarf Injector Bootstrap ===
-# Zarf injector needs a running pod with a suitable image to bootstrap
-sudo kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: zarf-helper
-  namespace: default
-spec:
-  tolerations:
-  - key: "node.kubernetes.io/disk-pressure"
-    operator: "Exists"
-    effect: "NoSchedule"
-  containers:
-  - name: helper
-    image: docker.io/library/busybox:latest
-    command: ["sleep", "infinity"]
-EOF
+# === PHASE 4: Verify Zarf Injector Prerequisites ===
+# Zarf injector needs a running pod to bootstrap. RKE2 system pods (coredns,
+# metrics-server) in kube-system usually satisfy this requirement.
+sudo kubectl get pods -n kube-system
+# Should show several Running pods - if so, proceed to Phase 5
 
-# Wait for helper pod
-sudo kubectl wait --for=condition=Ready pod/zarf-helper --timeout=120s
+# If kube-system has no running pods, wait for RKE2 to fully initialize:
+sudo kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=300s
 
 # === PHASE 5: Initialize Zarf ===
 sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf init --confirm
@@ -471,48 +458,22 @@ spec:
 EOF
 ```
 
-### 3.4 Create Helper Pod for Zarf Injector
+### 3.4 Verify Zarf Injector Prerequisites
 
-Zarf's injector bootstrap requires a running pod with a suitable base image. On a fresh cluster, no such pods exist.
+Zarf's injector bootstrap requires a running pod with a suitable base image. RKE2's system pods in `kube-system` (coredns, metrics-server, etc.) satisfy this requirement.
 
 ```bash
-# Pull busybox image into containerd
-sudo /var/lib/rancher/rke2/bin/ctr \
-  --address /run/k3s/containerd/containerd.sock \
-  --namespace k8s.io \
-  image pull docker.io/library/busybox:latest
+# Verify kube-system pods are running
+sudo kubectl get pods -n kube-system
 
-# Create helper pod with tolerations for common taints
-sudo kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: Pod
-metadata:
-  name: zarf-helper
-  namespace: default
-spec:
-  tolerations:
-  - key: "node.kubernetes.io/disk-pressure"
-    operator: "Exists"
-    effect: "NoSchedule"
-  - key: "node.kubernetes.io/memory-pressure"
-    operator: "Exists"
-    effect: "NoSchedule"
-  - key: "node-role.kubernetes.io/control-plane"
-    operator: "Exists"
-    effect: "NoSchedule"
-  containers:
-  - name: helper
-    image: docker.io/library/busybox:latest
-    command: ["sleep", "infinity"]
-    resources:
-      requests:
-        memory: "16Mi"
-        cpu: "10m"
-EOF
+# Expected: Several pods in Running state (coredns, metrics-server, etc.)
+# These provide the base images Zarf's injector needs
 
-# Wait for helper pod to be running
-sudo kubectl wait --for=condition=Ready pod/zarf-helper --timeout=120s
+# If pods aren't ready yet, wait for them:
+sudo kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=300s
 ```
+
+> **Note**: If `zarf init` fails with "unable to find an image in the cluster to inject", ensure RKE2 has fully initialized and kube-system pods are running.
 
 ### 3.5 Initialize Zarf
 
@@ -687,19 +648,13 @@ sudo chmod 777 /var/lib/zarf-registry
 ```bash
 # Error: unable to find an image in the cluster to inject
 
-# Fix: Create a helper pod with a suitable base image
-sudo kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: Pod
-metadata:
-  name: zarf-helper
-  namespace: default
-spec:
-  containers:
-  - name: helper
-    image: docker.io/library/busybox:latest
-    command: ["sleep", "infinity"]
-EOF
+# This means no pods with suitable base images are running.
+# Wait for RKE2 system pods to be ready:
+sudo kubectl get pods -n kube-system
+sudo kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=300s
+
+# If kube-system pods are stuck, check RKE2 logs:
+sudo journalctl -u rke2-server --no-pager | tail -50
 ```
 
 ### RKE2 Fails to Start
