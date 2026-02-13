@@ -101,6 +101,11 @@ sudo kubectl get pods -n kube-system
 sudo kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=300s
 
 # === PHASE 5: Initialize Zarf ===
+# IMPORTANT: zarf init requires the init package in the current directory.
+# On internet-connected hosts this is silently downloaded; on air-gap it MUST
+# already be present as zarf-init-amd64-*.tar.zst
+cd /opt/airgap-bundle/zarf   # or wherever the init package was staged
+ls zarf-init-amd64-*.tar.zst # verify the file exists before proceeding
 sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf init --confirm
 
 # Verify Zarf is running
