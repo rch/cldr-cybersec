@@ -3,14 +3,25 @@
 # Zarf Deployment Verification Script
 # =============================================================================
 # This script verifies and deploys the cybersec-dask Zarf package to a local
-# RKE2 cluster. It captures all steps needed for repeatable deployment.
+# RKE2 cluster. It supports two modes of operation:
 #
-# Usage: ./verify-zarf-deployment.sh [--skip-init] [--skip-build]
+# BUILD MODE (connected environment):
+#   ./verify-zarf-deployment.sh
+#   - Builds custom images (requires network for base images)
+#   - Creates Zarf package
+#   - Deploys to cluster
+#
+# DEPLOY MODE (air-gap environment):
+#   ./verify-zarf-deployment.sh --skip-build
+#   - Uses pre-built Zarf package and init package
+#   - Deploys to cluster without network access
+#   - Requires: zarf-init-amd64-*.tar.zst, zarf-package-cybersec-dask-*.tar.zst
 #
 # Requirements:
-#   - RKE2 installed and running
+#   - RKE2 installed and running (kube-system pods provide Zarf injector bootstrap)
 #   - Zarf CLI available
-#   - Podman for building custom images
+#   - Podman for building custom images (BUILD MODE only)
+#   - Pre-built Zarf packages (DEPLOY MODE only)
 # =============================================================================
 
 set -euo pipefail
@@ -128,121 +139,76 @@ check_prerequisites() {
 }
 
 # =============================================================================
-# Step 2: Prepare Images and Helper Pod for Zarf Injector
+# Step 2: Verify Injector Prerequisites (kube-system pods)
 # =============================================================================
-prepare_injector_images() {
-    log_step "Step 2: Preparing Images and Helper Pod for Zarf Injector"
+verify_injector_prerequisites() {
+    log_step "Step 2: Verifying Injector Prerequisites"
 
-    # Zarf's injector needs to find a RUNNING POD with an image it can use.
-    # Simply pulling images is not enough - we need a pod running with a suitable image.
+    # Zarf's injector needs a RUNNING POD with a suitable image to bootstrap.
+    # In a true air-gap environment, we CANNOT pull from docker.io.
+    # RKE2's kube-system pods (coredns, metrics-server) already satisfy this requirement.
 
-    local CTR="/var/lib/rancher/rke2/bin/ctr"
     local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
     local KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
-    local CONTAINERD_SOCK="/run/k3s/containerd/containerd.sock"
 
-    if [[ ! -S "$CONTAINERD_SOCK" ]]; then
-        log_error "Containerd socket not found at $CONTAINERD_SOCK"
-        return 1
-    fi
+    log_info "Checking for running kube-system pods (required for Zarf injector bootstrap)..."
 
-    # List of images that Zarf injector can use
-    local INJECTOR_IMAGES=(
-        "docker.io/library/busybox:latest"
-        "docker.io/library/alpine:latest"
-    )
-
-    for image in "${INJECTOR_IMAGES[@]}"; do
-        log_info "Pulling $image..."
-        if sudo $CTR --address "$CONTAINERD_SOCK" --namespace k8s.io image pull "$image" 2>&1 | tail -2; then
-            log_success "Pulled $image"
-        else
-            log_warn "Failed to pull $image (may already exist or network issue)"
-        fi
-    done
-
-    # Create a helper pod that Zarf can use for injection
-    # This pod runs a simple sleep command and stays alive
-    log_info "Creating Zarf helper pod for injection bootstrap..."
-
-    # Delete existing helper pod if it exists
-    sudo $KUBECTL --kubeconfig=$KUBECONFIG delete pod zarf-helper -n default --ignore-not-found=true 2>/dev/null
-
-    # Create new helper pod with tolerations for common taints
-    cat <<EOF | sudo $KUBECTL --kubeconfig=$KUBECONFIG apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: zarf-helper
-  namespace: default
-  labels:
-    app: zarf-helper
-spec:
-  tolerations:
-  # Tolerate control-plane/master taints
-  - key: "node-role.kubernetes.io/control-plane"
-    operator: "Exists"
-    effect: "NoSchedule"
-  - key: "node-role.kubernetes.io/master"
-    operator: "Exists"
-    effect: "NoSchedule"
-  # Tolerate disk-pressure (common on dev machines)
-  - key: "node.kubernetes.io/disk-pressure"
-    operator: "Exists"
-    effect: "NoSchedule"
-  # Tolerate memory-pressure
-  - key: "node.kubernetes.io/memory-pressure"
-    operator: "Exists"
-    effect: "NoSchedule"
-  containers:
-  - name: helper
-    image: docker.io/library/busybox:latest
-    command: ["sleep", "infinity"]
-    resources:
-      requests:
-        memory: "16Mi"
-        cpu: "10m"
-      limits:
-        memory: "32Mi"
-        cpu: "50m"
-EOF
-
-    # Wait for the pod to be running
-    log_info "Waiting for helper pod to be running..."
-    local max_wait=60
+    # Wait for kube-system pods to be ready
+    local max_wait=120
     local waited=0
+    local running_pods=0
+
     while [[ $waited -lt $max_wait ]]; do
-        local status=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pod zarf-helper -n default -o jsonpath='{.status.phase}' 2>/dev/null)
-        if [[ "$status" == "Running" ]]; then
-            log_success "Helper pod is running"
+        running_pods=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n kube-system --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+        if [[ "$running_pods" -ge 2 ]]; then
+            log_success "Found $running_pods running pods in kube-system"
             break
         fi
-        sleep 2
-        ((waited+=2))
+        log_info "Waiting for kube-system pods... ($waited/$max_wait seconds)"
+        sleep 5
+        ((waited+=5))
     done
 
-    if [[ $waited -ge $max_wait ]]; then
-        log_error "Helper pod failed to start within ${max_wait}s"
-        sudo $KUBECTL --kubeconfig=$KUBECONFIG describe pod zarf-helper -n default
+    if [[ "$running_pods" -lt 2 ]]; then
+        log_error "Insufficient running pods in kube-system (found: $running_pods, need: 2+)"
+        log_error "Zarf injector requires running pods to bootstrap"
+        sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n kube-system
         return 1
     fi
 
-    # Verify images are available
-    log_info "Available images in k8s.io namespace:"
-    sudo /var/lib/rancher/rke2/bin/crictl --runtime-endpoint "unix://$CONTAINERD_SOCK" images | head -15
+    # Show kube-system pods that Zarf can use for injection
+    log_info "kube-system pods available for Zarf injector:"
+    sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n kube-system
 
-    # Show running pods
-    log_info "Running pods:"
-    sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -A | head -20
+    # Verify specific pods Zarf typically uses
+    local coredns_running=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n kube-system -l k8s-app=kube-dns --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+    if [[ "$coredns_running" -ge 1 ]]; then
+        log_success "CoreDNS pod(s) running - suitable for Zarf injector"
+    fi
+
+    local metrics_running
+    metrics_running=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n kube-system -l k8s-app=metrics-server --no-headers 2>/dev/null | grep -c "Running") || metrics_running=0
+    if [[ "$metrics_running" -ge 1 ]]; then
+        log_success "Metrics-server pod(s) running - suitable for Zarf injector"
+    fi
 
     return 0
 }
 
 # =============================================================================
-# Step 3: Start Local Registry (for custom images)
+# Step 3: Start Local Registry (BUILD PHASE ONLY - requires network)
 # =============================================================================
 start_local_registry() {
-    log_step "Step 3: Starting Local Registry"
+    log_step "Step 3: Starting Local Registry (for image builds)"
+
+    # NOTE: This step is for the BUILD phase only.
+    # In a true air-gap deployment, images are already packaged in the Zarf archive.
+    # Use --skip-build to skip this step when deploying pre-built packages.
+
+    if [[ "$SKIP_BUILD" == "true" ]]; then
+        log_info "Skipping local registry (--skip-build mode)"
+        return 0
+    fi
 
     if ! command -v podman &>/dev/null; then
         log_warn "Podman not available, skipping local registry"
@@ -261,7 +227,8 @@ start_local_registry() {
         podman start registry
     else
         log_info "Creating new registry container..."
-        podman run -d --name registry -p 5555:5000 docker.io/library/registry:2
+        # NOTE: This requires network access - for BUILD phase only
+        podman run -d --name registry -p 5555:5000 registry:2
     fi
 
     # Wait for registry to be ready
@@ -745,7 +712,7 @@ main() {
     check_prerequisites || ((failed++))
 
     if [[ $failed -eq 0 ]]; then
-        prepare_injector_images || ((failed++))
+        verify_injector_prerequisites || ((failed++))
     fi
 
     if [[ $failed -eq 0 ]]; then
