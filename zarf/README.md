@@ -2,6 +2,162 @@
 
 This directory contains Zarf packaging for deploying the Cybersec Dask stack to air-gapped RKE2 clusters.
 
+---
+
+## Quickstart: True Air-Gap Deployment
+
+### Required Artifacts (Build on Internet-Connected Machine)
+
+| Artifact | Size | Command to Generate |
+|----------|------|---------------------|
+| `zarf` binary | ~100 MB | Download from GitHub releases |
+| `zarf-init-amd64-v0.66.0.tar.zst` | ~300 MB | `zarf tools download-init` |
+| `zarf-package-cybersec-dask-amd64-1.0.0.tar.zst` | ~1.2 GB | `zarf package create .` |
+| `rke2-images.linux-amd64.tar.zst` | ~800 MB | Download from RKE2 releases |
+| `rke2.linux-amd64.tar.gz` | ~50 MB | Download from RKE2 releases |
+| `install.sh` (RKE2) | ~30 KB | `curl -sfL https://get.rke2.io` |
+
+**Total transfer size: ~2.5 GB**
+
+### Build Artifacts (Internet-Connected Machine)
+
+```bash
+# 1. Build the cybersec-dask container image
+cd /path/to/cybersec/zarf/images
+podman build -t localhost:5555/cybersec-dask:2024.8.0 -f Dockerfile.cybersec-dask .
+
+# 2. Start local registry and push image
+podman run -d --name registry -p 5555:5000 docker.io/library/registry:2
+podman push --tls-verify=false localhost:5555/cybersec-dask:2024.8.0
+
+# 3. Create Zarf package (includes the image)
+cd /path/to/cybersec/zarf
+zarf package create . --confirm
+
+# 4. Download Zarf init package
+zarf tools download-init
+
+# 5. Download RKE2 air-gap bundle
+export RKE2_VERSION="v1.34.3+rke2r1"
+mkdir -p rke2-bundle && cd rke2-bundle
+curl -LO "https://github.com/rancher/rke2/releases/download/${RKE2_VERSION}/rke2-images.linux-amd64.tar.zst"
+curl -LO "https://github.com/rancher/rke2/releases/download/${RKE2_VERSION}/rke2.linux-amd64.tar.gz"
+curl -sfL https://get.rke2.io > install.sh && chmod +x install.sh
+
+# 6. Copy zarf binary
+cp $(which zarf) ./
+```
+
+### Deploy (Air-Gapped Node)
+
+```bash
+# === PHASE 1: Install RKE2 ===
+# Copy artifacts to air-gapped node, then:
+
+sudo mkdir -p /var/lib/rancher/rke2/agent/images/
+sudo cp rke2-images.linux-amd64.tar.zst /var/lib/rancher/rke2/agent/images/
+sudo INSTALL_RKE2_ARTIFACT_PATH=. sh install.sh
+sudo systemctl enable --now rke2-server
+
+# Wait for RKE2 (2-5 minutes)
+sudo journalctl -u rke2-server -f  # Wait for "Running kube-apiserver"
+
+# === PHASE 2: Setup kubectl and Zarf ===
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+export PATH=$PATH:/var/lib/rancher/rke2/bin
+sudo cp zarf /usr/local/bin/ && sudo chmod +x /usr/local/bin/zarf
+
+# === PHASE 3: Provision Storage (RKE2 has no default StorageClass) ===
+sudo mkdir -p /var/lib/zarf-registry
+sudo chmod 777 /var/lib/zarf-registry
+
+# Create PersistentVolume for Zarf registry
+sudo kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zarf-registry-pv
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /var/lib/zarf-registry
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: zarf
+    name: zarf-docker-registry
+EOF
+
+# === PHASE 4: Create Helper Pod for Zarf Injector Bootstrap ===
+# Zarf injector needs a running pod with a suitable image to bootstrap
+sudo kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: zarf-helper
+  namespace: default
+spec:
+  tolerations:
+  - key: "node.kubernetes.io/disk-pressure"
+    operator: "Exists"
+    effect: "NoSchedule"
+  containers:
+  - name: helper
+    image: docker.io/library/busybox:latest
+    command: ["sleep", "infinity"]
+EOF
+
+# Wait for helper pod
+sudo kubectl wait --for=condition=Ready pod/zarf-helper --timeout=120s
+
+# === PHASE 5: Initialize Zarf ===
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf init --confirm
+
+# Verify Zarf is running
+sudo kubectl get pods -n zarf
+
+# === PHASE 6: Deploy Cybersec Dask Package ===
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
+  zarf-package-cybersec-dask-amd64-1.0.0.tar.zst --confirm
+
+# === PHASE 7: Verify Deployment ===
+sudo kubectl get pods -n dask
+sudo kubectl get daskcluster -n dask
+
+# Access Dask Dashboard (NodePort 30087)
+curl -sL http://127.0.0.1:30087/status
+```
+
+### Fix: Image Suffix Mismatch (If Pods Show ImagePullBackOff)
+
+If Dask pods are stuck in `ImagePullBackOff`, there may be a Zarf image suffix mismatch. This occurs when the Zarf init package timestamp differs from the application package build time.
+
+```bash
+# 1. Get registry credentials
+REG_INFO=$(sudo kubectl get secret -n zarf zarf-state -o jsonpath='{.data.state}' | base64 -d)
+PUSH_USER=$(echo "$REG_INFO" | jq -r '.registryInfo.pushUsername')
+PUSH_PASS=$(echo "$REG_INFO" | jq -r '.registryInfo.pushPassword')
+
+# 2. Check what image pods expect vs what's in registry
+sudo kubectl get events -n dask | grep "pulling image"  # Expected image
+curl -s -u "$PUSH_USER:$PUSH_PASS" http://127.0.0.1:31999/v2/_catalog  # Available repos
+
+# 3. Copy image to expected location (example)
+podman login 127.0.0.1:31999 --username "$PUSH_USER" --password "$PUSH_PASS" --tls-verify=false
+podman pull 127.0.0.1:31999/cybersec-dask:2024.8.0 --tls-verify=false
+podman tag 127.0.0.1:31999/cybersec-dask:2024.8.0 \
+  127.0.0.1:31999/library/cybersec-dask:2024.8.0-zarf-XXXXXXXXXX  # Use suffix from events
+podman push 127.0.0.1:31999/library/cybersec-dask:2024.8.0-zarf-XXXXXXXXXX --tls-verify=false
+
+# 4. Restart pods
+sudo kubectl delete pods -n dask --all
+```
+
+---
+
 ## Overview
 
 The Zarf package bundles all container images, Helm charts, and manifests needed to deploy:
@@ -15,13 +171,13 @@ graph TB
     subgraph "Air-Gapped Environment"
         subgraph "Single Node RKE2"
             RKE2[RKE2 Server]
-            REGISTRY[Zarf Registry<br/>:5000]
+            REGISTRY[Zarf Registry<br/>:31999]
             TRAEFIK[Traefik Ingress]
         end
 
         subgraph "Deployed Stack"
             DASK_OP[Dask Operator]
-            DASK_SCHED[Dask Scheduler]
+            DASK_SCHED[Dask Scheduler<br/>:30086/:30087]
             DASK_WORK[Dask Workers<br/>x4]
             JUPYTER[JupyterHub]
             PANEL[Panel-Viz]
@@ -48,25 +204,14 @@ graph TB
 |-----------|-------------|
 | `zarf.yaml` | Package definition with components and variables |
 | `manifests/` | Kubernetes manifests and Helm values |
+| `charts/` | Bundled Helm charts (dask-kubernetes-operator, jupyterhub) |
 | `images/` | Dockerfile for custom cybersec-dask image |
-| `scripts/` | Post-deploy and validation scripts |
-
-## Quick Start
-
-For detailed step-by-step instructions, see [Single-Node Deployment Guide](#single-node-rke2-deployment).
-
-```bash
-# On the air-gapped node (after transferring files):
-./rke2-install.sh                    # Install RKE2
-zarf init --confirm                  # Initialize Zarf
-zarf package deploy cybersec-dask-*.tar.zst --confirm
-```
+| `notebooks/` | Sample Jupyter notebooks for Dask/OTEL exploration |
+| `scripts/` | Deployment and validation scripts |
 
 ---
 
-## Single-Node RKE2 Deployment
-
-This guide covers deploying the Cybersec Dask stack to a single air-gapped node running RKE2.
+## Detailed Deployment Guide
 
 ### Deployment Workflow
 
@@ -80,14 +225,16 @@ sequenceDiagram
     DEV->>DEV: Build cybersec-dask image
     DEV->>DEV: zarf package create
     DEV->>DEV: Download RKE2 artifacts
-    DEV->>DEV: Download Zarf binary
+    DEV->>DEV: Download Zarf binary + init
 
     Note over MEDIA: Transfer Phase
-    DEV->>MEDIA: Copy artifacts
+    DEV->>MEDIA: Copy artifacts (~2.5 GB)
     MEDIA->>NODE: Transfer to node
 
     Note over NODE: Deploy Phase
     NODE->>NODE: Install RKE2 (air-gap)
+    NODE->>NODE: Create storage for Zarf registry
+    NODE->>NODE: Create helper pod for injector
     NODE->>NODE: zarf init
     NODE->>NODE: zarf package deploy
     NODE->>NODE: Verify deployment
@@ -104,14 +251,14 @@ sequenceDiagram
 | Disk | 100 GB | 200 GB |
 | OS | RHEL 8/9, Rocky 8/9, Ubuntu 22.04 | RHEL 9, Rocky 9 |
 
-#### Required Artifacts
+#### Software Versions (Tested)
 
-Download/build these on an internet-connected machine:
-
-1. **RKE2 Air-Gap Bundle** (~2 GB)
-2. **Zarf Binary** (~100 MB)
-3. **Zarf Init Package** (~300 MB)
-4. **Cybersec Dask Package** (~1.2 GB)
+| Component | Version |
+|-----------|---------|
+| RKE2 | v1.34.3+rke2r1 |
+| Zarf | v0.66.0 |
+| Dask Operator | 2024.1.0 |
+| JupyterHub | 4.0.0 |
 
 ---
 
@@ -121,7 +268,7 @@ Download/build these on an internet-connected machine:
 
 ```bash
 # Set RKE2 version
-export RKE2_VERSION="v1.29.2+rke2r1"
+export RKE2_VERSION="v1.34.3+rke2r1"
 export ARCH="amd64"
 
 # Create staging directory
@@ -137,7 +284,7 @@ curl -LO "https://github.com/rancher/rke2/releases/download/${RKE2_VERSION}/sha2
 sha256sum -c sha256sum-${ARCH}.txt --ignore-missing
 
 # Download install script
-curl -LO "https://get.rke2.io" -o install.sh
+curl -sfL https://get.rke2.io > install.sh
 chmod +x install.sh
 ```
 
@@ -145,19 +292,19 @@ chmod +x install.sh
 
 ```bash
 # Set Zarf version
-export ZARF_VERSION="v0.32.4"
+export ZARF_VERSION="v0.66.0"
 
 cd ../
 mkdir -p zarf
 cd zarf
 
 # Download Zarf binary
-curl -LO "https://github.com/defenseunicorns/zarf/releases/download/${ZARF_VERSION}/zarf_${ZARF_VERSION}_Linux_amd64"
+curl -LO "https://github.com/zarf-dev/zarf/releases/download/${ZARF_VERSION}/zarf_${ZARF_VERSION}_Linux_amd64"
 mv zarf_${ZARF_VERSION}_Linux_amd64 zarf
 chmod +x zarf
 
 # Download Zarf init package
-curl -LO "https://github.com/defenseunicorns/zarf/releases/download/${ZARF_VERSION}/zarf-init-amd64-${ZARF_VERSION}.tar.zst"
+./zarf tools download-init
 ```
 
 ### 1.3 Build Cybersec Dask Package
@@ -166,13 +313,21 @@ curl -LO "https://github.com/defenseunicorns/zarf/releases/download/${ZARF_VERSI
 cd /path/to/cybersec
 
 # Build the custom Dask image (requires podman or docker)
-devenv tasks run zarf:image
+cd zarf/images
+podman build -t localhost:5555/cybersec-dask:2024.8.0 -f Dockerfile.cybersec-dask .
+
+# Start local registry (if not running)
+podman run -d --name registry -p 5555:5000 docker.io/library/registry:2
+
+# Push image to local registry
+podman push --tls-verify=false localhost:5555/cybersec-dask:2024.8.0
 
 # Create the Zarf package
-devenv tasks run zarf:package
+cd /path/to/cybersec/zarf
+/path/to/airgap-bundle/zarf/zarf package create . --confirm
 
-# Package is at: zarf/zarf-package-cybersec-dask-amd64-1.0.0.tar.zst
-cp zarf/zarf-package-cybersec-dask-amd64-1.0.0.tar.zst airgap-bundle/
+# Package created: zarf-package-cybersec-dask-amd64-1.0.0.tar.zst
+cp zarf-package-cybersec-dask-amd64-1.0.0.tar.zst /path/to/airgap-bundle/
 ```
 
 ### 1.4 Create Transfer Bundle
@@ -184,105 +339,33 @@ cd airgap-bundle
 cat > MANIFEST.txt << 'EOF'
 Cybersec Dask Air-Gap Deployment Bundle
 =======================================
+Version: 1.0.0
+Created: $(date -Iseconds)
 
 Contents:
   rke2/
-    rke2-images.linux-amd64.tar.zst    - RKE2 container images
-    rke2.linux-amd64.tar.gz            - RKE2 binaries
+    rke2-images.linux-amd64.tar.zst    - RKE2 container images (~800 MB)
+    rke2.linux-amd64.tar.gz            - RKE2 binaries (~50 MB)
     install.sh                          - RKE2 install script
 
   zarf/
-    zarf                                - Zarf CLI binary
-    zarf-init-amd64-*.tar.zst          - Zarf initialization package
+    zarf                                - Zarf CLI binary (~100 MB)
+    zarf-init-amd64-v0.66.0.tar.zst    - Zarf initialization package (~300 MB)
 
-  zarf-package-cybersec-dask-*.tar.zst - Cybersec Dask deployment package
+  zarf-package-cybersec-dask-amd64-1.0.0.tar.zst  - Cybersec Dask package (~1.2 GB)
 
-  deploy.sh                             - Automated deployment script
+Total: ~2.5 GB
 
-Deployment:
+Deployment Steps:
   1. Copy this bundle to the air-gapped node
-  2. Run: chmod +x deploy.sh && ./deploy.sh
-
-Manual deployment:
-  See README.md for step-by-step instructions
+  2. Extract: tar -xf cybersec-airgap-bundle.tar
+  3. Follow README.md Quickstart section
 EOF
-
-# Create automated deploy script
-cat > deploy.sh << 'DEPLOY_EOF'
-#!/bin/bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOG_FILE="/var/log/cybersec-deploy.log"
-
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
-error() { log "ERROR: $*"; exit 1; }
-
-log "=== Cybersec Dask Air-Gap Deployment ==="
-
-# Check root
-[[ $EUID -eq 0 ]] || error "Must run as root"
-
-# Phase 1: Install RKE2
-log "Phase 1: Installing RKE2..."
-cd "$SCRIPT_DIR/rke2"
-
-mkdir -p /var/lib/rancher/rke2/agent/images/
-cp rke2-images.linux-amd64.tar.zst /var/lib/rancher/rke2/agent/images/
-
-INSTALL_RKE2_ARTIFACT_PATH="$SCRIPT_DIR/rke2" sh install.sh
-
-systemctl enable rke2-server
-systemctl start rke2-server
-
-# Wait for RKE2
-log "Waiting for RKE2 to be ready..."
-until /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes 2>/dev/null; do
-    sleep 5
-done
-log "RKE2 is ready"
-
-# Setup kubectl
-mkdir -p ~/.kube
-ln -sf /etc/rancher/rke2/rke2.yaml ~/.kube/config
-export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-
-# Phase 2: Install Zarf
-log "Phase 2: Installing Zarf..."
-cp "$SCRIPT_DIR/zarf/zarf" /usr/local/bin/
-chmod +x /usr/local/bin/zarf
-
-# Phase 3: Initialize Zarf
-log "Phase 3: Initializing Zarf..."
-cd "$SCRIPT_DIR/zarf"
-zarf init --components=git-server --confirm
-
-# Phase 4: Deploy Cybersec package
-log "Phase 4: Deploying Cybersec Dask..."
-cd "$SCRIPT_DIR"
-PACKAGE=$(ls zarf-package-cybersec-dask-*.tar.zst 2>/dev/null | head -1)
-[[ -n "$PACKAGE" ]] || error "Package not found"
-
-zarf package deploy "$PACKAGE" --confirm
-
-log "=== Deployment Complete ==="
-log ""
-log "Access services at:"
-log "  JupyterHub: http://$(hostname):80/jupyter"
-log "  Dask:       http://$(hostname):80/dask"
-log "  Panel-Viz:  http://$(hostname):80/panel"
-log ""
-log "Or configure DNS/hosts to point to this node and access via:"
-log "  http://jupyter.cybersec.local"
-log "  http://dask.cybersec.local"
-log "  http://panel.cybersec.local"
-DEPLOY_EOF
-chmod +x deploy.sh
 
 # Create the bundle archive
 cd ..
 tar -cvf cybersec-airgap-bundle.tar airgap-bundle/
-echo "Bundle created: cybersec-airgap-bundle.tar"
+echo "Bundle created: cybersec-airgap-bundle.tar ($(du -h cybersec-airgap-bundle.tar | cut -f1))"
 ```
 
 ---
@@ -291,67 +374,35 @@ echo "Bundle created: cybersec-airgap-bundle.tar"
 
 ### Transfer Methods
 
-```mermaid
-flowchart LR
-    subgraph Internet
-        DEV[Dev Machine]
-    end
-
-    subgraph "Transfer Options"
-        USB[USB Drive]
-        DVD[DVD/Blu-ray]
-        SFTP[Secure File Transfer<br/>Data Diode]
-    end
-
-    subgraph Air-Gap
-        NODE[Target Node]
-    end
-
-    DEV --> USB --> NODE
-    DEV --> DVD --> NODE
-    DEV --> SFTP --> NODE
-```
-
-### USB Transfer
+| Method | Use Case |
+|--------|----------|
+| USB Drive | Most common, supports large files |
+| DVD/Blu-ray | Archival, read-only verification |
+| Data Diode | High-security environments |
+| Secure File Transfer | If one-way network path exists |
 
 ```bash
-# On internet-connected machine
-# Identify USB device
-lsblk
-
-# Format and mount (assuming /dev/sdb)
-sudo mkfs.ext4 /dev/sdb1
+# On internet-connected machine - copy to USB
 sudo mount /dev/sdb1 /mnt/usb
-
-# Copy bundle
 sudo cp cybersec-airgap-bundle.tar /mnt/usb/
 sudo umount /mnt/usb
-```
 
-```bash
-# On air-gapped node
+# On air-gapped node - extract from USB
 sudo mount /dev/sdb1 /mnt/usb
 cp /mnt/usb/cybersec-airgap-bundle.tar /opt/
-cd /opt
-tar -xvf cybersec-airgap-bundle.tar
+cd /opt && tar -xvf cybersec-airgap-bundle.tar
+cd airgap-bundle
 ```
 
 ---
 
 ## Phase 3: Deploy on Air-Gapped Node
 
-### 3.1 Automated Deployment
+### 3.1 Install RKE2
 
 ```bash
 cd /opt/airgap-bundle
-sudo ./deploy.sh
-```
 
-### 3.2 Manual Deployment
-
-#### Install RKE2
-
-```bash
 # Create image directory
 sudo mkdir -p /var/lib/rancher/rke2/agent/images/
 
@@ -370,160 +421,197 @@ sudo journalctl -u rke2-server -f
 # Wait until you see: "Running kube-apiserver"
 ```
 
-#### Configure kubectl
+### 3.2 Configure Environment
 
 ```bash
-# Create kubeconfig symlink
-mkdir -p ~/.kube
-sudo ln -sf /etc/rancher/rke2/rke2.yaml ~/.kube/config
-sudo chown $(whoami) ~/.kube/config
-export KUBECONFIG=~/.kube/config
+# Set up kubeconfig
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 
 # Add RKE2 binaries to PATH
 export PATH=$PATH:/var/lib/rancher/rke2/bin
 echo 'export PATH=$PATH:/var/lib/rancher/rke2/bin' >> ~/.bashrc
+echo 'export KUBECONFIG=/etc/rancher/rke2/rke2.yaml' >> ~/.bashrc
 
-# Verify cluster
-kubectl get nodes
-# Should show single node in Ready state
-```
-
-#### Install Zarf
-
-```bash
-# Copy Zarf binary
+# Install Zarf binary
 sudo cp zarf/zarf /usr/local/bin/
 sudo chmod +x /usr/local/bin/zarf
 
-# Verify
-zarf version
+# Verify cluster
+sudo kubectl get nodes
+# Should show single node in Ready state
 ```
 
-#### Initialize Zarf
+### 3.3 Provision Storage for Zarf Registry
+
+**Important**: RKE2 does not include a default StorageClass. The Zarf registry requires persistent storage.
 
 ```bash
-# Initialize Zarf with the init package
-# This deploys Zarf's internal registry and git server
+# Create storage directory with proper permissions
+sudo mkdir -p /var/lib/zarf-registry
+sudo chmod 777 /var/lib/zarf-registry
+
+# Create PersistentVolume
+sudo kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zarf-registry-pv
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /var/lib/zarf-registry
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: zarf
+    name: zarf-docker-registry
+EOF
+```
+
+### 3.4 Create Helper Pod for Zarf Injector
+
+Zarf's injector bootstrap requires a running pod with a suitable base image. On a fresh cluster, no such pods exist.
+
+```bash
+# Pull busybox image into containerd
+sudo /var/lib/rancher/rke2/bin/ctr \
+  --address /run/k3s/containerd/containerd.sock \
+  --namespace k8s.io \
+  image pull docker.io/library/busybox:latest
+
+# Create helper pod with tolerations for common taints
+sudo kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: zarf-helper
+  namespace: default
+spec:
+  tolerations:
+  - key: "node.kubernetes.io/disk-pressure"
+    operator: "Exists"
+    effect: "NoSchedule"
+  - key: "node.kubernetes.io/memory-pressure"
+    operator: "Exists"
+    effect: "NoSchedule"
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+  containers:
+  - name: helper
+    image: docker.io/library/busybox:latest
+    command: ["sleep", "infinity"]
+    resources:
+      requests:
+        memory: "16Mi"
+        cpu: "10m"
+EOF
+
+# Wait for helper pod to be running
+sudo kubectl wait --for=condition=Ready pod/zarf-helper --timeout=120s
+```
+
+### 3.5 Initialize Zarf
+
+```bash
 cd /opt/airgap-bundle/zarf
-zarf init --components=git-server --confirm
 
-# Wait for Zarf components to be ready
-kubectl get pods -n zarf
+# Initialize Zarf (deploys internal registry and git server)
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf init --confirm
+
+# Wait for Zarf components
+sudo kubectl get pods -n zarf -w
+# Wait until all pods show Running status
 ```
 
-#### Deploy Cybersec Package
+### 3.6 Deploy Cybersec Package
 
 ```bash
-# Deploy the Cybersec Dask package
 cd /opt/airgap-bundle
-zarf package deploy zarf-package-cybersec-dask-*.tar.zst --confirm
+
+# Deploy the Cybersec Dask package
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
+  zarf-package-cybersec-dask-amd64-1.0.0.tar.zst \
+  --confirm
 
 # Monitor deployment
-watch kubectl get pods -A
+sudo kubectl get pods -A -w
 ```
 
 ---
 
 ## Phase 4: Verify Deployment
 
-### Check All Pods
+### Check All Components
 
 ```bash
-kubectl get pods -A
+# Verify all pods are running
+sudo kubectl get pods -A
 
-# Expected output:
-# NAMESPACE      NAME                                    READY   STATUS
-# dask-operator  dask-kubernetes-operator-xxx            1/1     Running
-# dask           cybersec-dask-scheduler-xxx             1/1     Running
-# dask           cybersec-dask-worker-xxx                1/1     Running (x4)
-# jupyterhub     hub-xxx                                 1/1     Running
-# jupyterhub     proxy-xxx                               1/1     Running
-# panel-viz      panel-viz-xxx                           1/1     Running
-# zarf           zarf-registry-xxx                       1/1     Running
+# Expected namespaces and pods:
+# NAMESPACE       NAME                                      READY   STATUS
+# zarf            zarf-docker-registry-xxx                  1/1     Running
+# zarf            agent-hook-xxx                            1/1     Running
+# dask-operator   dask-kubernetes-operator-xxx              1/1     Running
+# dask            cybersec-dask-scheduler-xxx               1/1     Running
+# dask            cybersec-dask-default-worker-xxx (x4)     1/1     Running
 ```
 
-### Verify Services
+### Verify DaskCluster
 
 ```bash
-kubectl get svc -A
-
-# Check ingress
-kubectl get ingress -A
+sudo kubectl get daskcluster -n dask
+# NAME            WORKERS   STATUS    AGE
+# cybersec-dask   4         Running   5m
 ```
 
-### Run Validation Script
+### Test Dask Dashboard
 
 ```bash
-# If included in the package
-/opt/airgap-bundle/scripts/validate-deployment.sh
+# Dashboard is exposed on NodePort 30087
+curl -sL http://127.0.0.1:30087/status
+# Should return HTTP 200
+
+# Or check from another machine
+curl -sL http://<node-ip>:30087/status
+```
+
+### Run Verification Script
+
+```bash
+# Use the included verification script
+sudo ./scripts/verify-zarf-deployment.sh --skip-init --skip-build
 ```
 
 ---
 
 ## Phase 5: Access Services
 
-### Architecture
+### NodePort Access (Default)
 
-```mermaid
-graph LR
-    subgraph "Air-Gapped Node"
-        TRAEFIK[Traefik<br/>:80/:443]
+| Service | NodePort | URL |
+|---------|----------|-----|
+| Dask Scheduler | 30086 | `tcp://<node-ip>:30086` |
+| Dask Dashboard | 30087 | `http://<node-ip>:30087` |
 
-        subgraph "Services"
-            JUPYTER[JupyterHub<br/>:8000]
-            DASK[Dask Dashboard<br/>:8787]
-            PANEL[Panel-Viz<br/>:5006]
-        end
-    end
-
-    USER[User Workstation] --> TRAEFIK
-    TRAEFIK -->|/jupyter| JUPYTER
-    TRAEFIK -->|/dask| DASK
-    TRAEFIK -->|/panel| PANEL
-```
-
-### Option 1: Port Forwarding (Quick Access)
+### Port Forwarding (Development)
 
 ```bash
-# JupyterHub
-kubectl port-forward -n jupyterhub svc/proxy-public 8000:80 --address 0.0.0.0 &
-
 # Dask Dashboard
-kubectl port-forward -n dask svc/cybersec-dask-scheduler 8787:8787 --address 0.0.0.0 &
+sudo kubectl port-forward -n dask svc/cybersec-dask-scheduler 8787:8787 --address 0.0.0.0 &
 
-# Panel-Viz
-kubectl port-forward -n panel-viz svc/panel-viz 5006:80 --address 0.0.0.0 &
+# JupyterHub (if deployed)
+sudo kubectl port-forward -n jupyterhub svc/proxy-public 8000:80 --address 0.0.0.0 &
 ```
 
-Access via:
-- JupyterHub: `http://<node-ip>:8000`
-- Dask: `http://<node-ip>:8787`
-- Panel: `http://<node-ip>:5006`
+### Traefik Ingress (Production)
 
-### Option 2: Traefik Ingress (Production)
-
-Configure DNS or `/etc/hosts` on client machines:
-
-```bash
-# On client workstation, add to /etc/hosts:
+Configure DNS or `/etc/hosts`:
+```
 <node-ip>  jupyter.cybersec.local dask.cybersec.local panel.cybersec.local
-```
-
-Access via:
-- JupyterHub: `http://jupyter.cybersec.local`
-- Dask: `http://dask.cybersec.local`
-- Panel: `http://panel.cybersec.local`
-
-### Option 3: NodePort Services
-
-```bash
-# Patch services to NodePort type
-kubectl patch svc proxy-public -n jupyterhub -p '{"spec":{"type":"NodePort"}}'
-kubectl patch svc cybersec-dask-scheduler -n dask -p '{"spec":{"type":"NodePort"}}'
-kubectl patch svc panel-viz -n panel-viz -p '{"spec":{"type":"NodePort"}}'
-
-# Get assigned ports
-kubectl get svc -A | grep NodePort
 ```
 
 ---
@@ -532,11 +620,9 @@ kubectl get svc -A | grep NodePort
 
 ### Deploy Variables
 
-Override defaults during deployment:
-
 ```bash
 zarf package deploy zarf-package-cybersec-dask-*.tar.zst \
-  --set DASK_WORKER_REPLICAS=8 \
+  --set DASK_WORKER_REPLICAS=2 \
   --set INGRESS_DOMAIN=mycompany.local \
   --confirm
 ```
@@ -552,20 +638,15 @@ zarf package deploy zarf-package-cybersec-dask-*.tar.zst \
 | `S3_ACCESS_KEY` | `` | S3 access key |
 | `S3_SECRET_KEY` | `` | S3 secret key |
 
-### Resource Tuning for Single Node
+### Resource Tuning
 
-For constrained environments, reduce worker replicas:
-
+For constrained environments:
 ```bash
-zarf package deploy zarf-package-cybersec-dask-*.tar.zst \
-  --set DASK_WORKER_REPLICAS=2 \
-  --confirm
-```
+# Deploy with fewer workers
+zarf package deploy ... --set DASK_WORKER_REPLICAS=2 --confirm
 
-Or edit after deployment:
-
-```bash
-kubectl patch daskcluster cybersec-dask -n dask --type=merge \
+# Or scale after deployment
+sudo kubectl patch daskcluster cybersec-dask -n dask --type=merge \
   -p '{"spec":{"worker":{"replicas":2}}}'
 ```
 
@@ -573,74 +654,83 @@ kubectl patch daskcluster cybersec-dask -n dask --type=merge \
 
 ## Troubleshooting
 
+### Pods Stuck in ImagePullBackOff
+
+This is typically caused by a **Zarf image suffix mismatch**. The Zarf agent mutates image references using a suffix derived from the init package timestamp.
+
+```bash
+# 1. Check what image the pods expect
+sudo kubectl get events -n dask | grep "pulling image"
+# Example: 127.0.0.1:31999/library/cybersec-dask:2024.8.0-zarf-1346278550
+
+# 2. Check what's actually in the registry
+REG_PASS=$(sudo kubectl get secret -n zarf zarf-state -o jsonpath='{.data.state}' | base64 -d | jq -r '.registryInfo.pullPassword')
+curl -s -u "zarf-pull:$REG_PASS" http://127.0.0.1:31999/v2/cybersec-dask/tags/list
+# Example: {"name":"cybersec-dask","tags":["2024.8.0","2024.8.0-zarf-2560517462"]}
+
+# 3. If suffixes don't match, use podman to copy the image
+# See "Fix: Image Suffix Mismatch" in Quickstart section
+```
+
+### Zarf Init Fails with Permission Denied
+
+```bash
+# Error: filesystem: mkdir /var/lib/registry/docker: permission denied
+
+# Fix: Ensure storage directory has correct permissions
+sudo mkdir -p /var/lib/zarf-registry
+sudo chmod 777 /var/lib/zarf-registry
+```
+
+### Zarf Injector "No Suitable Image" Error
+
+```bash
+# Error: unable to find an image in the cluster to inject
+
+# Fix: Create a helper pod with a suitable base image
+sudo kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: zarf-helper
+  namespace: default
+spec:
+  containers:
+  - name: helper
+    image: docker.io/library/busybox:latest
+    command: ["sleep", "infinity"]
+EOF
+```
+
 ### RKE2 Fails to Start
 
 ```bash
 # Check logs
 sudo journalctl -u rke2-server -f
 
-# Common issues:
-# 1. Firewall blocking ports - disable or configure
-sudo systemctl stop firewalld
-sudo systemctl disable firewalld
+# Common fixes:
+# 1. Disable firewall
+sudo systemctl stop firewalld && sudo systemctl disable firewalld
 
-# 2. SELinux - set to permissive
+# 2. Set SELinux to permissive
 sudo setenforce 0
 sudo sed -i 's/SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config
+
+# 3. Check disk space (need at least 20GB free)
+df -h /var/lib/rancher
 ```
 
-### Pods Stuck in ImagePullBackOff
+### Disk Pressure Taints Blocking Pods
 
 ```bash
-# Check if Zarf registry is running
-kubectl get pods -n zarf
+# Check for taints
+sudo kubectl describe node | grep Taints
 
-# Check image pull errors
-kubectl describe pod <pod-name> -n <namespace>
+# If disk-pressure taint exists, free up disk space then:
+sudo kubectl taint nodes --all node.kubernetes.io/disk-pressure-
 
-# Verify images are in Zarf registry
-zarf tools registry catalog
-```
-
-### Zarf Init Fails
-
-```bash
-# Check available disk space
-df -h
-
-# Ensure RKE2 is fully ready
-kubectl get nodes
-kubectl get pods -n kube-system
-
-# Retry with debug logging
-zarf init --components=git-server --confirm --log-level=debug
-```
-
-### Services Not Accessible
-
-```bash
-# Check ingress controller
-kubectl get pods -n kube-system | grep traefik
-
-# Check ingress resources
-kubectl get ingress -A
-kubectl describe ingress -A
-
-# Verify service endpoints
-kubectl get endpoints -A
-```
-
-### Dask Workers Crash
-
-```bash
-# Check worker logs
-kubectl logs -n dask -l app.kubernetes.io/name=dask-worker --tail=100
-
-# Check resource usage
-kubectl top pods -n dask
-
-# Reduce worker resources if OOM
-kubectl edit daskcluster cybersec-dask -n dask
+# Restart kubelet to clear cached state
+sudo systemctl restart rke2-server
 ```
 
 ---
@@ -651,31 +741,31 @@ kubectl edit daskcluster cybersec-dask -n dask
 
 ```bash
 # Backup Zarf state
-kubectl get secret -n zarf zarf-state -o yaml > zarf-state-backup.yaml
+sudo kubectl get secret -n zarf zarf-state -o yaml > zarf-state-backup.yaml
 
-# Backup PVCs
-kubectl get pvc -A -o yaml > pvc-backup.yaml
+# Backup registry data
+sudo tar -czvf zarf-registry-backup.tar.gz /var/lib/zarf-registry
 ```
 
 ### Update Package
 
 ```bash
-# Transfer new package to node
-# Deploy with --confirm to update
-zarf package deploy zarf-package-cybersec-dask-*.tar.zst --confirm
+# Transfer new package to node, then:
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
+  zarf-package-cybersec-dask-amd64-X.X.X.tar.zst --confirm
 ```
 
 ### Uninstall
 
 ```bash
 # Remove Cybersec components
-zarf package remove cybersec-dask --confirm
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package remove cybersec-dask --confirm
 
 # Remove Zarf (optional)
-zarf destroy --confirm
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf destroy --confirm
 
 # Remove RKE2 (complete reset)
-/usr/local/bin/rke2-uninstall.sh
+sudo /usr/local/bin/rke2-uninstall.sh
 ```
 
 ---
@@ -684,25 +774,36 @@ zarf destroy --confirm
 
 ```
 zarf/
-├── README.md                 # This file
-├── zarf.yaml                 # Zarf package definition
+├── README.md                         # This file
+├── zarf.yaml                         # Zarf package definition
+├── charts/                           # Bundled Helm charts
+│   ├── dask-kubernetes-operator-2024.1.0.tgz
+│   └── jupyterhub-4.0.0.tgz
 ├── images/
-│   ├── Dockerfile.cybersec-dask    # Custom Dask image with dependencies
-│   └── otel-navigator.py           # OTEL visualization app
+│   ├── Dockerfile.cybersec-dask      # Custom Dask image
+│   └── requirements-airgap.txt       # Python dependencies
 ├── manifests/
-│   ├── namespace.yaml              # Namespace definitions
-│   ├── dask-cluster.yaml           # DaskCluster CRD
-│   ├── dask-operator-values.yaml   # Dask operator Helm values
-│   ├── jupyterhub-values.yaml      # JupyterHub Helm values
-│   ├── panel-viz.yaml              # Panel deployment
-│   └── ingress.yaml                # Ingress resources
+│   ├── namespace.yaml                # Namespace definitions
+│   ├── dask-cluster.yaml             # DaskCluster CRD
+│   ├── dask-operator-values.yaml     # Dask operator Helm values
+│   ├── jupyterhub-values.yaml        # JupyterHub Helm values
+│   ├── jupyterhub-namespace.yaml     # JupyterHub namespace
+│   ├── sample-notebooks-configmap.yaml
+│   ├── panel-viz.yaml                # Panel deployment
+│   └── ingress.yaml                  # Ingress resources
+├── notebooks/                        # Sample Jupyter notebooks
+│   ├── OTel_Telemetry_Explorer.ipynb
+│   ├── Dask_Kub_Viz_Sample_Problem.ipynb
+│   └── Dask_S3_Validation.ipynb
 └── scripts/
-    ├── post-deploy.sh              # Post-deployment configuration
-    └── validate-deployment.sh      # Deployment validation
+    ├── verify-zarf-deployment.sh     # Deployment verification
+    ├── install-rke2-secondary.sh     # Multi-RKE2 isolation
+    └── generate-otel-data.py         # OTEL test data generator
 ```
 
 ## Related Documentation
 
+- [Multi-RKE2 Isolation Guide](../docs/current/src/operations/multi-rke2-isolation.md)
 - [Air-Gap Deployment Guide](../docs/current/src/operations/airgap-deployment.md)
 - [Zarf Documentation](https://docs.zarf.dev/)
 - [RKE2 Air-Gap Installation](https://docs.rke2.io/install/airgap)
