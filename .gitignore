@@ -1,4 +1,7 @@
+# Text files (except important source files)
 *.txt
+!zarf/images/requirements-airgap.txt
+!**/requirements*.txt
 .env
 .envrc.local
 thirdparty

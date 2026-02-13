@@ -1,6 +1,26 @@
 # AWS Cloud Deployment
 
-Deploy a production-grade Dask cluster with JupyterHub on RKE2 in AWS, with HTTPS access via ngrok and OAuth authentication.
+Deploy a production-grade Dask cluster with JupyterHub on RKE2 in AWS, with secure HTTPS access via Cloudflare Zero Trust (WARP device posture).
+
+## Quick Start (Full E2E)
+
+```bash
+# Prerequisites: AWS credentials, Cloudflare API token, WARP client enrolled
+export CLOUDFLARE_API_TOKEN="..."
+export CLOUDFLARE_ACCOUNT_ID="..."
+export CLOUDFLARE_ZONE_ID="..."
+
+# One-command deployment
+./scripts/deploy-e2e.sh
+
+# Access (after WARP enrollment)
+open https://jupyter.dev.aws.zndx.org
+open https://dask.dev.aws.zndx.org
+```
+
+For step-by-step deployment or troubleshooting, see sections below.
+
+---
 
 ## Overview
 
@@ -47,9 +67,11 @@ Deploy a production-grade Dask cluster with JupyterHub on RKE2 in AWS, with HTTP
    - Zone: DNS Edit
    - Account: Cloudflare Tunnel Edit
    - Account: Access: Apps and Policies Edit
-3. **WARP Posture Rule**: Create in dashboard (see External Access section)
-4. **Split Tunnel**: Add service domains to Include list (see External Access section)
-5. **WARP Client**: Install on all access devices and enroll in your organization
+   - Account: Device Posture Write (for auto-creating WARP posture rule)
+3. **Split Tunnel**: Add service domains to Include list (see External Access section)
+4. **WARP Client**: Install on all access devices and enroll in your organization
+
+Note: WARP posture rule is created automatically by Terraform for repeatability.
 
 ### ngrok Setup (alternative for external access)
 
@@ -359,14 +381,9 @@ Cloudflare Tunnel provides secure external access with **device-based authentica
    - Zone: DNS Edit
    - Account: Cloudflare Tunnel Edit
    - Account: Access: Apps and Policies Edit
-   - Account: Access: Device Posture Edit (optional, for IaC)
+   - Account: Access: Device Posture Write (for auto-creating WARP posture rule)
 
-3. **WARP Device Posture Rule** (create manually in dashboard):
-   - Go to: **Team & Resources > Reusable Components > Posture Checks**
-   - Add: WARP client check
-   - Copy the rule ID from the URL
-
-4. **Split Tunnel Configuration** (add domains to Include list):
+3. **Split Tunnel Configuration** (add domains to Include list):
    - Go to: **Team & Resources > Devices > Device profiles > Default > Split Tunnels**
    - Mode: **Include IPs and domains**
    - Add these domains:
@@ -385,7 +402,7 @@ export CLOUDFLARE_API_TOKEN="your-token"
 cloudflare_account_id = "your-account-id"
 cloudflare_zone_id = "your-zone-id"
 ingress_provider = "cloudflare"
-cloudflare_warp_posture_rule_id = "your-posture-rule-id"  # From dashboard URL
+# Note: WARP posture rule is created automatically - no manual ID needed
 ```
 
 #### Tofu Variables
@@ -396,7 +413,6 @@ cloudflare_warp_posture_rule_id = "your-posture-rule-id"  # From dashboard URL
 | `cloudflare_account_id` | Cloudflare account ID | — |
 | `cloudflare_zone_id` | Zone ID for base domain | — |
 | `cloudflare_access_open` | `true` = public access (INSECURE) | `false` |
-| `cloudflare_warp_posture_rule_id` | WARP device posture rule ID | — |
 | `ingress_root_domain` | Root domain (e.g., `zndx.org`) | `zndx.org` |
 | `ingress_env_id` | Environment ID (e.g., `aws`) | `aws` |
 
@@ -410,6 +426,7 @@ When `ingress_provider = "cloudflare"`:
 | `cloudflare_zero_trust_tunnel_cloudflared_config` | Ingress rules routing to K8s services |
 | `cloudflare_record` (x4) | DNS CNAMEs for each service |
 | `cloudflare_zero_trust_access_application` | Access application protecting all services |
+| `cloudflare_zero_trust_device_posture_rule` | WARP posture check (auto-created) |
 | `cloudflare_zero_trust_access_policy` | Policy requiring WARP device posture |
 
 #### Service URLs
@@ -686,3 +703,59 @@ devenv tasks run k8s:status
 | Setup complexity | Higher (WARP enrollment, split tunnel) | Lower (OAuth config) |
 | Ongoing management | WARP client on all devices | None |
 | Best for | Corporate/team environments | Quick demos, external users |
+
+---
+
+## Security Model
+
+This deployment uses a **defense-in-depth** approach with multiple layers:
+
+### Layer 1: Network Isolation
+- **VPC isolation**: All cluster nodes run in private subnets
+- **NAT Gateway**: Outbound-only internet access for private subnets
+- **SSH via WARP only**: SSH CIDR restricted to 100.96.0.0/12 (WARP CGNAT range)
+- **No NodePort exposure**: Services not directly accessible from internet
+
+### Layer 2: Cloudflare Zero Trust
+- **WARP device posture**: Only devices enrolled in your Zero Trust org can access
+- **Tunnel encryption**: All traffic encrypted between Cloudflare edge and cluster
+- **Access logging**: All access attempts logged in Cloudflare dashboard
+- **Split tunnel routing**: Service domains routed through WARP for posture enforcement
+
+### Layer 3: Application Authentication
+- **JupyterHub**: Uses DummyAuthenticator (any password accepted)
+  - **Rationale**: WARP posture check provides the security boundary
+  - Username is used for session identification only
+  - Users must already be on enrolled WARP device to reach login page
+- **Dask Dashboard**: Read-only access, protected by WARP posture
+- **Kubernetes Dashboard**: Token-based auth, protected by WARP posture
+
+### Why DummyAuthenticator is Safe Here
+
+```
+┌─────────────────┐     ┌──────────────────────┐     ┌─────────────────────┐
+│  User Device    │────▶│  Cloudflare Edge     │────▶│  K8s Cluster        │
+│                 │     │                      │     │                     │
+│  WARP Client    │     │  ✓ Device Posture    │     │  JupyterHub         │
+│  (enrolled)     │     │    Check enforced    │     │  (DummyAuth)        │
+│                 │     │                      │     │                     │
+│  Traffic MUST   │     │  ✗ Non-enrolled      │     │  Only reached if    │
+│  go through     │     │    devices blocked   │     │  WARP check passes  │
+│  WARP tunnel    │     │                      │     │                     │
+└─────────────────┘     └──────────────────────┘     └─────────────────────┘
+```
+
+**Security boundary is at Cloudflare, not JupyterHub.** Only devices that:
+1. Have WARP client installed
+2. Are enrolled in your Zero Trust organization
+3. Pass device posture checks
+
+...can even reach the JupyterHub login page. At that point, the user is already authenticated by device enrollment.
+
+### When to Use Stronger Auth
+
+Add JupyterHub OAuth/LDAP authentication when:
+- Multiple untrusted users share the cluster
+- You need per-user audit trails beyond device-level
+- Regulatory requirements mandate application-level auth
+- WARP enrollment is too broad (e.g., entire company has access)

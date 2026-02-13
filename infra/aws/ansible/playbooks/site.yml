@@ -84,8 +84,8 @@
   vars_files:
     - ../group_vars/all.yml
   vars:
-    # Default to ngrok for backwards compatibility
-    ingress_provider: "{{ lookup('env', 'INGRESS_PROVIDER') | default('ngrok') }}"
+    # Default to cloudflare for WARP device posture security
+    ingress_provider: "{{ lookup('env', 'INGRESS_PROVIDER') | default('cloudflare') }}"
   roles:
     - role: ngrok
       when: ingress_provider == 'ngrok'

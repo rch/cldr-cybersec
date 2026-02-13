@@ -7,12 +7,12 @@ metadata:
     app: datagen
     phase: large
 spec:
-  # 24 hour maximum runtime
   activeDeadlineSeconds: {{ datagen_large_deadline_seconds }}
-  # Keep job around for inspection after completion
   ttlSecondsAfterFinished: 86400
-  # Retry on failure (e.g., node preemption)
-  backoffLimit: 3
+  backoffLimit: {{ datagen_large_parallelism | int * 2 }}
+  completions: {{ datagen_large_parallelism }}
+  parallelism: {{ datagen_large_parallelism }}
+  completionMode: Indexed
   template:
     metadata:
       labels:
@@ -29,20 +29,21 @@ spec:
             - "-c"
           args:
             - |
-              """Generate large OTEL dataset for validation testing.
+              """Parallel vectorized OTEL dataset generator.
 
-              This runs asynchronously for hours. When complete, it updates
-              the _active_dataset.json marker in S3 so panel-viz auto-swaps.
+              Runs as an indexed K8s Job. Each pod generates its shard of batches
+              using numpy vectorized operations for ~10x speedup over pure Python.
+              Per-pod progress tracking in S3 enables resume on pod restart.
+              The last pod to finish writes the _active_dataset.json marker.
               """
               import json
               import os
               import random
               import sys
               import time
-              import uuid
               from datetime import datetime, timedelta, timezone
-              from pathlib import Path
 
+              import numpy as np
               import pyarrow as pa
               import pyarrow.parquet as pq
               from pyarrow import fs
@@ -54,18 +55,27 @@ spec:
               PREFIX = "{{ datagen_large_s3_prefix }}"
               DURATION_DAYS = {{ datagen_large_duration_days }}
 
+              # Pod identity from K8s Indexed Job
+              POD_INDEX = int(os.environ.get("JOB_COMPLETION_INDEX", "0"))
+              POD_COUNT = {{ datagen_large_parallelism }}
+
+              # Compute this pod's batch IDs (interleaved sharding)
+              my_batches = list(range(POD_INDEX, BATCHES, POD_COUNT))
+              total_spans_all = BATCHES * SPANS_PER_BATCH
+
               print("=" * 60)
-              print("OTEL Large Dataset Generator")
+              print(f"OTEL Large Dataset Generator - Pod {POD_INDEX + 1}/{POD_COUNT}")
               print("=" * 60)
               print(f"Target: s3://{BUCKET}/{PREFIX}/")
-              print(f"Batches: {BATCHES}")
+              print(f"Total batches: {BATCHES} ({len(my_batches)} assigned to this pod)")
               print(f"Spans per batch: {SPANS_PER_BATCH:,}")
-              print(f"Total spans: {BATCHES * SPANS_PER_BATCH:,}")
-              print(f"Estimated size: ~{(BATCHES * SPANS_PER_BATCH * 100) / (1024**4):.2f} TiB")
+              print(f"Total spans (all pods): {total_spans_all:,}")
+              print(f"This pod's spans: {len(my_batches) * SPANS_PER_BATCH:,}")
+              print(f"Estimated total size: ~{(total_spans_all * 100) / (1024**4):.2f} TiB")
               print("=" * 60)
               sys.stdout.flush()
 
-              # Schema (inline to avoid dependencies)
+              # Schema
               _span_kind_dict = pa.dictionary(pa.int8(), pa.string())
               _status_code_dict = pa.dictionary(pa.int8(), pa.string())
 
@@ -123,13 +133,30 @@ spec:
                   {"name": "message-queue", "kind": "PRODUCER", "operations": ["publish", "consume", "ack", "nack"]},
               ]
 
-              HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH"]
-              HTTP_ROUTES = [
+              # Pre-compute flat arrays for vectorized lookups
+              SVC_NAMES = [s["name"] for s in SERVICE_TEMPLATES]
+              SVC_KINDS = [s["kind"] for s in SERVICE_TEMPLATES]
+              # Build flat operation list with service index mapping
+              SVC_OPS = []
+              SVC_OP_IDX = []
+              for si, s in enumerate(SERVICE_TEMPLATES):
+                  for op in s["operations"]:
+                      SVC_OPS.append(op)
+                      SVC_OP_IDX.append(si)
+              SVC_OPS = np.array(SVC_OPS)
+              SVC_OP_IDX = np.array(SVC_OP_IDX)
+
+              HTTP_METHODS = np.array(["GET", "POST", "PUT", "DELETE", "PATCH"])
+              HTTP_ROUTES = np.array([
                   "/api/users", "/api/users/{id}", "/api/orders", "/api/orders/{id}",
                   "/api/products", "/api/products/{id}", "/api/auth/login", "/api/auth/logout",
                   "/api/health", "/api/metrics", "/api/cart", "/api/checkout",
-              ]
-              HTTP_STATUS_CODES = [200, 200, 200, 200, 201, 204, 400, 401, 403, 404, 500, 502, 503]
+              ])
+              HTTP_STATUS_CODES = np.array([200, 200, 200, 200, 201, 204, 400, 401, 403, 404, 500, 502, 503], dtype=np.int16)
+              EXCEPTION_TYPES = ["RuntimeError", "ValueError", "TimeoutError", "ConnectionError"]
+              EXCEPTION_MSGS = ["Something went wrong", "Connection refused", "Timeout exceeded", "Service unavailable"]
+
+              service_count = len(SERVICE_TEMPLATES)
 
               # Initialize S3
               s3 = fs.S3FileSystem(
@@ -139,13 +166,13 @@ spec:
               )
               base_path = f"{BUCKET}/{PREFIX}"
 
-              # Check for resume state in S3
-              progress_key = f"{base_path}/_progress.json"
+              # Per-pod progress tracking in S3
+              progress_key = f"{base_path}/_progress_{POD_INDEX}.json"
               try:
                   with s3.open_input_stream(progress_key) as f:
                       progress = json.loads(f.read().decode())
                   completed = set(progress.get("completed_batches", []))
-                  print(f"Resuming: {len(completed)} batches already complete")
+                  print(f"Resuming: {len(completed)}/{len(my_batches)} batches already complete")
               except:
                   progress = {"completed_batches": [], "total_bytes": 0, "total_spans": 0}
                   completed = set()
@@ -156,156 +183,295 @@ spec:
               time_range_ns = DURATION_DAYS * 24 * 3600 * 1_000_000_000
               start_ns = int(start_time.timestamp() * 1_000_000_000)
 
-              overall_start = time.time()
-              service_count = len(SERVICE_TEMPLATES)
+              # Stagger pod starts to avoid S3 SLOW_DOWN from concurrent prefix creation
+              stagger = POD_INDEX * 5  # 5 seconds between each pod's start
+              print(f"Staggering start by {stagger}s (pod {POD_INDEX})")
+              sys.stdout.flush()
+              time.sleep(stagger)
 
-              for batch_id in range(BATCHES):
+              overall_start = time.time()
+
+              def write_with_retry(table, root_path, batch_id, max_retries=8):
+                  """Write Hive-partitioned parquet with exponential backoff on S3 throttling."""
+                  for attempt in range(max_retries):
+                      try:
+                          pq.write_to_dataset(
+                              table,
+                              root_path=root_path,
+                              partition_cols=["date", "hour"],
+                              filesystem=s3,
+                              basename_template="batch_%04d_pod%d_{i}.parquet" % (batch_id, POD_INDEX),
+                              existing_data_behavior="overwrite_or_ignore",
+                          )
+                          return True
+                      except OSError as e:
+                          if "SLOW_DOWN" in str(e) and attempt < max_retries - 1:
+                              wait = (2 ** attempt) + random.uniform(0, 2)
+                              print(f"[Pod {POD_INDEX}] S3 SLOW_DOWN on batch {batch_id}, retry {attempt + 1}/{max_retries} after {wait:.1f}s")
+                              sys.stdout.flush()
+                              time.sleep(wait)
+                          else:
+                              raise
+                  return False
+
+              def generate_batch_vectorized(n, batch_id, rng):
+                  """Generate n spans using vectorized numpy operations."""
+                  # Timing
+                  offsets_ns = rng.integers(0, time_range_ns, size=n, dtype=np.int64)
+                  span_starts = start_ns + offsets_ns
+                  durations = np.clip(
+                      rng.exponential(50_000_000, size=n).astype(np.int64),
+                      1_000_000, 30_000_000_000,
+                  )
+                  span_ends = span_starts + durations
+
+                  # Service assignment
+                  svc_indices = rng.integers(0, service_count, size=n)
+                  is_error = rng.random(size=n) < 0.05
+
+                  # Per-span operation: pick random op that belongs to this span's service
+                  # For each span, filter SVC_OP_IDX to matching service, then pick one
+                  op_global_indices = rng.integers(0, len(SVC_OPS), size=n)
+                  # Re-roll until op matches service (vectorized rejection sampling)
+                  mismatched = SVC_OP_IDX[op_global_indices] != svc_indices
+                  retries = 0
+                  while mismatched.any() and retries < 20:
+                      new_indices = rng.integers(0, len(SVC_OPS), size=mismatched.sum())
+                      op_global_indices[mismatched] = new_indices
+                      mismatched = SVC_OP_IDX[op_global_indices] != svc_indices
+                      retries += 1
+                  # Fallback: force remaining mismatches to first op of their service
+                  if mismatched.any():
+                      for idx in np.where(mismatched)[0]:
+                          si = svc_indices[idx]
+                          candidates = np.where(SVC_OP_IDX == si)[0]
+                          op_global_indices[idx] = rng.choice(candidates)
+
+                  names = SVC_OPS[op_global_indices]
+                  kinds_arr = np.array(SVC_KINDS)[svc_indices]
+                  svc_names_arr = np.array(SVC_NAMES)[svc_indices]
+
+                  # Boolean masks for conditional fields
+                  is_server = kinds_arr == "SERVER"
+                  is_client = (kinds_arr == "CLIENT")
+                  is_producer = kinds_arr == "PRODUCER"
+                  is_consumer = kinds_arr == "CONSUMER"
+                  is_msg = is_producer | is_consumer
+
+                  # HTTP fields (SERVER spans only)
+                  http_method_idx = rng.integers(0, len(HTTP_METHODS), size=n)
+                  http_route_idx = rng.integers(0, len(HTTP_ROUTES), size=n)
+                  http_status_idx = rng.integers(0, len(HTTP_STATUS_CODES), size=n)
+
+                  # Host fields
+                  host_nums = rng.integers(1, 11, size=n)
+                  ip_b = rng.integers(1, 256, size=n)
+                  ip_c = rng.integers(1, 256, size=n)
+
+                  # Trace/span IDs - fully vectorized random hex via numpy
+                  # 16 random bytes -> 32 hex chars (same format as uuid4().hex)
+                  trace_raw = rng.bytes(n * 16)
+                  trace_ids = [trace_raw[i*16:(i+1)*16].hex() for i in range(n)]
+                  span_raw = rng.bytes(n * 8)
+                  span_ids = [span_raw[i*8:(i+1)*8].hex() for i in range(n)]
+
+                  # Events/links
+                  events_count = rng.integers(0, 4, size=n, dtype=np.int32)
+                  links_count = np.zeros(n, dtype=np.int32)
+
+                  # Vectorized column construction using numpy indexing + np.where
+                  svc_names_list = svc_names_arr.tolist()
+                  names_list = names.tolist()
+
+                  # Status
+                  status_codes = np.where(is_error, "ERROR", "OK").tolist()
+                  status_msgs = np.where(is_error, "Error occurred", None).tolist()
+
+                  # Host
+                  host_names_list = np.char.add(np.char.add(svc_names_arr.astype(str), "-"), np.char.add(host_nums.astype(str), ".example.com")).tolist()
+                  host_ips = np.char.add("10.0.", np.char.add(np.char.add(ip_b.astype(str), "."), ip_c.astype(str))).tolist()
+
+                  # HTTP (SERVER only, None otherwise)
+                  http_method_vals = HTTP_METHODS[http_method_idx]
+                  http_route_vals = HTTP_ROUTES[http_route_idx]
+                  http_status_vals = HTTP_STATUS_CODES[http_status_idx]
+
+                  http_methods = np.where(is_server, http_method_vals, None).tolist()
+                  http_routes_list = np.where(is_server, http_route_vals, None).tolist()
+                  http_statuses = np.where(is_server, http_status_vals, None).tolist()
+                  http_urls = np.where(is_server, np.char.add("https://api.example.com", http_route_vals), None).tolist()
+
+                  # Attributes
+                  attrs = np.char.add(np.char.add('{"service.name": "', svc_names_arr.astype(str)), '"}').tolist()
+                  res_attrs = ['{}'] * n
+
+                  # DB (CLIENT only)
+                  db_systems = np.where(is_client, "postgresql", None).tolist()
+                  db_names_list = np.where(is_client, "production", None).tolist()
+                  db_ops = np.where(is_client, names, None).tolist()
+
+                  # Messaging (PRODUCER/CONSUMER)
+                  msg_systems = np.where(is_msg, "kafka", None).tolist()
+                  msg_dests = np.where(is_msg, "events", None).tolist()
+                  msg_ops = np.where(is_producer, "publish", np.where(is_consumer, "consume", None)).tolist()
+
+                  # Exceptions (error spans only)
+                  exc_types = np.where(is_error, "RuntimeError", None).tolist()
+                  exc_msgs = np.where(is_error, "Something went wrong", None).tolist()
+
+                  # Compute date/hour for Hive partitioning
+                  timestamps_s = span_starts // 1_000_000_000
+                  days_since_epoch = (timestamps_s // 86400).astype(np.int32)
+                  hours_of_day = ((timestamps_s % 86400) // 3600).astype(np.int8)
+                  unique_days = np.unique(days_since_epoch)
+                  day_to_str = {}
+                  for d in unique_days:
+                      dt = datetime.fromtimestamp(int(d) * 86400, tz=timezone.utc)
+                      day_to_str[int(d)] = dt.strftime("%Y-%m-%d")
+                  date_col = pa.array([day_to_str[int(d)] for d in days_since_epoch], type=pa.string())
+                  hour_col = pa.array(hours_of_day, type=pa.int8())
+
+                  kinds_list = kinds_arr.tolist()
+
+                  table = pa.table({
+                      "trace_id": pa.array(trace_ids, type=pa.string()),
+                      "span_id": pa.array(span_ids, type=pa.string()),
+                      "parent_span_id": pa.nulls(n, type=pa.string()),
+                      "start_time_unix_nano": pa.array(span_starts),
+                      "end_time_unix_nano": pa.array(span_ends),
+                      "duration_ns": pa.array(durations),
+                      "name": pa.array(names_list, type=pa.string()),
+                      "kind": pa.array(kinds_list).dictionary_encode().cast(_span_kind_dict),
+                      "status_code": pa.array(status_codes).dictionary_encode().cast(_status_code_dict),
+                      "status_message": pa.array(status_msgs, type=pa.string()),
+                      "service_name": pa.array(svc_names_list, type=pa.string()),
+                      "service_namespace": pa.array(["production"] * n, type=pa.string()),
+                      "service_version": pa.array(["1.0.0"] * n, type=pa.string()),
+                      "host_name": pa.array(host_names_list, type=pa.string()),
+                      "host_ip": pa.array(host_ips, type=pa.string()),
+                      "attributes_json": pa.array(attrs, type=pa.string()),
+                      "resource_attributes_json": pa.array(res_attrs, type=pa.string()),
+                      "http_method": pa.array(http_methods, type=pa.string()),
+                      "http_status_code": pa.array(http_statuses, type=pa.int16()),
+                      "http_url": pa.array(http_urls, type=pa.string()),
+                      "http_route": pa.array(http_routes_list, type=pa.string()),
+                      "http_target": pa.nulls(n, type=pa.string()),
+                      "db_system": pa.array(db_systems, type=pa.string()),
+                      "db_name": pa.array(db_names_list, type=pa.string()),
+                      "db_operation": pa.array(db_ops, type=pa.string()),
+                      "db_statement": pa.nulls(n, type=pa.string()),
+                      "rpc_system": pa.nulls(n, type=pa.string()),
+                      "rpc_service": pa.nulls(n, type=pa.string()),
+                      "rpc_method": pa.nulls(n, type=pa.string()),
+                      "messaging_system": pa.array(msg_systems, type=pa.string()),
+                      "messaging_destination": pa.array(msg_dests, type=pa.string()),
+                      "messaging_operation": pa.array(msg_ops, type=pa.string()),
+                      "exception_type": pa.array(exc_types, type=pa.string()),
+                      "exception_message": pa.array(exc_msgs, type=pa.string()),
+                      "events_count": pa.array(events_count),
+                      "links_count": pa.array(links_count),
+                      "date": date_col,
+                      "hour": hour_col,
+                  })
+
+                  return table
+
+              for batch_seq, batch_id in enumerate(my_batches):
                   if batch_id in completed:
-                      print(f"Batch {batch_id + 1}/{BATCHES}: Already complete, skipping")
+                      print(f"[Pod {POD_INDEX}] Batch {batch_id} ({batch_seq + 1}/{len(my_batches)}): Already complete, skipping")
                       continue
 
                   batch_start = time.time()
-                  print(f"Batch {batch_id + 1}/{BATCHES}: Generating {SPANS_PER_BATCH:,} spans...")
+                  print(f"[Pod {POD_INDEX}] Batch {batch_id} ({batch_seq + 1}/{len(my_batches)}): Generating {SPANS_PER_BATCH:,} spans...")
                   sys.stdout.flush()
 
-                  spans = []
-                  for i in range(SPANS_PER_BATCH):
-                      offset_ns = random.randint(0, time_range_ns)
-                      span_start_ns = start_ns + offset_ns
-                      duration_ns = int(random.expovariate(1 / 50_000_000))
-                      duration_ns = max(1_000_000, min(duration_ns, 30_000_000_000))
-                      span_end_ns = span_start_ns + duration_ns
+                  # Deterministic seed per batch for reproducibility
+                  rng = np.random.default_rng(seed=batch_id * 10000 + POD_INDEX)
 
-                      service = SERVICE_TEMPLATES[random.randint(0, service_count - 1)]
-                      operation = random.choice(service["operations"])
-                      is_error = random.random() < 0.05
+                  table = generate_batch_vectorized(SPANS_PER_BATCH, batch_id, rng)
 
-                      http_method = random.choice(HTTP_METHODS) if service["kind"] == "SERVER" else None
-                      http_route = random.choice(HTTP_ROUTES) if service["kind"] == "SERVER" else None
-                      http_status = random.choice(HTTP_STATUS_CODES) if service["kind"] == "SERVER" else None
-
-                      dt = datetime.fromtimestamp(span_start_ns / 1_000_000_000, tz=timezone.utc)
-
-                      spans.append({
-                          "trace_id": uuid.uuid4().hex,
-                          "span_id": uuid.uuid4().hex[:16],
-                          "parent_span_id": None,
-                          "start_time_unix_nano": span_start_ns,
-                          "end_time_unix_nano": span_end_ns,
-                          "duration_ns": duration_ns,
-                          "name": operation,
-                          "kind": service["kind"],
-                          "status_code": "ERROR" if is_error else "OK",
-                          "status_message": "Error occurred" if is_error else None,
-                          "service_name": service["name"],
-                          "service_namespace": "production",
-                          "service_version": "1.0.0",
-                          "host_name": f"{service['name']}-{random.randint(1, 10)}.example.com",
-                          "host_ip": f"10.0.{random.randint(1, 255)}.{random.randint(1, 255)}",
-                          "attributes_json": json.dumps({"service.name": service["name"]}),
-                          "resource_attributes_json": json.dumps({}),
-                          "http_method": http_method,
-                          "http_status_code": http_status,
-                          "http_url": f"https://api.example.com{http_route}" if http_route else None,
-                          "http_route": http_route,
-                          "http_target": None,
-                          "db_system": "postgresql" if service["kind"] == "CLIENT" else None,
-                          "db_name": "production" if service["kind"] == "CLIENT" else None,
-                          "db_operation": operation if service["kind"] == "CLIENT" else None,
-                          "db_statement": None,
-                          "rpc_system": None,
-                          "rpc_service": None,
-                          "rpc_method": None,
-                          "messaging_system": "kafka" if service["kind"] in ("PRODUCER", "CONSUMER") else None,
-                          "messaging_destination": "events" if service["kind"] in ("PRODUCER", "CONSUMER") else None,
-                          "messaging_operation": "publish" if service["kind"] == "PRODUCER" else ("consume" if service["kind"] == "CONSUMER" else None),
-                          "exception_type": "RuntimeError" if is_error else None,
-                          "exception_message": "Something went wrong" if is_error else None,
-                          "events_count": random.randint(0, 3),
-                          "links_count": 0,
-                          "_date": dt.date(),
-                          "_hour": dt.hour,
-                      })
-
-                      if (i + 1) % 10_000_000 == 0:
-                          print(f"  Batch {batch_id + 1}: Generated {(i+1):,} spans")
-                          sys.stdout.flush()
-
-                  # Group by partition and write
-                  print(f"Batch {batch_id + 1}: Writing to S3...")
+                  # Write Hive-partitioned parquet (date=X/hour=Y/*.parquet)
+                  print(f"[Pod {POD_INDEX}] Batch {batch_id}: Writing to S3 (Hive partitioned)...")
                   sys.stdout.flush()
 
-                  partitions = {}
-                  for span in spans:
-                      key = (span.pop("_date"), span.pop("_hour"))
-                      partitions.setdefault(key, []).append(span)
+                  write_start = time.time()
+                  write_with_retry(table, f"{base_path}/spans", batch_id)
+                  write_elapsed = time.time() - write_start
+                  print(f"[Pod {POD_INDEX}] Batch {batch_id}: S3 write took {write_elapsed:.1f}s")
 
-                  files_written = 0
-                  bytes_written = 0
+                  # Estimate bytes written from table size (actual S3 size varies with compression)
+                  bytes_written = table.nbytes // 3  # rough snappy compression ratio
 
-                  for (date_val, hour_val), partition_spans in partitions.items():
-                      output_dir = f"{base_path}/spans/date={date_val.isoformat()}/hour={hour_val:02d}"
-                      try:
-                          s3.create_dir(output_dir)
-                      except:
-                          pass
-
-                      file_path = f"{output_dir}/batch_{batch_id:04d}_{uuid.uuid4().hex[:8]}.parquet"
-                      table = pa.Table.from_pylist(partition_spans, schema=SPANS_SCHEMA)
-                      pq.write_table(table, file_path, filesystem=s3, row_group_size=100_000, compression="snappy")
-
-                      try:
-                          info = s3.get_file_info(file_path)
-                          bytes_written += info.size
-                      except:
-                          pass
-                      files_written += 1
-
-                  # Update progress in S3
+                  # Update per-pod progress
                   progress["completed_batches"].append(batch_id)
                   progress["total_bytes"] += bytes_written
-                  progress["total_spans"] += len(spans)
+                  progress["total_spans"] += SPANS_PER_BATCH
 
-                  with s3.open_output_stream(progress_key) as f:
-                      f.write(json.dumps(progress).encode())
+                  for _retry in range(5):
+                      try:
+                          with s3.open_output_stream(progress_key) as f:
+                              f.write(json.dumps(progress).encode())
+                          break
+                      except OSError:
+                          time.sleep(2 ** _retry + random.uniform(0, 1))
 
                   batch_elapsed = time.time() - batch_start
                   total_gib = progress["total_bytes"] / (1024**3)
+                  pct = (batch_seq + 1) / len(my_batches) * 100
+                  rate = SPANS_PER_BATCH / batch_elapsed
 
-                  print(f"Batch {batch_id + 1}: Complete in {batch_elapsed:.1f}s - {files_written} files, {bytes_written / (1024**3):.2f} GiB")
-                  print(f"Progress: {len(progress['completed_batches'])}/{BATCHES} batches, {progress['total_spans']:,} spans, {total_gib:.2f} GiB")
+                  print(f"[Pod {POD_INDEX}] Batch {batch_id}: {batch_elapsed:.1f}s, {bytes_written / (1024**2):.0f} MiB, {rate:,.0f} spans/s")
+                  print(f"[Pod {POD_INDEX}] Progress: {len(progress['completed_batches'])}/{len(my_batches)} ({pct:.0f}%), {progress['total_spans']:,} spans, {total_gib:.2f} GiB")
                   sys.stdout.flush()
 
-                  # Clear memory
-                  del spans
+                  del table
 
-              # All complete - update active dataset marker
+              # Pod complete
               overall_elapsed = time.time() - overall_start
               hours = overall_elapsed / 3600
 
               print("=" * 60)
-              print("Generation Complete!")
+              print(f"Pod {POD_INDEX} Generation Complete!")
               print("=" * 60)
-              print(f"Total time: {hours:.2f} hours")
-              print(f"Total spans: {progress['total_spans']:,}")
-              print(f"Total size: {progress['total_bytes'] / (1024**4):.3f} TiB")
-              print(f"Location: s3://{BUCKET}/{PREFIX}/spans/")
+              print(f"Time: {hours:.2f} hours")
+              print(f"Spans: {progress['total_spans']:,}")
+              print(f"Size: {progress['total_bytes'] / (1024**3):.2f} GiB")
               print("=" * 60)
 
-              # Update active dataset marker
-              marker = {
-                  "dataset": PREFIX,
-                  "updated_at": datetime.now(timezone.utc).isoformat(),
-                  "phase": "large",
-                  "total_spans": progress["total_spans"],
-                  "total_bytes": progress["total_bytes"],
-              }
-              marker_key = f"{BUCKET}/_active_dataset.json"
-              with s3.open_output_stream(marker_key) as f:
-                  f.write(json.dumps(marker).encode())
+              # Check if all pods are done - last one writes the marker
+              all_done = True
+              total_spans_global = 0
+              total_bytes_global = 0
+              for pod_id in range(POD_COUNT):
+                  try:
+                      pk = f"{base_path}/_progress_{pod_id}.json"
+                      with s3.open_input_stream(pk) as f:
+                          p = json.loads(f.read().decode())
+                      total_spans_global += p.get("total_spans", 0)
+                      total_bytes_global += p.get("total_bytes", 0)
+                      expected = len(range(pod_id, BATCHES, POD_COUNT))
+                      if len(p.get("completed_batches", [])) < expected:
+                          all_done = False
+                  except:
+                      all_done = False
 
-              print(f"Updated active dataset marker: s3://{BUCKET}/_active_dataset.json")
-              print("Panel viz will auto-swap to large dataset on next poll")
+              if all_done:
+                  marker = {
+                      "dataset": PREFIX,
+                      "updated_at": datetime.now(timezone.utc).isoformat(),
+                      "phase": "large",
+                      "total_spans": total_spans_global,
+                      "total_bytes": total_bytes_global,
+                  }
+                  marker_key = f"{BUCKET}/_active_dataset.json"
+                  with s3.open_output_stream(marker_key) as f:
+                      f.write(json.dumps(marker).encode())
+                  print(f"All {POD_COUNT} pods complete! Updated active dataset marker.")
+                  print(f"Total: {total_spans_global:,} spans, {total_bytes_global / (1024**4):.3f} TiB")
+                  print("Panel viz will auto-swap to large dataset on next poll")
+              else:
+                  print(f"Pod {POD_INDEX} done. Other pods still running.")
+
               sys.stdout.flush()
           envFrom:
             - secretRef:
@@ -315,5 +481,5 @@ spec:
               memory: "{{ datagen_large_memory_limit }}"
               cpu: "{{ datagen_large_cpu_limit }}"
             requests:
-              memory: "4Gi"
+              memory: "3Gi"
               cpu: "1"

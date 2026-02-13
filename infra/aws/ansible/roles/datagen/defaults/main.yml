@@ -4,8 +4,8 @@
 # Namespace for datagen jobs
 datagen_namespace: datagen
 
-# S3 bucket for data storage
-datagen_s3_bucket: "{{ lookup('env', 'OTEL_S3_BUCKET') | default('cybersec-dask-data', true) }}"
+# S3 bucket for data storage (uses s3_bucket_name from aws:deploy task, falls back to env/default)
+datagen_s3_bucket: "{{ s3_bucket_name | default(lookup('env', 'OTEL_S3_BUCKET') | default('cybersec-dask-data', true), true) }}"
 
 # -------------------------------------------------------------------------
 # Minimal Dataset (Phase 1) - runs quickly, provides immediate data
@@ -27,17 +27,21 @@ datagen_minimal_cpu_limit: "2"
 # For full TB+ validation dataset: batches=150, spans_per_batch=100000000
 # For smaller validation (fits on limited clusters):
 datagen_large_batches: 10
-datagen_large_spans_per_batch: 10000000  # 10M per batch = 100M total (~10 GiB)
+datagen_large_spans_per_batch: 2000000  # 2M per batch = 20M total (~2 GiB)
 datagen_large_s3_prefix: "otel-large"
 datagen_large_duration_days: 7
 
 # Resource limits for large job
-# Note: Reduce these if cluster has limited resources
-datagen_large_memory_limit: "8Gi"
+# Note: Vectorized generation uses ~3-4Gi for 10M spans/batch
+datagen_large_memory_limit: "6Gi"
 datagen_large_cpu_limit: "2"
 
-# Maximum runtime for large job (24 hours)
-datagen_large_deadline_seconds: 86400
+# Parallelism for large job (number of pods running simultaneously)
+# Uses K8s Indexed Job completions - each pod generates its shard of batches
+datagen_large_parallelism: 6
+
+# Maximum runtime for large job (12 hours)
+datagen_large_deadline_seconds: 43200
 
 # -------------------------------------------------------------------------
 # Common Configuration
@@ -46,7 +50,7 @@ datagen_large_deadline_seconds: 86400
 # AWS credentials (from environment or AWS CLI config)
 datagen_aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') | default(lookup('ini', 'aws_access_key_id', section='default', file='~/.aws/credentials', errors='ignore'), true) }}"
 datagen_aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') | default(lookup('ini', 'aws_secret_access_key', section='default', file='~/.aws/credentials', errors='ignore'), true) }}"
-datagen_aws_region: "{{ lookup('env', 'AWS_REGION') | default('us-east-1', true) }}"
+datagen_aws_region: "{{ aws_region | default(lookup('env', 'AWS_REGION') | default('us-east-1', true), true) }}"
 
 # Container image for datagen jobs
 datagen_image: "ghcr.io/dask/dask:latest"

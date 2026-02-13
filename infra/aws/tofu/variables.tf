@@ -57,7 +57,7 @@ variable "public_subnet_cidrs" {
 variable "rke2_version" {
   description = "RKE2 version to install"
   type        = string
-  default     = "v1.31.0+rke2r1"
+  default     = "v1.34.3+rke2r1"  # Keep in sync with ansible/group_vars/all.yml
 }
 
 variable "control_plane_count" {
@@ -165,7 +165,7 @@ variable "cloudflare_access_open" {
 }
 
 variable "cloudflare_warp_posture_rule_id" {
-  description = "ID of existing WARP device posture rule. Find in Cloudflare dashboard: Zero Trust > Settings > WARP Client > Device posture. Required when cloudflare_access_open = false."
+  description = "Existing WARP device posture rule ID. If set, uses this instead of creating a new rule (useful when API token lacks Zero Trust permissions)."
   type        = string
   default     = ""
 }
@@ -173,7 +173,7 @@ variable "cloudflare_warp_posture_rule_id" {
 variable "ingress_provider" {
   description = "Ingress provider: 'ngrok' or 'cloudflare'"
   type        = string
-  default     = "ngrok"
+  default     = "cloudflare"  # Cloudflare recommended for WARP device posture security
 
   validation {
     condition     = contains(["ngrok", "cloudflare"], var.ingress_provider)

@@ -63,7 +63,7 @@ components:
     charts:
       - name: dask-kubernetes-operator
         namespace: dask-operator
-        url: https://helm.dask.org
+        localPath: charts/dask-kubernetes-operator-2024.1.0.tgz
         version: 2024.1.0
         valuesFiles:
           - manifests/dask-operator-values.yaml
@@ -104,7 +104,7 @@ components:
     charts:
       - name: jupyterhub
         namespace: jupyterhub
-        url: https://jupyterhub.github.io/helm-chart
+        localPath: charts/jupyterhub-4.0.0.tgz
         version: 4.0.0
         valuesFiles:
           - manifests/jupyterhub-values.yaml
@@ -138,6 +138,28 @@ components:
                 name: app=panel-viz
                 namespace: panel-viz
                 condition: Ready
+
+  # ===========================================================================
+  # Sample Notebooks - Inject actual notebook content into ConfigMap
+  # ===========================================================================
+  - name: sample-notebooks
+    required: false
+    default: true
+    description: Sample notebooks demonstrating out-of-core Dask processing
+    manifests:
+      - name: sample-notebooks-manifests
+        namespace: jupyterhub
+        files:
+          - manifests/jupyterhub-namespace.yaml
+          - manifests/sample-notebooks-configmap.yaml
+    files:
+      # Include notebook files for reference in air-gap deployments
+      - source: notebooks/OTel_Telemetry_Explorer.ipynb
+        target: /opt/notebooks/OTel_Telemetry_Explorer.ipynb
+      - source: notebooks/Dask_Kub_Viz_Sample_Problem.ipynb
+        target: /opt/notebooks/Dask_Kub_Viz_Sample_Problem.ipynb
+      - source: notebooks/Dask_S3_Validation.ipynb
+        target: /opt/notebooks/Dask_S3_Validation.ipynb
 
   # ===========================================================================
   # Ingress - optional, enables external access via Traefik

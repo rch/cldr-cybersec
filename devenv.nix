@@ -2132,6 +2132,31 @@ asyncio.run(main())
       echo "  Panel-Viz:      http://<node-ip>:30506"
     '';
 
+    "zarf:datagen".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== OTEL Synthetic Data Generator ==="
+
+      MODE="''${1:-minimal}"
+      S3_BUCKET="''${S3_BUCKET:-$OTEL_S3_BUCKET}"
+      S3_BUCKET="''${S3_BUCKET:-cybersec-dask-data}"
+
+      if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+        log_error "AWS credentials not set"
+        log_info "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or use:"
+        log_info "  export AWS_PROFILE=your-profile && eval \$(aws configure export-credentials --format env)"
+        exit 1
+      fi
+
+      log_info "Mode: $MODE"
+      log_info "Bucket: $S3_BUCKET"
+
+      uv run python zarf/scripts/generate-otel-data.py \
+        --mode "$MODE" \
+        --bucket "$S3_BUCKET" \
+        --region "''${AWS_REGION:-us-east-1}" \
+        ''${S3_ENDPOINT:+--endpoint "$S3_ENDPOINT"}
+    '';
+
     "restart:clean".exec = ''
       source scripts/polaris_bootstrap_helper.sh
 

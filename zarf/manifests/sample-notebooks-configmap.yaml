@@ -1,0 +1,61 @@
+# Sample notebooks ConfigMap for JupyterHub
+# These notebooks demonstrate out-of-core processing with Dask + S3
+#
+# Mounted read-only at /home/jovyan/sample-notebooks/
+# Users should copy to their home directory to edit:
+#   cp ~/sample-notebooks/*.ipynb ~/
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sample-notebooks
+  namespace: jupyterhub
+  labels:
+    app: jupyterhub
+    component: sample-notebooks
+data:
+  # Note: Notebook content is included via Zarf file injection
+  # See zarf.yaml for the actual notebook files
+  README.md: |
+    # Sample Notebooks
+
+    These notebooks demonstrate out-of-core processing with Dask and S3.
+
+    ## Available Notebooks
+
+    | Notebook | Description | Data Size |
+    |----------|-------------|-----------|
+    | `OTel_Telemetry_Explorer.ipynb` | OTEL trace visualization with Dask | 50K-1B spans |
+    | `Dask_Kub_Viz_Sample_Problem.ipynb` | Array visualization with datashader | 15B values (~120 GB) |
+    | `Dask_S3_Validation.ipynb` | Out-of-core stress test | 30 GB (60M spans) |
+
+    ## Getting Started
+
+    These notebooks are **read-only** (mounted from ConfigMap). To edit and run:
+
+    ```python
+    import shutil
+    shutil.copy('/home/jovyan/sample-notebooks/OTel_Telemetry_Explorer.ipynb', '/home/jovyan/')
+    ```
+
+    Or from terminal:
+    ```bash
+    cp ~/sample-notebooks/*.ipynb ~/
+    ```
+
+    ## Environment Variables
+
+    The following are pre-configured:
+    - `DASK_SCHEDULER_ADDRESS`: Dask cluster endpoint
+    - `OTEL_DATA_PATH`: S3 path to OTEL data
+    - `S3_ENDPOINT`: MinIO/S3 endpoint (if applicable)
+    - AWS credentials via IAM role or environment variables
+
+    ## Cluster Resources
+
+    Default Dask cluster: 4 workers × 4 GiB = 16 GiB
+
+    For 1+ TB datasets, scale workers:
+    ```bash
+    kubectl scale deployment cybersec-dask-worker -n dask --replicas=64
+    ```

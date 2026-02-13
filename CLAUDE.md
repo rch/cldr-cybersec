@@ -400,6 +400,13 @@ The health system provides FMEA-based diagnostics and automated remediation.
 /aws preflight us-west-1   # Check quotas in specific region
 /aws preflight --eips      # List current EIP allocations
 /aws target us-west-1      # Set target region
+
+# Zarf air-gap deployment commands
+/zarf                      # Show package info and status
+/zarf preflight            # Validate air-gap deployment requirements
+/zarf preflight --registry # Include registry connectivity check
+/zarf package              # Build Zarf package
+/zarf deploy               # Deploy to cluster
 ```
 
 ### Categories

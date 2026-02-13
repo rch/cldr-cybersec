@@ -181,13 +181,34 @@ resource "cloudflare_zero_trust_access_application" "cybersec" {
 }
 
 # -----------------------------------------------------------------------------
+# WARP Device Posture Rule
+# -----------------------------------------------------------------------------
+# Uses an existing posture rule if cloudflare_warp_posture_rule_id is set,
+# otherwise creates a new one (requires Zero Trust API permissions).
+
+locals {
+  # Use existing posture rule ID if provided, otherwise use the created one
+  warp_posture_rule_id = var.cloudflare_warp_posture_rule_id != "" ? var.cloudflare_warp_posture_rule_id : (
+    length(cloudflare_zero_trust_device_posture_rule.require_warp) > 0 ? cloudflare_zero_trust_device_posture_rule.require_warp[0].id : ""
+  )
+}
+
+resource "cloudflare_zero_trust_device_posture_rule" "require_warp" {
+  # Only create if no existing rule ID provided
+  count = var.ingress_provider == "cloudflare" && !var.cloudflare_access_open && var.cloudflare_warp_posture_rule_id == "" ? 1 : 0
+
+  account_id  = var.cloudflare_account_id
+  name        = "Require WARP (cybersec-${var.developer_prefix})"
+  type        = "warp"
+  description = "Requires WARP client to be connected and enrolled"
+  schedule    = "24h"
+}
+
+# -----------------------------------------------------------------------------
 # Zero Trust Access Policy
 # -----------------------------------------------------------------------------
 # Secure by default: requires WARP client enrolled in Zero Trust org.
 # Set cloudflare_access_open = true for public access (demos only).
-#
-# When secure mode (cloudflare_access_open = false), requires cloudflare_warp_posture_rule_id
-# pointing to an existing WARP device posture rule from the Cloudflare dashboard.
 
 resource "cloudflare_zero_trust_access_policy" "main" {
   count = var.ingress_provider == "cloudflare" ? 1 : 0
@@ -196,7 +217,7 @@ resource "cloudflare_zero_trust_access_policy" "main" {
   application_id = cloudflare_zero_trust_access_application.cybersec[0].id
   name           = var.cloudflare_access_open ? "Public Access (INSECURE)" : "Require WARP"
   precedence     = 1
-  decision       = "allow"
+  decision       = var.cloudflare_access_open ? "bypass" : "allow"
 
   include {
     everyone = true
@@ -204,16 +225,9 @@ resource "cloudflare_zero_trust_access_policy" "main" {
 
   # When NOT open, require WARP device posture (org enrollment)
   dynamic "require" {
-    for_each = !var.cloudflare_access_open && var.cloudflare_warp_posture_rule_id != "" ? [1] : []
+    for_each = !var.cloudflare_access_open && local.warp_posture_rule_id != "" ? [1] : []
     content {
-      device_posture = [var.cloudflare_warp_posture_rule_id]
-    }
-  }
-
-  lifecycle {
-    precondition {
-      condition     = var.cloudflare_access_open || var.cloudflare_warp_posture_rule_id != ""
-      error_message = "cloudflare_warp_posture_rule_id is required when cloudflare_access_open = false. Find the rule ID in Cloudflare dashboard: Zero Trust > Settings > WARP Client > Device posture"
+      device_posture = [local.warp_posture_rule_id]
     }
   }
 }

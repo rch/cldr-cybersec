@@ -90,6 +90,6 @@
   ansible.builtin.debug:
     msg: >
       Large datagen job started asynchronously.
-      Target: {{ datagen_large_batches }} batches x {{ datagen_large_spans_per_batch }} spans = ~{{ (datagen_large_batches * datagen_large_spans_per_batch / 1000000000) | round(1) }}B spans.
+      Target: {{ datagen_large_batches }} batches x {{ datagen_large_spans_per_batch }} spans = ~{{ (datagen_large_batches | int * datagen_large_spans_per_batch | int / 1000000000) | round(1) }}B spans.
       Monitor with: kubectl logs -f job/datagen-large -n {{ datagen_namespace }}
   when: datagen_large_enabled | default(true)

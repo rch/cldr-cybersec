@@ -1,0 +1,10 @@
+# JupyterHub namespace
+# Created separately to ensure it exists before the sample-notebooks ConfigMap
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jupyterhub
+  labels:
+    app.kubernetes.io/name: jupyterhub
+    app.kubernetes.io/component: namespace
