@@ -27,6 +27,7 @@
   # https://devenv.sh/packages/
   packages = with pkgs; [
     awscli2
+    claude-code
     conftest
     d2
     dbmate
