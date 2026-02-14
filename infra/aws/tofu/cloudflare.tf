@@ -49,6 +49,13 @@ resource "cloudflare_zero_trust_tunnel_cloudflared" "cybersec" {
   account_id = var.cloudflare_account_id
   name       = "cybersec-dask-${var.developer_prefix}"
   secret     = random_id.tunnel_secret[0].b64_std
+
+  lifecycle {
+    precondition {
+      condition     = var.cloudflare_account_id != ""
+      error_message = "cloudflare_account_id is required when ingress_provider=cloudflare. Add to terraform.tfvars or set CLOUDFLARE_ACCOUNT_ID."
+    }
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -109,6 +116,13 @@ resource "cloudflare_record" "dask" {
   proxied = true # Required for Zero Trust Access policies
   ttl     = 1    # Auto (when proxied)
   comment = "Cloudflare Tunnel: Dask Dashboard (${var.developer_prefix})"
+
+  lifecycle {
+    precondition {
+      condition     = var.cloudflare_zone_id != ""
+      error_message = "cloudflare_zone_id is required when ingress_provider=cloudflare. Add to terraform.tfvars or set CLOUDFLARE_ZONE_ID."
+    }
+  }
 }
 
 resource "cloudflare_record" "jupyterhub" {
@@ -161,12 +175,23 @@ resource "cloudflare_zero_trust_access_application" "cybersec" {
   session_duration = "24h"
 
   # Protect all four services under one Access application
-  self_hosted_domains = [
-    local.ingress_domains.dask,
-    local.ingress_domains.jupyterhub,
-    local.ingress_domains.k8s,
-    local.ingress_domains.viz,
-  ]
+  # (migrated from deprecated self_hosted_domains to destinations)
+  destinations {
+    type = "public"
+    uri  = local.ingress_domains.dask
+  }
+  destinations {
+    type = "public"
+    uri  = local.ingress_domains.jupyterhub
+  }
+  destinations {
+    type = "public"
+    uri  = local.ingress_domains.k8s
+  }
+  destinations {
+    type = "public"
+    uri  = local.ingress_domains.viz
+  }
 
   # Skip interstitial page for better UX
   skip_interstitial = true

@@ -61,6 +61,17 @@ warn contains msg if {
 }
 
 # ==========================================================================
+# Split Tunnel Reminder
+# ==========================================================================
+
+# Warn: WARP split tunnel must include service domains (manual dashboard config)
+warn contains msg if {
+    ingress_provider == "cloudflare"
+    cloudflare.tunnel_token_set
+    msg := "Verify WARP split tunnel includes *.dev.aws.zndx.org in Cloudflare dashboard (Settings > WARP Client > Split Tunnels > Include mode)"
+}
+
+# ==========================================================================
 # Info Messages
 # ==========================================================================
 

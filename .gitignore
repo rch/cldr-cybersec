@@ -4,6 +4,7 @@
 !**/requirements*.txt
 .env
 .envrc.local
+*.auto.tfvars
 thirdparty
 .DS_Store
 .vscode
