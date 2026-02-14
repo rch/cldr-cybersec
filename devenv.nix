@@ -626,6 +626,9 @@ PY
         fi
       fi
 
+      # Ensure providers are initialized (lock file may exist but .terraform/ is gitignored)
+      tofu init -input=false -no-color >/dev/null 2>&1 || true
+
       echo "Generating destroy plan..."
       (
         tofu plan -destroy -var "ssh_key_name=$KEY_NAME" -out=destroy.tfplan
