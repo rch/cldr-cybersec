@@ -198,7 +198,7 @@ org.apache.nifi.bootstrap.config.log.dir_IS_UNDEFINED/
 *.tfstate
 *.tfstate.backup
 *.tfstate.*.backup
-# .terraform.lock.hcl is intentionally NOT ignored — commit it for reproducible provider versions
+.terraform.lock.hcl
 
 # Ansible
 .ansible_cache/
