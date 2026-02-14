@@ -6,11 +6,19 @@ Deploy a production-grade Dask cluster with JupyterHub on RKE2 in AWS, with secu
 
 ```bash
 # Prerequisites: AWS credentials, Cloudflare API token, WARP client enrolled
-export CLOUDFLARE_API_TOKEN="..."
-export CLOUDFLARE_ACCOUNT_ID="..."
-export CLOUDFLARE_ZONE_ID="..."
 
-# One-command deployment
+# 1. Set secrets in .env (gitignored)
+echo 'CLOUDFLARE_API_TOKEN=...' >> .env
+echo 'CLOUDFLARE_ACCOUNT_ID=...' >> .env
+echo 'CLOUDFLARE_ZONE_ID=...' >> .env
+
+# 2. Set Cloudflare IDs for tofu (gitignored, loaded automatically)
+cat > infra/aws/tofu/local.auto.tfvars <<'EOF'
+cloudflare_account_id = "your-account-id"
+cloudflare_zone_id    = "your-zone-id"
+EOF
+
+# 3. Deploy
 ./scripts/deploy-e2e.sh
 
 # Access (after WARP enrollment)
@@ -130,10 +138,16 @@ Alternatively, run OpenTofu directly:
 
 ```bash
 cd infra/aws/tofu
-cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your SSH key name
 tofu init
-tofu plan
+
+# Create local.auto.tfvars with your Cloudflare IDs (gitignored)
+cat > local.auto.tfvars <<'EOF'
+cloudflare_account_id = "your-account-id"
+cloudflare_zone_id    = "your-zone-id"
+EOF
+
+tofu plan -var="developer_prefix=$(git config user.email | md5sum | cut -c1-8)" \
+          -var="ssh_key_name=cybersec-dask-$(git config user.email | md5sum | cut -c1-8)"
 tofu apply
 ```
 
@@ -193,35 +207,47 @@ Checks:
 
 ## Environment Variables
 
-### Required
+### Required (in `.env`, gitignored)
 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `AWS_PROFILE` | AWS credentials profile | `default` |
-| `NGROK_AUTH_TOKEN` | ngrok authentication token | `2abc...` |
-| `NGROK_API_KEY` | ngrok API key for operator | `s_abc...` |
-| `NGROK_ALLOWED_EMAIL` | Email(s) allowed via OAuth | `user@company.com` |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token (Zone DNS, Tunnel, Access) | `L0p0g...` |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID | `35b2c...` |
+| `CLOUDFLARE_ZONE_ID` | Cloudflare zone ID | `b44e1...` |
+
+### Required (in `infra/aws/tofu/local.auto.tfvars`, gitignored)
+
+| Variable | Description |
+|----------|-------------|
+| `cloudflare_account_id` | Same as `CLOUDFLARE_ACCOUNT_ID` — tofu loads this automatically |
+| `cloudflare_zone_id` | Same as `CLOUDFLARE_ZONE_ID` — tofu loads this automatically |
 
 ### Optional
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API token for DNS | — |
-| `CLOUDFLARE_ZONE_ID` | Cloudflare zone ID | — |
-| `NGROK_DOMAIN` | Custom domain for ingress | auto-generated |
+| `NGROK_AUTH_TOKEN` | ngrok auth token (if using ngrok ingress) | — |
+| `NGROK_API_KEY` | ngrok API key (if using ngrok ingress) | — |
+| `NGROK_ALLOWED_EMAIL` | Email(s) allowed via OAuth | — |
 | `JUPYTERHUB_ADMIN` | JupyterHub admin user | — |
 
 ### Setting Variables
 
 ```bash
-# In .envrc.local (recommended, gitignored)
-export AWS_PROFILE=default
-export NGROK_AUTH_TOKEN=your-token
-export NGROK_API_KEY=your-api-key
-export NGROK_ALLOWED_EMAIL=user@company.com
+# Secrets go in .env (gitignored, loaded by direnv)
+cat >> .env <<'EOF'
+AWS_PROFILE=default
+CLOUDFLARE_API_TOKEN=your-token
+CLOUDFLARE_ACCOUNT_ID=your-account-id
+CLOUDFLARE_ZONE_ID=your-zone-id
+EOF
 
-# Or pass to specific tasks
-NGROK_AUTH_TOKEN=xxx devenv tasks run aws:deploy:ngrok
+# Cloudflare IDs also go in local.auto.tfvars (gitignored, loaded by tofu)
+cat > infra/aws/tofu/local.auto.tfvars <<'EOF'
+cloudflare_account_id = "your-account-id"
+cloudflare_zone_id    = "your-zone-id"
+EOF
 ```
 
 ---
@@ -394,27 +420,34 @@ Cloudflare Tunnel provides secure external access with **device-based authentica
 
 #### Configuration
 
-```bash
-# Required environment variables
-export CLOUDFLARE_API_TOKEN="your-token"
+Cloudflare configuration uses a **two-file pattern** to keep secrets out of git:
 
-# In /tmp/cloudflare.tfvars (or add to your tfvars)
+```bash
+# 1. API token in .env (gitignored, loaded by direnv)
+echo 'CLOUDFLARE_API_TOKEN=your-token' >> .env
+
+# 2. Account/zone IDs in local.auto.tfvars (gitignored, loaded by tofu automatically)
+cat > infra/aws/tofu/local.auto.tfvars <<'EOF'
 cloudflare_account_id = "your-account-id"
-cloudflare_zone_id = "your-zone-id"
-ingress_provider = "cloudflare"
-# Note: WARP posture rule is created automatically - no manual ID needed
+cloudflare_zone_id    = "your-zone-id"
+EOF
 ```
+
+Tofu automatically loads `*.auto.tfvars` files — no env vars, no shell tricks.
+If `cloudflare_account_id` or `cloudflare_zone_id` are missing, `tofu plan`
+will fail immediately with a clear error (lifecycle preconditions).
 
 #### Tofu Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ingress_provider` | Ingress method: `ngrok` or `cloudflare` | `ngrok` |
-| `cloudflare_account_id` | Cloudflare account ID | — |
-| `cloudflare_zone_id` | Zone ID for base domain | — |
-| `cloudflare_access_open` | `true` = public access (INSECURE) | `false` |
-| `ingress_root_domain` | Root domain (e.g., `zndx.org`) | `zndx.org` |
-| `ingress_env_id` | Environment ID (e.g., `aws`) | `aws` |
+| Variable | Where to Set | Description | Default |
+|----------|-------------|-------------|---------|
+| `cloudflare_account_id` | `local.auto.tfvars` | Cloudflare account ID | — (required) |
+| `cloudflare_zone_id` | `local.auto.tfvars` | Zone ID for base domain | — (required) |
+| `ingress_provider` | `terraform.tfvars` | Ingress method: `ngrok` or `cloudflare` | `cloudflare` |
+| `cloudflare_access_open` | `terraform.tfvars` | `true` = public access (INSECURE) | `false` |
+| `cloudflare_warp_posture_rule_id` | `terraform.tfvars` | Pre-created WARP posture rule ID | — (auto-created if empty) |
+| `ingress_root_domain` | `terraform.tfvars` | Root domain (e.g., `zndx.org`) | `zndx.org` |
+| `ingress_env_id` | `terraform.tfvars` | Environment ID (e.g., `aws`) | `aws` |
 
 #### Resources Created
 
@@ -629,7 +662,8 @@ aws/
 │   ├── s3.tf                    # S3 bucket
 │   ├── security.tf              # Security groups
 │   ├── cloudflare.tf            # Cloudflare Tunnel + Zero Trust Access
-│   └── terraform.tfvars.example # Example configuration
+│   ├── terraform.tfvars         # Shared config (committed)
+│   └── local.auto.tfvars        # Per-developer secrets (gitignored)
 └── ansible/
     ├── playbooks/
     │   ├── site.yml             # Main playbook (RKE2 + Dask)
@@ -678,7 +712,7 @@ devenv tasks run k8s:status
 
 ## Security Notes
 
-1. **SSH Access**: Default allows 0.0.0.0/0. Restrict `allowed_ssh_cidrs` in production.
+1. **SSH Access**: Restricted to `100.96.0.0/12` (WARP CGNAT range) via `allowed_ssh_cidrs` in `terraform.tfvars`. Only devices enrolled in WARP can SSH to cluster nodes.
 
 2. **Session Manager**: All nodes have SSM access for emergency access without SSH keys.
 
