@@ -13,3 +13,6 @@
 [submodule "thirdparty/polaris"]
 	path = thirdparty/polaris
 	url = https://github.com/apache/polaris.git
+[submodule "thirdparty/cdpcli"]
+	path = thirdparty/cdpcli
+	url = git@github.com:rch/cldr-cdpcli.git
