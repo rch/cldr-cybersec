@@ -230,6 +230,86 @@ if needs_init:
     "docs:build".exec = "mdbook build docs/current";
     "docs:open".exec = "mdbook build docs/current --open";
 
+    # Clean rebuild of Flink lib/ (Iceberg connectors + Hadoop client)
+    # Use after submodule updates, version changes, or classpath issues
+    "flink:rebuild-lib".exec = ''
+      FLINK_DIST="$PWD/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1"
+
+      if [ ! -d "$FLINK_DIST/lib" ]; then
+        echo "ERROR: Flink not built yet. Run: devenv tasks run restart:clean"
+        exit 1
+      fi
+
+      echo "=== Cleaning stale Hadoop/Iceberg JARs from Flink lib ==="
+      rm -f "$FLINK_DIST/lib/"hadoop-*.jar
+      rm -f "$FLINK_DIST/lib/"woodstox-core-*.jar
+      rm -f "$FLINK_DIST/lib/"stax2-api-*.jar
+      rm -f "$FLINK_DIST/lib/"iceberg-*.jar
+      rm -f "$FLINK_DIST/lib/"aws-java-sdk-bundle-*.jar
+
+      echo "=== Installing Iceberg connectors ==="
+      if [ -f "thirdparty/iceberg/gradlew" ]; then
+        cd thirdparty/iceberg
+        ./gradlew -PflinkVersions=1.20 \
+          :iceberg-flink:iceberg-flink-runtime-1.20:shadowJar \
+          :iceberg-aws-bundle:shadowJar \
+          -x test -x integrationTest -x generateGitProperties \
+          --no-daemon 2>&1 | grep -E "(BUILD|WARN|ERROR)" || true
+
+        for jar in flink/v1.20/flink-runtime/build/libs/iceberg-flink-runtime-1.20-*.jar; do
+          if [ -f "$jar" ] && [[ "$jar" != *"-sources.jar" ]] && [[ "$jar" != *"-javadoc.jar" ]]; then
+            cp "$jar" "$FLINK_DIST/lib/"
+            echo "Installed: $(basename $jar)"
+            break
+          fi
+        done
+        for jar in aws-bundle/build/libs/iceberg-aws-bundle-*.jar; do
+          if [ -f "$jar" ] && [[ "$jar" != *"-sources.jar" ]] && [[ "$jar" != *"-javadoc.jar" ]]; then
+            cp "$jar" "$FLINK_DIST/lib/"
+            echo "Installed: $(basename $jar)"
+            break
+          fi
+        done
+        cd ../..
+      else
+        echo "ERROR: Iceberg submodule not initialized. Run: git submodule update --init thirdparty/iceberg"
+        exit 1
+      fi
+
+      echo "=== Installing Hadoop client JARs ==="
+      thirdparty/iceberg/gradlew -p thirdparty/hadoop-client \
+        copyJars -PoutputDir="$FLINK_DIST/lib" \
+        --no-daemon || exit 1
+
+      echo "=== Verifying Flink lib ==="
+      ls -1 "$FLINK_DIST/lib/"
+
+      MISSING=0
+      for class_check in \
+        "hadoop-client-api:org/apache/hadoop/conf/Configuration.class" \
+        "hadoop-client-runtime:org/apache/hadoop/shaded/org/apache/commons/configuration2/Configuration.class" \
+        "iceberg-flink-runtime:org/apache/iceberg/flink/FlinkCatalogFactory.class"; do
+        jar_prefix="''${class_check%%:*}"
+        class="''${class_check##*:}"
+        jar_file=$(ls "$FLINK_DIST/lib/$jar_prefix"*.jar 2>/dev/null | head -1)
+        if [ -z "$jar_file" ]; then
+          echo "FAIL: No $jar_prefix JAR found"
+          MISSING=1
+        elif ! jar tf "$jar_file" | grep -q "$class"; then
+          echo "FAIL: $class not found in $(basename $jar_file)"
+          MISSING=1
+        else
+          echo "OK: $class in $(basename $jar_file)"
+        fi
+      done
+
+      if [ "$MISSING" = "1" ]; then
+        echo "ERROR: Critical classes missing. Flink will not start."
+        exit 1
+      fi
+      echo "=== Flink lib rebuild complete ==="
+    '';
+
     # Policy validation using conftest
     "policy:check".exec = ''
       echo "Running policy validation..."
@@ -3342,42 +3422,27 @@ except Exception as e:
           fi
         fi
 
-        # Copy hadoop-common from Gradle cache (needed by Iceberg FlinkCatalogFactory)
-        # This is safe now that flink-s3-fs-hadoop is in plugins/ with classloader isolation
-        GRADLE_CACHE="$HOME/.gradle/caches/modules-2/files-2.1"
-        if [ -d "$GRADLE_CACHE" ]; then
-          HADOOP_COMMON_DIR="$GRADLE_CACHE/org.apache.hadoop/hadoop-common/3.4.1"
-          if [ -d "$HADOOP_COMMON_DIR" ]; then
-            for jar in "$HADOOP_COMMON_DIR"/*/hadoop-common-3.4.1.jar; do
-              if [ -f "$jar" ] && [ ! -f "$FLINK_DIST/lib/hadoop-common-3.4.1.jar" ]; then
-                cp "$jar" "$FLINK_DIST/lib/"
-                echo "Copied hadoop-common from Gradle cache (for Iceberg catalog)"
-                break
-              fi
-            done
-          fi
-        fi
+        # Install Hadoop client JARs (needed by Iceberg FlinkCatalogFactory)
+        # Uses hadoop-client-api (unshaded public API) + hadoop-client-runtime (shaded transitive deps)
+        # instead of bare hadoop-common + individual transitive deps (which was incomplete).
+        # Resolved via thirdparty/hadoop-client/build.gradle using the Iceberg gradlew.
+        HADOOP_API_JAR=$(ls "$FLINK_DIST/lib/hadoop-client-api-"*.jar 2>/dev/null | head -1)
+        HADOOP_RUNTIME_JAR=$(ls "$FLINK_DIST/lib/hadoop-client-runtime-"*.jar 2>/dev/null | head -1)
+        if [ -z "$HADOOP_API_JAR" ] || [ -z "$HADOOP_RUNTIME_JAR" ]; then
+          # Clean up old bare Hadoop JARs (from previous cherry-picking approach)
+          for old_jar in hadoop-common-*.jar hadoop-auth-*.jar \
+                         hadoop-hdfs-client-*.jar hadoop-shaded-guava-*.jar \
+                         woodstox-core-*.jar stax2-api-*.jar; do
+            rm -f "$FLINK_DIST/lib/$old_jar" 2>/dev/null
+          done
 
-        # Copy additional Hadoop dependencies needed by hadoop-common
-        # hadoop-auth: Required for UserGroupInformation (group: org.apache.hadoop)
-        # hadoop-shaded-guava: Required for Maps/Guava (group: org.apache.hadoop.thirdparty)
-        copy_gradle_jar() {
-          local group="$1"
-          local artifact="$2"
-          local version="$3"
-          local dep_dir="$GRADLE_CACHE/$group/$artifact/$version"
-          if [ -d "$dep_dir" ]; then
-            for jar in "$dep_dir"/*/"$artifact-$version.jar"; do
-              if [ -f "$jar" ] && [ ! -f "$FLINK_DIST/lib/$artifact-$version.jar" ]; then
-                cp "$jar" "$FLINK_DIST/lib/"
-                echo "Copied $artifact-$version from Gradle cache"
-                break
-              fi
-            done
-          fi
-        }
-        copy_gradle_jar "org.apache.hadoop" "hadoop-auth" "3.4.1"
-        copy_gradle_jar "org.apache.hadoop.thirdparty" "hadoop-shaded-guava" "1.4.0"
+          echo "Resolving Hadoop client JARs..."
+          thirdparty/iceberg/gradlew -p thirdparty/hadoop-client \
+            copyJars -PoutputDir="$FLINK_DIST/lib" \
+            --no-daemon 2>&1 | grep -v "^$" || true
+        else
+          echo "Hadoop client JARs already installed"
+        fi
 
         # Only remove AWS SDK bundle if it conflicts with iceberg-aws-bundle
         # NOTE: With flink-s3-fs-hadoop in plugins/, Hadoop JARs no longer conflict

@@ -5,7 +5,8 @@
 .env
 .envrc.local
 *.auto.tfvars
-thirdparty
+thirdparty/*
+!thirdparty/hadoop-client/
 .DS_Store
 .vscode
 target/

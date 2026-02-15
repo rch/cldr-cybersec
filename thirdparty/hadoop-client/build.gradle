@@ -1,0 +1,44 @@
+// Resolves hadoop-client-api + hadoop-client-runtime for Flink's classpath.
+//
+// These two JARs provide Hadoop's public API (unshaded) and its transitive
+// dependencies (shaded under org.apache.hadoop.shaded.*), replacing the
+// fragile approach of cherry-picking individual deps like hadoop-common +
+// hadoop-auth + woodstox-core + stax2-api + commons-configuration2 + ...
+//
+// Usage:
+//   ../iceberg/gradlew -p ../hadoop-client copyJars -PoutputDir=/path/to/flink/lib
+//   devenv tasks run flink:rebuild-lib
+
+plugins {
+    id 'java'
+}
+
+// Match the Hadoop version used by the Iceberg submodule (see iceberg/gradle/libs.versions.toml)
+def hadoopVersion = '3.4.1'
+
+repositories {
+    mavenCentral()
+}
+
+configurations {
+    hadoopClient
+}
+
+dependencies {
+    // transitive = false: only the two uber JARs, not their minimal transitives
+    // (snappy-java, slf4j-api, commons-logging, jsr305 are already in Flink)
+    hadoopClient("org.apache.hadoop:hadoop-client-api:${hadoopVersion}") { transitive = false }
+    hadoopClient("org.apache.hadoop:hadoop-client-runtime:${hadoopVersion}") { transitive = false }
+}
+
+tasks.register('copyJars', Copy) {
+    description = 'Copy hadoop-client JARs to outputDir (default: build/libs)'
+    from configurations.hadoopClient
+    into project.findProperty('outputDir') ?: "${buildDir}/libs"
+    doFirst {
+        println "Resolving hadoop-client-api + hadoop-client-runtime ${hadoopVersion}"
+    }
+    doLast {
+        configurations.hadoopClient.files.each { println "  Installed: ${it.name}" }
+    }
+}
