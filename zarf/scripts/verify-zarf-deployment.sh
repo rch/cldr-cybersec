@@ -260,7 +260,7 @@ build_custom_image() {
     fi
 
     local DOCKERFILE="$ZARF_DIR/images/Dockerfile.cybersec-dask"
-    local IMAGE_TAG="localhost:5555/cybersec-dask:2024.8.0"
+    local IMAGE_TAG="localhost:5555/cybersec-dask:2025.2.0"
 
     if [[ ! -f "$DOCKERFILE" ]]; then
         log_error "Dockerfile not found: $DOCKERFILE"

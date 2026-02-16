@@ -7,6 +7,7 @@ Key architecture:
 - Live status shows Dask connection, loading, and task activity
 - Zoom/pan triggers background Dask work with visible progress
 - Fixed-size heatmap that doesn't collapse
+- Smart windowing: caps partitions at MAX_PARTITIONS to keep Dask graph small
 
 Environment variables:
 - DASK_SCHEDULER: Dask scheduler address (required)
@@ -139,38 +140,71 @@ def get_active_dataset() -> dict:
 
 
 # -------------------------------------------------------------------------
-# Data Loader
+# Data Loader (smart windowing — explicit paths, capped partitions)
 # -------------------------------------------------------------------------
 
+_file_list_cache = {}
+
+# Target partition count — balances graph size vs visual fidelity.
+# Working version (c42866b1) used ~132 partitions.
+# Each partition ~ 2M rows x 16 bytes (2 cols) ~ 32 MB in memory.
+# 200 partitions -> ~400 KB graph, ~6.4 GiB total (distributed across workers).
+MAX_PARTITIONS = 200
+
+
 def load_span_data(start_time: datetime, end_time: datetime, data_path: str = None, on_progress=None) -> dd.DataFrame:
+    """Load span data with smart windowing: glob, sort by recency, cap partitions.
+
+    Uses explicit file paths (no Hive discovery) to avoid KeyError from mixed
+    partition layouts (otel-1t: shard=/date=/ vs otel-minimal: date=/hour=/).
+    Caps at MAX_PARTITIONS files via even sampling to keep Dask graph small.
+    """
     import s3fs
 
-    base_path = data_path or OTEL_DATA_PATH
-    s3_base = base_path.rstrip('/') + '/spans'
+    s3_base = (data_path or OTEL_DATA_PATH).rstrip('/')
+    if not s3_base.endswith('/spans'):
+        s3_base = f"{s3_base}/spans"
+
     start_date, end_date = start_time.date(), end_time.date()
-
-    if on_progress:
-        on_progress("Scanning S3 partitions...")
-
-    date_partitions = []
+    date_strings = []
     current = start_date
     while current <= end_date:
-        date_partitions.append(current.strftime('%Y-%m-%d'))
+        date_strings.append(current.strftime('%Y-%m-%d'))
         current += timedelta(days=1)
 
-    fs = s3fs.S3FileSystem(**get_storage_options())
-    s3_base_path = s3_base.replace('s3://', '')
-
     if on_progress:
-        on_progress(f"Globbing {len(date_partitions)} days...")
+        on_progress(f"Scanning {len(date_strings)} days...")
 
-    parquet_files = []
-    for i, date_str in enumerate(date_partitions):
-        pattern = f"{s3_base_path}/date={date_str}/hour=*/*.parquet"
-        files = fs.glob(pattern)
-        parquet_files.extend([f"s3://{f}" for f in files])
-        if on_progress and i % 2 == 0:
-            on_progress(f"Found {len(parquet_files)} files...")
+    # --- File discovery (cached) ---
+    cache_key = s3_base
+    if cache_key not in _file_list_cache:
+        fs = s3fs.S3FileSystem(**get_storage_options())
+        s3_path = s3_base.replace('s3://', '')
+
+        if on_progress:
+            on_progress("Building file index (first load, will be cached)...")
+
+        # Try layouts in order of expected size (largest first)
+        files = fs.glob(f"{s3_path}/shard=*/date=*/batch_*.parquet")      # otel-1t
+        if not files:
+            files = fs.glob(f"{s3_path}/shard=*/date=*/hour=*/*.parquet")  # otel-1t old
+        if not files:
+            files = fs.glob(f"{s3_path}/date=*/hour=*/*.parquet")          # otel-minimal/large
+        if not files:
+            files = fs.glob(f"{s3_path}/date=*/*.parquet")                 # flat
+
+        all_files = [f"s3://{f}" for f in files]
+        _file_list_cache[cache_key] = all_files
+        if on_progress:
+            on_progress(f"Indexed {len(all_files)} files")
+    else:
+        all_files = _file_list_cache[cache_key]
+
+    # --- Date filtering ---
+    parquet_files = [
+        f for f in all_files
+        if any(f"date={d}" in f for d in date_strings)
+    ]
 
     if not parquet_files:
         import pandas as pd
@@ -179,21 +213,34 @@ def load_span_data(start_time: datetime, end_time: datetime, data_path: str = No
             'duration_ms': pd.Series(dtype='float64'),
         }), npartitions=1)
 
-    if on_progress:
-        on_progress(f"Loading {len(parquet_files)} parquet files...")
+    # --- Smart windowing: cap partitions, prefer recent data ---
+    total_files = len(parquet_files)
+    if total_files > MAX_PARTITIONS:
+        # Sort with most recent dates first
+        parquet_files.sort(reverse=True)
+        # Even sampling: take every Nth file to cover the full time range
+        step = total_files // MAX_PARTITIONS
+        parquet_files = parquet_files[::step][:MAX_PARTITIONS]
+        if on_progress:
+            on_progress(f"Windowed: {MAX_PARTITIONS}/{total_files} files (step={step})")
+    else:
+        if on_progress:
+            on_progress(f"Loading all {total_files} files")
 
+    # --- Read with explicit paths (no Hive discovery = no mixed-layout errors) ---
     ddf = dd.read_parquet(
         parquet_files,
         storage_options=get_storage_options(),
-        columns=['start_time_unix_nano', 'duration_ns', 'service_name'],
+        columns=['start_time_unix_nano', 'duration_ns'],
         engine='pyarrow',
+        split_row_groups=False,
     )
 
     ddf['timestamp_s'] = ddf['start_time_unix_nano'] / 1_000_000_000
     ddf['duration_ms'] = ddf['duration_ns'] / 1_000_000
 
     if on_progress:
-        on_progress(f"Ready: {ddf.npartitions} partitions")
+        on_progress(f"Ready: {ddf.npartitions} partitions (from {total_files} files)")
 
     return ddf
 
@@ -250,6 +297,7 @@ class SpanExplorer(param.Parameterized):
 
     def _poll_dask_status(self):
         """Background thread to poll Dask task activity."""
+        import time as _time
         while not self._stop_polling:
             try:
                 stats = get_dask_stats()
@@ -257,7 +305,7 @@ class SpanExplorer(param.Parameterized):
                 self.processing = stats['processing']
             except Exception:
                 pass
-            time.sleep(1)
+            _time.sleep(1)
 
     def start_polling(self):
         """Start background Dask status polling."""
@@ -268,23 +316,30 @@ class SpanExplorer(param.Parameterized):
 
     def _poll_dataset_changes(self):
         """Background thread to poll for dataset changes."""
-        time.sleep(10)
+        import time as _time
+        import logging as _logging
+        _logger = _logging.getLogger(__name__)
+
+        _time.sleep(10)
         while not self._stop_polling:
             try:
                 ds_info = get_active_dataset()
                 new_dataset = ds_info['dataset']
                 if new_dataset != self.current_dataset:
-                    logger.info(f"Dataset changed: {self.current_dataset} -> {new_dataset}")
+                    _logger.info(f"Dataset changed: {self.current_dataset} -> {new_dataset}")
                     self.current_dataset = new_dataset
                     self.dataset_phase = ds_info['phase']
                     self._current_data_path = ds_info['path']
+                    # Clear file list cache so new dataset is re-globbed
+                    _file_list_cache.clear()
+                    # Clear cached data to force full reload
                     self._ddf = None
                     self.ready = False
                     self.phase = f"Switched to {new_dataset}, reloading..."
                     self.load_data()
             except Exception as e:
-                logger.warning(f"Dataset poll error: {e}")
-            time.sleep(60)
+                _logger.warning(f"Dataset poll error: {e}")
+            _time.sleep(60)
 
     def start_dataset_watcher(self):
         """Start background dataset change polling."""
@@ -293,33 +348,63 @@ class SpanExplorer(param.Parameterized):
             self._dataset_thread.start()
 
     def load_data(self):
-        """Load data with progress updates."""
-        try:
-            self.phase = f"Connecting to Dask ({self.current_dataset})..."
-            get_dask_client()
-            stats = get_dask_stats()
-            self.workers = stats['workers']
+        """Load data in a background thread to avoid blocking the Bokeh event loop.
 
-            def on_progress(msg):
-                self.phase = msg
+        The S3 glob + persist can take minutes for large datasets. Running it
+        synchronously in onload() blocks WebSocket message delivery, causing the
+        browser to time out before the UI ever updates past 'Initializing...'.
 
-            start, end = self._get_time_range()
-            self._ddf = load_span_data(
-                start, end,
-                data_path=self._current_data_path,
-                on_progress=on_progress,
-            )
-            self.partitions = self._ddf.npartitions
+        Param watchers triggered by attribute changes execute rendering code
+        (pn.pane.Alert, etc.) in the calling thread. Since Panel/Bokeh objects
+        are not thread-safe, we batch all param updates via pn.state.execute()
+        so they run on the event loop.
+        """
+        import logging as _logging_bg
+        import panel as _pn_bg
 
-            self.phase = f"Ready ({self.current_dataset}: {self.partitions} partitions)"
-            self.ready = True
-            self.start_polling()
-            self.start_dataset_watcher()
+        def _set_params(**kwargs):
+            """Schedule param updates on the Bokeh event loop."""
+            def _apply():
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+            try:
+                _pn_bg.state.execute(_apply)
+            except Exception:
+                # Fallback: direct set (works when no active session)
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
 
-        except Exception as e:
-            logger.exception("Load failed")
-            self.error = str(e)
-            self.phase = f"Error: {e}"
+        def _bg_load():
+            _log = _logging_bg.getLogger("panel.load")
+            try:
+                _set_params(phase=f"Connecting to Dask ({self.current_dataset})...")
+                _log.info(f"Connecting to Dask ({self.current_dataset})...")
+                client = get_dask_client()
+                stats = get_dask_stats()
+                _set_params(workers=stats['workers'])
+
+                def on_progress(msg):
+                    _set_params(phase=msg)
+                    _log.info(msg)
+
+                start, end = self._get_time_range()
+                self._ddf = load_span_data(
+                    start, end,
+                    data_path=self._current_data_path,
+                    on_progress=on_progress,
+                )
+                nparts = self._ddf.npartitions
+                msg = f"Ready ({self.current_dataset}: {nparts} partitions)"
+                _log.info(msg)
+                _set_params(partitions=nparts, phase=msg, ready=True)
+                self.start_polling()
+                self.start_dataset_watcher()
+
+            except Exception as e:
+                _log.exception("Load failed")
+                _set_params(error=str(e), phase=f"Error: {e}")
+
+        threading.Thread(target=_bg_load, daemon=True).start()
 
     @param.depends('phase', 'workers', 'processing', 'partitions', 'error', 'current_dataset', 'dataset_phase')
     def status_panel(self):
@@ -353,7 +438,13 @@ class SpanExplorer(param.Parameterized):
 
     @param.depends('ready', 'cmap', 'spread_enabled', 'time_preset')
     def heatmap_view(self):
-        """Heatmap with fixed size."""
+        """Heatmap using rasterize(dynamic=True) for native viewport re-rasterization.
+
+        With dynamic=True, HoloViews/Datashader handles viewport-driven
+        re-rasterization natively via Bokeh callbacks. No manual DynamicMap
+        or RangeXY plumbing needed — datashader automatically renders only
+        what's visible in the current viewport.
+        """
         def wrap_content(content):
             return pn.Column(
                 content,
@@ -384,21 +475,15 @@ class SpanExplorer(param.Parameterized):
                 'fire': cc.fire, 'viridis': 'viridis',
                 'plasma': 'plasma', 'inferno': 'inferno', 'blues': cc.blues,
             }
+            selected_cmap = cmap_lookup.get(self.cmap, cc.fire)
+            spread = self.spread_enabled
 
-            points = hv.Points(
-                self._ddf,
-                kdims=['timestamp_s', 'duration_ms'],
-            ).opts(
-                width=CANVAS_WIDTH,
-                height=CANVAS_HEIGHT,
+            points = hv.Points(self._ddf, kdims=['timestamp_s', 'duration_ms']).opts(
+                width=CANVAS_WIDTH, height=CANVAS_HEIGHT,
             )
 
-            rasterized_plot = rasterize(
-                points,
-                aggregator='count',
-                dynamic=True,
-            ).opts(
-                cmap=cmap_lookup.get(self.cmap, cc.fire),
+            rasterized = rasterize(points, aggregator='count', dynamic=True).opts(
+                cmap=selected_cmap,
                 cnorm='eq_hist',
                 colorbar=True,
                 xlabel='Time (Unix seconds)',
@@ -409,7 +494,7 @@ class SpanExplorer(param.Parameterized):
                 responsive=True,
             )
 
-            result = dynspread(rasterized_plot, max_px=3) if self.spread_enabled else rasterized_plot
+            result = dynspread(rasterized, max_px=3) if spread else rasterized
 
             return wrap_content(
                 pn.pane.HoloViews(

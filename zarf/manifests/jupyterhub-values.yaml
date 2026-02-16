@@ -49,7 +49,7 @@ singleuser:
   # Note: Image will be rewritten by Zarf
   image:
     name: cybersec-dask
-    tag: "2024.8.0"
+    tag: "2025.2.0"
   # Resource allocation per user
   cpu:
     limit: 2

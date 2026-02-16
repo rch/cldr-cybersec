@@ -88,7 +88,7 @@ spec:
       containers:
         - name: otel-navigator
           # Image will be rewritten by Zarf to use internal registry
-          image: cybersec-dask:2024.8.0
+          image: cybersec-dask:2025.2.0
           imagePullPolicy: IfNotPresent
           # Serve OTEL Navigator application with Panel
           command:
@@ -98,7 +98,6 @@ spec:
             - --port=5006
             - --address=0.0.0.0
             - --allow-websocket-origin=*
-            - --warm
           ports:
             - containerPort: 5006
               name: http
@@ -119,23 +118,23 @@ spec:
             limits:
               cpu: 2
               memory: 4Gi
-          # Fast readiness - no pip install needed
+          # Readiness/liveness - probes hit /app (Panel app endpoint)
           readinessProbe:
             httpGet:
-              path: /
+              path: /app
               port: 5006
             initialDelaySeconds: 15
             periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+            timeoutSeconds: 60
+            failureThreshold: 10
           livenessProbe:
             httpGet:
-              path: /
+              path: /app
               port: 5006
             initialDelaySeconds: 30
             periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 3
+            timeoutSeconds: 60
+            failureThreshold: 10
 ---
 apiVersion: v1
 kind: Service

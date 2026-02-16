@@ -6,23 +6,23 @@
 # - Numba JIT cache pre-compiled for fast startup
 #
 # Build:
-#   podman build -t cybersec-dask:2024.8.0 -f Dockerfile.cybersec-dask .
-#   docker build -t cybersec-dask:2024.8.0 -f Dockerfile.cybersec-dask .
+#   podman build -t cybersec-dask:2025.2.0 -f Dockerfile.cybersec-dask .
+#   docker build -t cybersec-dask:2025.2.0 -f Dockerfile.cybersec-dask .
 #
 # Usage as Dask worker:
-#   docker run cybersec-dask:2024.8.0 dask-worker tcp://scheduler:8786
+#   docker run cybersec-dask:2025.2.0 dask-worker tcp://scheduler:8786
 #
 # Usage as OTEL Navigator:
 #   docker run -e DASK_SCHEDULER=tcp://scheduler:8786 -p 5006:5006 \
-#     cybersec-dask:2024.8.0 panel serve /app/otel-navigator.py --port 5006
+#     cybersec-dask:2025.2.0 panel serve /app/otel-navigator.py --port 5006
 
-ARG BASE_IMAGE=ghcr.io/dask/dask:2024.8.0
+ARG BASE_IMAGE=ghcr.io/dask/dask:2025.2.0
 FROM ${BASE_IMAGE}
 
 # Metadata
 LABEL org.opencontainers.image.title="Cybersec Dask"
 LABEL org.opencontainers.image.description="Dask with OTEL Navigator for air-gap deployment"
-LABEL org.opencontainers.image.version="2024.8.0"
+LABEL org.opencontainers.image.version="2025.2.0"
 LABEL org.opencontainers.image.source="https://github.com/cloudera/cybersec"
 
 # Install Python dependencies
@@ -61,4 +61,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:5006/ || exit 1
 
 # Default command: run as Dask worker (override for Panel/scheduler)
-CMD ["dask-worker", "--nthreads", "2", "--memory-limit", "4GB"]
+CMD ["dask-worker", "--nthreads", "2", "--memory-limit", "6GB"]

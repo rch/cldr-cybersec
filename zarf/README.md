@@ -24,11 +24,11 @@ This directory contains Zarf packaging for deploying the Cybersec Dask stack to 
 ```bash
 # 1. Build the cybersec-dask container image
 cd /path/to/cybersec/zarf/images
-podman build -t localhost:5555/cybersec-dask:2024.8.0 -f Dockerfile.cybersec-dask .
+podman build -t localhost:5555/cybersec-dask:2025.2.0 -f Dockerfile.cybersec-dask .
 
 # 2. Start local registry and push image
 podman run -d --name registry -p 5555:5000 docker.io/library/registry:2
-podman push --tls-verify=false localhost:5555/cybersec-dask:2024.8.0
+podman push --tls-verify=false localhost:5555/cybersec-dask:2025.2.0
 
 # 3. Create Zarf package (includes the image)
 cd /path/to/cybersec/zarf
@@ -139,10 +139,10 @@ curl -s -u "$PUSH_USER:$PUSH_PASS" http://127.0.0.1:31999/v2/_catalog  # Availab
 
 # 3. Copy image to expected location (example)
 podman login 127.0.0.1:31999 --username "$PUSH_USER" --password "$PUSH_PASS" --tls-verify=false
-podman pull 127.0.0.1:31999/cybersec-dask:2024.8.0 --tls-verify=false
-podman tag 127.0.0.1:31999/cybersec-dask:2024.8.0 \
-  127.0.0.1:31999/library/cybersec-dask:2024.8.0-zarf-XXXXXXXXXX  # Use suffix from events
-podman push 127.0.0.1:31999/library/cybersec-dask:2024.8.0-zarf-XXXXXXXXXX --tls-verify=false
+podman pull 127.0.0.1:31999/cybersec-dask:2025.2.0 --tls-verify=false
+podman tag 127.0.0.1:31999/cybersec-dask:2025.2.0 \
+  127.0.0.1:31999/library/cybersec-dask:2025.2.0-zarf-XXXXXXXXXX  # Use suffix from events
+podman push 127.0.0.1:31999/library/cybersec-dask:2025.2.0-zarf-XXXXXXXXXX --tls-verify=false
 
 # 4. Restart pods
 sudo kubectl delete pods -n dask --all
@@ -306,13 +306,13 @@ cd /path/to/cybersec
 
 # Build the custom Dask image (requires podman or docker)
 cd zarf/images
-podman build -t localhost:5555/cybersec-dask:2024.8.0 -f Dockerfile.cybersec-dask .
+podman build -t localhost:5555/cybersec-dask:2025.2.0 -f Dockerfile.cybersec-dask .
 
 # Start local registry (if not running)
 podman run -d --name registry -p 5555:5000 docker.io/library/registry:2
 
 # Push image to local registry
-podman push --tls-verify=false localhost:5555/cybersec-dask:2024.8.0
+podman push --tls-verify=false localhost:5555/cybersec-dask:2025.2.0
 
 # Create the Zarf package
 cd /path/to/cybersec/zarf
@@ -627,7 +627,7 @@ This is typically caused by a **Zarf image suffix mismatch**. The Zarf agent mut
 ```bash
 # 1. Check what image the pods expect
 sudo kubectl get events -n dask | grep "pulling image"
-# Example: 127.0.0.1:31999/library/cybersec-dask:2024.8.0-zarf-1346278550
+# Example: 127.0.0.1:31999/library/cybersec-dask:2025.2.0-zarf-1346278550
 
 # 2. Check what's actually in the registry
 REG_PASS=$(sudo kubectl get secret -n zarf zarf-state -o jsonpath='{.data.state}' | base64 -d | jq -r '.registryInfo.pullPassword')

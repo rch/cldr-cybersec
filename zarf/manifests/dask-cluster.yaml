@@ -36,7 +36,7 @@ spec:
       containers:
         - name: scheduler
           # Image will be rewritten by Zarf to use internal registry
-          image: cybersec-dask:2024.8.0
+          image: cybersec-dask:2025.2.0
           imagePullPolicy: IfNotPresent
           args:
             - dask-scheduler
@@ -76,14 +76,14 @@ spec:
       containers:
         - name: worker
           # Image will be rewritten by Zarf to use internal registry
-          image: cybersec-dask:2024.8.0
+          image: cybersec-dask:2025.2.0
           imagePullPolicy: IfNotPresent
           args:
             - dask-worker
             - --nthreads
             - "2"
             - --memory-limit
-            - 4Gi
+            - 6Gi
           env:
             - name: DASK_DASHBOARD_ADDRESS
               value: ":8787"
@@ -95,8 +95,8 @@ spec:
               value: "###ZARF_VAR_S3_SECRET_KEY###"
           resources:
             requests:
-              cpu: "500m"
-              memory: 2Gi
-            limits:
-              cpu: "2"
+              cpu: "250m"
               memory: 4Gi
+            limits:
+              cpu: "1"
+              memory: 6Gi
