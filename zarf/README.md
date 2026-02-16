@@ -66,12 +66,30 @@ zarf package deploy zarf-package-cybersec-dask-amd64-1.1.0.tar.zst --confirm \
 
 ## Quickstart (Pre-Built Release)
 
-Download the package from [GitHub Releases](https://github.com/rch/cldr-cybersec/releases):
+### Acquire artifacts (internet-connected machine)
+
+| Artifact | How to get | Size |
+|----------|-----------|------|
+| `zarf` binary | [Zarf releases](https://github.com/zarf-dev/zarf/releases) (Linux amd64) | ~100 MB |
+| `zarf-init-amd64-v0.66.0.tar.zst` | `zarf tools download-init` | ~300 MB |
+| `zarf-package-cybersec-dask-amd64-1.1.0.tar.zst` | [GitHub Releases](https://github.com/rch/cldr-cybersec/releases/tag/v1.1.0-M1) | ~1.3 GB |
 
 ```bash
-# On the air-gapped node (RKE2 already running):
+# Download on a machine with internet access
+curl -LO https://github.com/zarf-dev/zarf/releases/download/v0.66.0/zarf_v0.66.0_Linux_amd64
+mv zarf_v0.66.0_Linux_amd64 zarf && chmod +x zarf
+./zarf tools download-init
+# Download cybersec-dask package from GitHub Releases (link above)
+```
+
+Transfer all three files to the air-gapped node (USB, SCP, data diode, etc.).
+
+### Deploy (air-gapped node, RKE2 already running)
+
+```bash
 export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 export PATH=$PATH:/var/lib/rancher/rke2/bin
+sudo cp zarf /usr/local/bin/ && sudo chmod +x /usr/local/bin/zarf
 
 # 1. Provision storage for Zarf's internal registry
 sudo mkdir -p /var/lib/zarf-registry && sudo chmod 777 /var/lib/zarf-registry
@@ -133,15 +151,13 @@ Upstream images (`dask-kubernetes-operator`, `k8s-hub`, `configurable-http-proxy
 
 Skip this section if RKE2 is already running.
 
-### Artifacts (download on internet-connected machine)
+### Additional artifacts (beyond those in Quickstart)
 
 | Artifact | Source |
 |----------|--------|
 | `rke2-images.linux-amd64.tar.zst` | [RKE2 releases](https://github.com/rancher/rke2/releases) |
 | `rke2.linux-amd64.tar.gz` | Same |
 | `install.sh` | `curl -sfL https://get.rke2.io` |
-| `zarf` binary | [Zarf releases](https://github.com/zarf-dev/zarf/releases) |
-| `zarf-init-amd64-v0.66.0.tar.zst` | `zarf tools download-init` |
 
 ### Install
 
