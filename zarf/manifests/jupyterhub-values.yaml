@@ -5,6 +5,7 @@
 # - Uses custom cybersec-dask image with pre-installed dependencies
 # - Configures Dask Gateway integration
 # - Sets up persistent storage for user notebooks
+# - Mounts sample notebooks via ConfigMap
 #
 # Zarf template variables:
 #   ###ZARF_VAR_S3_ENDPOINT### - S3-compatible endpoint
@@ -30,6 +31,16 @@ hub:
     dask-config: |
       c.JupyterHub.allow_named_servers = True
       c.Spawner.default_url = '/lab'
+  # Authentication - simple dummy auth for testing
+  # In production, configure LDAP, OAuth, etc.
+  config:
+    Authenticator:
+      admin_users:
+        - admin
+    DummyAuthenticator:
+      password: "changeme"
+    JupyterHub:
+      authenticator_class: dummy
 
 # Proxy configuration
 proxy:
@@ -73,18 +84,16 @@ singleuser:
     DASK_SCHEDULER_ADDRESS: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
   # Default packages already installed in image - no pip install needed
   # This is critical for air-gap: no runtime package installation
-
-# Authentication - simple dummy auth for testing
-# In production, configure LDAP, OAuth, etc.
-hub:
-  config:
-    Authenticator:
-      admin_users:
-        - admin
-    DummyAuthenticator:
-      password: "changeme"
-    JupyterHub:
-      authenticator_class: dummy
+  # Mount sample notebooks from ConfigMap (read-only)
+  # Users copy to ~/work to edit
+  extraVolumes:
+    - name: sample-notebooks
+      configMap:
+        name: sample-notebooks
+  extraVolumeMounts:
+    - name: sample-notebooks
+      mountPath: /home/jovyan/sample-notebooks
+      readOnly: true
 
 # Scheduling - allow users on any node
 scheduling:
