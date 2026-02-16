@@ -15,8 +15,8 @@ panel_max_replicas: 4
 
 # Resource limits for Panel pods
 # Reduced for validation; increase for production with larger datasets
-panel_memory_limit: "4Gi"
-panel_memory_request: "2Gi"
+panel_memory_limit: "8Gi"
+panel_memory_request: "4Gi"
 panel_cpu_limit: "2"
 panel_cpu_request: "500m"
 
@@ -42,7 +42,7 @@ panel_aws_region: "{{ aws_region | default(lookup('env', 'PANEL_AWS_REGION') | d
 panel_canvas_width: 800
 panel_canvas_height: 400
 panel_cache_size: 100
-panel_debounce_ms: 100
+panel_debounce_ms: 250
 
 # ============================================================================
 # DEPRECATED: ngrok ingress is deprecated in favor of Cloudflare Tunnel.
@@ -68,8 +68,8 @@ panel_hpa_memory_threshold: 70
 # Health check configuration
 # Note: pip install can take 60-90s, especially for numba compilation
 panel_health_path: "/healthz"
-panel_readiness_initial_delay: 90
-panel_liveness_initial_delay: 120
+panel_readiness_initial_delay: 180
+panel_liveness_initial_delay: 240
 panel_health_period: 15
 
 # Requirements installation

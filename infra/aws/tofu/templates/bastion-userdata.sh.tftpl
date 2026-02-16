@@ -1,0 +1,16 @@
+#!/bin/bash
+set -euo pipefail
+
+# Base packages
+dnf install -y git ansible-core python3-pip
+pip3 install kubernetes
+
+%{ if install_cloudflared ~}
+# Install cloudflared for Zero Trust SSH access
+curl -fsSL -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-x86_64.rpm -o /tmp/cloudflared.rpm
+dnf install -y /tmp/cloudflared.rpm
+rm -f /tmp/cloudflared.rpm
+
+# Connect to Cloudflare tunnel (SSH ingress handled by tunnel config)
+cloudflared service install ${tunnel_token}
+%{ endif ~}

@@ -12,6 +12,11 @@ output "bastion_public_ip" {
   value       = aws_instance.bastion.public_ip
 }
 
+output "bastion_fqdn" {
+  description = "Bastion FQDN (routed through WARP split tunnel)"
+  value       = local.ingress_domains.bastion
+}
+
 output "bastion_instance_id" {
   description = "Bastion instance ID (for SSM)"
   value       = aws_instance.bastion.id
@@ -66,6 +71,8 @@ output "ansible_inventory" {
     worker_ips        = aws_instance.worker[*].private_ip
     ssh_key_name      = var.ssh_key_name
     k8s_api_endpoint  = aws_lb.k8s_api.dns_name
+    s3_bucket_name    = aws_s3_bucket.cybersec.id
+    aws_region        = var.aws_region
   })
 }
 

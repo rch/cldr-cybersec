@@ -68,6 +68,12 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "cybersec" {
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.cybersec[0].id
 
   config {
+    # Bastion SSH (via cloudflared on bastion, installed by user-data)
+    ingress_rule {
+      hostname = local.ingress_domains.bastion
+      service  = "ssh://localhost:22"
+    }
+
     # Dask Dashboard
     ingress_rule {
       hostname = local.ingress_domains.dask
@@ -103,8 +109,24 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "cybersec" {
 }
 
 # -----------------------------------------------------------------------------
-# DNS CNAME Records
+# DNS Records
 # -----------------------------------------------------------------------------
+
+# Bastion DNS - proxied CNAME through tunnel for Zero Trust SSH
+# cloudflared on the bastion (installed via user-data) connects as a tunnel
+# connector, routing SSH traffic through the Cloudflare edge.
+# Client uses: ProxyCommand="cloudflared access ssh --hostname %h"
+resource "cloudflare_record" "bastion" {
+  count = var.ingress_provider == "cloudflare" ? 1 : 0
+
+  zone_id = var.cloudflare_zone_id
+  name    = local.ingress_domains.bastion
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.cybersec[0].id}.cfargotunnel.com"
+  type    = "CNAME"
+  proxied = true
+  ttl     = 1 # Auto (when proxied)
+  comment = "Cloudflare Tunnel: Bastion SSH (${var.developer_prefix})"
+}
 
 resource "cloudflare_record" "dask" {
   count = var.ingress_provider == "cloudflare" ? 1 : 0
@@ -174,8 +196,12 @@ resource "cloudflare_zero_trust_access_application" "cybersec" {
   type             = "self_hosted"
   session_duration = "24h"
 
-  # Protect all four services under one Access application
+  # Protect all services under one Access application
   # (migrated from deprecated self_hosted_domains to destinations)
+  destinations {
+    type = "public"
+    uri  = local.ingress_domains.bastion
+  }
   destinations {
     type = "public"
     uri  = local.ingress_domains.dask
@@ -230,10 +256,37 @@ resource "cloudflare_zero_trust_device_posture_rule" "require_warp" {
 }
 
 # -----------------------------------------------------------------------------
-# Zero Trust Access Policy
+# Service Token (for non-interactive SSH via cloudflared access)
 # -----------------------------------------------------------------------------
-# Secure by default: requires WARP client enrolled in Zero Trust org.
-# Set cloudflare_access_open = true for public access (demos only).
+# Used by Ansible and automated tools to authenticate without a browser.
+# Passed via CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET env vars.
+
+resource "cloudflare_zero_trust_access_service_token" "deploy" {
+  count = var.ingress_provider == "cloudflare" ? 1 : 0
+
+  account_id = var.cloudflare_account_id
+  name       = "cybersec-deploy-${var.developer_prefix}"
+}
+
+# -----------------------------------------------------------------------------
+# Zero Trust Access Policies
+# -----------------------------------------------------------------------------
+# Policy 1 (precedence 1): Service token - allows automated SSH without browser
+# Policy 2 (precedence 2): WARP device posture - interactive users via browser
+
+resource "cloudflare_zero_trust_access_policy" "service_token" {
+  count = var.ingress_provider == "cloudflare" ? 1 : 0
+
+  account_id     = var.cloudflare_account_id
+  application_id = cloudflare_zero_trust_access_application.cybersec[0].id
+  name           = "Service Token (deploy automation)"
+  precedence     = 1
+  decision       = "non_identity"
+
+  include {
+    service_token = [cloudflare_zero_trust_access_service_token.deploy[0].id]
+  }
+}
 
 resource "cloudflare_zero_trust_access_policy" "main" {
   count = var.ingress_provider == "cloudflare" ? 1 : 0
@@ -241,7 +294,7 @@ resource "cloudflare_zero_trust_access_policy" "main" {
   account_id     = var.cloudflare_account_id
   application_id = cloudflare_zero_trust_access_application.cybersec[0].id
   name           = var.cloudflare_access_open ? "Public Access (INSECURE)" : "Require WARP"
-  precedence     = 1
+  precedence     = 2
   decision       = var.cloudflare_access_open ? "bypass" : "allow"
 
   include {
@@ -341,4 +394,16 @@ output "ingress_info" {
 output "access_mode" {
   description = "Current access mode for Cloudflare Zero Trust"
   value       = var.ingress_provider == "cloudflare" ? (var.cloudflare_access_open ? "PUBLIC (INSECURE)" : "WARP Required") : "N/A (not using Cloudflare)"
+}
+
+output "cf_access_client_id" {
+  description = "Cloudflare Access service token client ID (for automated SSH)"
+  value       = var.ingress_provider == "cloudflare" ? cloudflare_zero_trust_access_service_token.deploy[0].client_id : ""
+  sensitive   = true
+}
+
+output "cf_access_client_secret" {
+  description = "Cloudflare Access service token client secret (for automated SSH)"
+  value       = var.ingress_provider == "cloudflare" ? cloudflare_zero_trust_access_service_token.deploy[0].client_secret : ""
+  sensitive   = true
 }

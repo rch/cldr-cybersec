@@ -150,11 +150,20 @@
   retries: 30
   delay: 10
 
-- name: Deploy Dask cluster
-  kubernetes.core.k8s:
-    kubeconfig: /etc/rancher/rke2/rke2.yaml
-    state: present
-    definition: "{{ lookup('template', 'dask-cluster.yaml.j2') | from_yaml }}"
+- name: Render Dask cluster manifest
+  ansible.builtin.template:
+    src: dask-cluster.yaml.j2
+    dest: /tmp/dask-cluster.yaml
+    mode: '0644'
+
+- name: Deploy Dask cluster (replace if spec changed)
+  ansible.builtin.shell: |
+    /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml \
+      apply -f /tmp/dask-cluster.yaml 2>&1 || \
+    /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml \
+      replace --force -f /tmp/dask-cluster.yaml 2>&1
+  register: dask_deploy
+  changed_when: "'created' in dask_deploy.stdout or 'replaced' in dask_deploy.stdout"
 
 - name: Wait for Dask scheduler to be ready
   kubernetes.core.k8s_info:

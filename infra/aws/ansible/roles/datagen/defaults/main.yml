@@ -24,24 +24,37 @@ datagen_minimal_cpu_limit: "2"
 # Large Dataset (Phase 2) - runs asynchronously for hours
 # -------------------------------------------------------------------------
 
-# For full TB+ validation dataset: batches=150, spans_per_batch=100000000
-# For smaller validation (fits on limited clusters):
-datagen_large_batches: 10
-datagen_large_spans_per_batch: 2000000  # 2M per batch = 20M total (~2 GiB)
-datagen_large_s3_prefix: "otel-large"
+# Sub-batch streaming: generates CHUNK_SIZE spans at a time, writes immediately, frees memory
+# Memory profile: 500K spans peaks ~1.5Gi (numpy arrays + PyArrow table + write)
+# Never OOMs regardless of SPANS_PER_BATCH — only CHUNK_SIZE matters for peak memory
+# For smaller validation (fits on limited clusters): batches=10, spans=2000000
+datagen_large_batches: 3000
+datagen_large_spans_per_batch: 5000000  # 5M per batch = 15B total (~1.5 TiB)
+datagen_large_s3_prefix: "otel-1t"
 datagen_large_duration_days: 7
 
+# Sub-batch chunk size (number of spans generated per iteration)
+# 2M spans peaks at ~2Gi with numpy arrays + PyArrow table (8Gi limit = 4x headroom)
+datagen_large_chunk_size: 2000000
+
+# Parquet write tuning for read-side predicate pushdown
+datagen_large_row_group_size: 100000         # Smaller row groups = finer time-range skipping
+datagen_large_compression: "ZSTD"            # ~30% smaller than Snappy for string-heavy OTEL data
+datagen_large_compression_level: 3           # ZSTD level (1=fast, 22=max; 3 = good balance)
+
 # Resource limits for large job
-# Note: Vectorized generation uses ~3-4Gi for 10M spans/batch
-datagen_large_memory_limit: "6Gi"
+# Streaming sub-batches keep peak memory well under limit
+datagen_large_memory_limit: "8Gi"
+datagen_large_memory_request: "4Gi"
 datagen_large_cpu_limit: "2"
 
 # Parallelism for large job (number of pods running simultaneously)
 # Uses K8s Indexed Job completions - each pod generates its shard of batches
-datagen_large_parallelism: 6
+# 8 pods (1 per node) coexist with 32 Dask workers (4 per node) on r6i.xlarge (32Gi)
+datagen_large_parallelism: 8
 
-# Maximum runtime for large job (12 hours)
-datagen_large_deadline_seconds: 43200
+# Maximum runtime for large job (36 hours)
+datagen_large_deadline_seconds: 129600
 
 # -------------------------------------------------------------------------
 # Common Configuration

@@ -3,7 +3,7 @@
 
 # Ingress provider: 'cloudflare' (default) or 'ngrok' (deprecated)
 # Set via -e ingress_provider=cloudflare when running ansible-playbook
-ingress_provider: "{{ ingress_provider | default('cloudflare') }}"
+ingress_provider: "cloudflare"
 
 # JupyterHub Helm chart version
 jupyterhub_chart_version: "4.0.0"

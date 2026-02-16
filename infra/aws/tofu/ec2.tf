@@ -109,11 +109,10 @@ resource "aws_instance" "bastion" {
     encrypted   = true
   }
 
-  user_data = <<-EOF
-    #!/bin/bash
-    dnf install -y git ansible-core python3-pip
-    pip3 install kubernetes
-  EOF
+  user_data = templatefile("${path.module}/templates/bastion-userdata.sh.tftpl", {
+    install_cloudflared = var.ingress_provider == "cloudflare"
+    tunnel_token        = var.ingress_provider == "cloudflare" ? cloudflare_zero_trust_tunnel_cloudflared.cybersec[0].tunnel_token : ""
+  })
 
   tags = merge(local.common_tags, {
     Name = "${var.project}-bastion"

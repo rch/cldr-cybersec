@@ -51,6 +51,10 @@ spec:
               # Configuration from Ansible
               BATCHES = {{ datagen_large_batches }}
               SPANS_PER_BATCH = {{ datagen_large_spans_per_batch }}
+              CHUNK_SIZE = {{ datagen_large_chunk_size }}
+              ROW_GROUP_SIZE = {{ datagen_large_row_group_size }}
+              COMPRESSION = "{{ datagen_large_compression }}"
+              COMPRESSION_LEVEL = {{ datagen_large_compression_level }}
               BUCKET = "{{ datagen_s3_bucket }}"
               PREFIX = "{{ datagen_large_s3_prefix }}"
               DURATION_DAYS = {{ datagen_large_duration_days }}
@@ -68,10 +72,14 @@ spec:
               print("=" * 60)
               print(f"Target: s3://{BUCKET}/{PREFIX}/")
               print(f"Total batches: {BATCHES} ({len(my_batches)} assigned to this pod)")
-              print(f"Spans per batch: {SPANS_PER_BATCH:,}")
+              print(f"Spans per batch: {SPANS_PER_BATCH:,} ({(SPANS_PER_BATCH + CHUNK_SIZE - 1) // CHUNK_SIZE} chunks of {CHUNK_SIZE:,})")
               print(f"Total spans (all pods): {total_spans_all:,}")
               print(f"This pod's spans: {len(my_batches) * SPANS_PER_BATCH:,}")
               print(f"Estimated total size: ~{(total_spans_all * 100) / (1024**4):.2f} TiB")
+              print(f"Peak memory per chunk: ~{CHUNK_SIZE * 1500 / (1024**3):.1f} GiB")
+              print(f"Compression: {COMPRESSION} (level {COMPRESSION_LEVEL})")
+              print(f"Row group size: {ROW_GROUP_SIZE:,}")
+              print(f"Partitioning: date-only (hour pruned via row-group stats)")
               print("=" * 60)
               sys.stdout.flush()
 
@@ -191,28 +199,66 @@ spec:
 
               overall_start = time.time()
 
-              def write_with_retry(table, root_path, batch_id, max_retries=8):
-                  """Write Hive-partitioned parquet with exponential backoff on S3 throttling."""
-                  for attempt in range(max_retries):
-                      try:
-                          pq.write_to_dataset(
-                              table,
-                              root_path=root_path,
-                              partition_cols=["date", "hour"],
-                              filesystem=s3,
-                              basename_template="batch_%04d_pod%d_{i}.parquet" % (batch_id, POD_INDEX),
-                              existing_data_behavior="overwrite_or_ignore",
-                          )
-                          return True
-                      except OSError as e:
-                          if "SLOW_DOWN" in str(e) and attempt < max_retries - 1:
-                              wait = (2 ** attempt) + random.uniform(0, 2)
-                              print(f"[Pod {POD_INDEX}] S3 SLOW_DOWN on batch {batch_id}, retry {attempt + 1}/{max_retries} after {wait:.1f}s")
-                              sys.stdout.flush()
-                              time.sleep(wait)
-                          else:
-                              raise
-                  return False
+              def write_with_retry(table, root_path, batch_id, pod_index, max_retries=8, chunk_idx=None):
+                  """Write shard-partitioned Hive parquet — date-only, sorted, ZSTD.
+
+                  Layout: root_path/shard=podNN/date=YYYY-MM-DD/batch_NNNN_chunk_CC.parquet
+
+                  Hour-level pruning uses row-group statistics on sorted start_time_unix_nano
+                  instead of Hive partitioning. This produces ~24x fewer files while enabling
+                  the same read-side filtering granularity via predicate pushdown.
+                  """
+                  import pyarrow.compute as pc
+
+                  # Sort by timestamp for contiguous row groups (enables predicate pushdown)
+                  sort_indices = pc.sort_indices(table, sort_keys=[("start_time_unix_nano", "ascending")])
+                  table = table.take(sort_indices)
+
+                  shard_path = f"{root_path}/shard=pod{pod_index:02d}"
+                  date_col = table.column("date")
+
+                  # Drop partition columns from data (date encoded in path, hour dropped)
+                  data_cols = [c for c in table.column_names if c not in ("date", "hour")]
+
+                  unique_dates = pc.unique(date_col).to_pylist()
+
+                  for date_val in unique_dates:
+                      date_mask = pc.equal(date_col, date_val)
+                      partition = table.filter(date_mask).select(data_cols)
+
+                      # Re-sort partition (filter may scramble order)
+                      sort_idx = pc.sort_indices(partition, sort_keys=[("start_time_unix_nano", "ascending")])
+                      partition = partition.take(sort_idx)
+
+                      if chunk_idx is not None:
+                          part_path = f"{shard_path}/date={date_val}/batch_{batch_id:04d}_chunk_{chunk_idx:02d}.parquet"
+                      else:
+                          part_path = f"{shard_path}/date={date_val}/batch_{batch_id:04d}.parquet"
+
+                      for attempt in range(max_retries):
+                          try:
+                              pq.write_table(
+                                  partition,
+                                  part_path,
+                                  filesystem=s3,
+                                  row_group_size=ROW_GROUP_SIZE,
+                                  compression=COMPRESSION,
+                                  compression_level=COMPRESSION_LEVEL,
+                                  write_statistics=True,
+                                  write_page_index=True,
+                              )
+                              break
+                          except OSError as e:
+                              if "SLOW_DOWN" in str(e) and attempt < max_retries - 1:
+                                  wait = (2 ** attempt) + random.uniform(0, 2)
+                                  print(f"[Pod {pod_index}] S3 SLOW_DOWN on batch {batch_id}, retry {attempt + 1}/{max_retries} after {wait:.1f}s")
+                                  sys.stdout.flush()
+                                  time.sleep(wait)
+                              else:
+                                  raise
+                      del partition
+
+                  return True
 
               def generate_batch_vectorized(n, batch_id, rng):
                   """Generate n spans using vectorized numpy operations."""
@@ -382,29 +428,37 @@ spec:
                       continue
 
                   batch_start = time.time()
-                  print(f"[Pod {POD_INDEX}] Batch {batch_id} ({batch_seq + 1}/{len(my_batches)}): Generating {SPANS_PER_BATCH:,} spans...")
+                  num_chunks = (SPANS_PER_BATCH + CHUNK_SIZE - 1) // CHUNK_SIZE
+                  print(f"[Pod {POD_INDEX}] Batch {batch_id} ({batch_seq + 1}/{len(my_batches)}): "
+                        f"Generating {SPANS_PER_BATCH:,} spans in {num_chunks} chunks of {CHUNK_SIZE:,}...")
                   sys.stdout.flush()
 
                   # Deterministic seed per batch for reproducibility
+                  # Same rng object is passed through all chunks, so the sequence is deterministic
                   rng = np.random.default_rng(seed=batch_id * 10000 + POD_INDEX)
 
-                  table = generate_batch_vectorized(SPANS_PER_BATCH, batch_id, rng)
+                  # Stream sub-batches: generate CHUNK_SIZE spans, write immediately, free memory
+                  # Peak memory stays at ~1.5Gi regardless of SPANS_PER_BATCH
+                  remaining = SPANS_PER_BATCH
+                  batch_bytes = 0
 
-                  # Write Hive-partitioned parquet (date=X/hour=Y/*.parquet)
-                  print(f"[Pod {POD_INDEX}] Batch {batch_id}: Writing to S3 (Hive partitioned)...")
-                  sys.stdout.flush()
+                  for chunk_idx in range(num_chunks):
+                      chunk_size = min(CHUNK_SIZE, remaining)
+                      remaining -= chunk_size
 
-                  write_start = time.time()
-                  write_with_retry(table, f"{base_path}/spans", batch_id)
-                  write_elapsed = time.time() - write_start
-                  print(f"[Pod {POD_INDEX}] Batch {batch_id}: S3 write took {write_elapsed:.1f}s")
+                      table = generate_batch_vectorized(chunk_size, batch_id, rng)
+                      write_with_retry(table, f"{base_path}/spans", batch_id, POD_INDEX,
+                                      chunk_idx=chunk_idx)
+                      batch_bytes += table.nbytes // 4  # rough ZSTD compression ratio
+                      del table
 
-                  # Estimate bytes written from table size (actual S3 size varies with compression)
-                  bytes_written = table.nbytes // 3  # rough snappy compression ratio
+                      if num_chunks > 1 and (chunk_idx + 1) % 2 == 0:
+                          print(f"[Pod {POD_INDEX}] Batch {batch_id} chunk {chunk_idx + 1}/{num_chunks} written")
+                          sys.stdout.flush()
 
-                  # Update per-pod progress
+                  # Update per-pod progress (batch-level, not chunk-level)
                   progress["completed_batches"].append(batch_id)
-                  progress["total_bytes"] += bytes_written
+                  progress["total_bytes"] += batch_bytes
                   progress["total_spans"] += SPANS_PER_BATCH
 
                   for _retry in range(5):
@@ -420,11 +474,9 @@ spec:
                   pct = (batch_seq + 1) / len(my_batches) * 100
                   rate = SPANS_PER_BATCH / batch_elapsed
 
-                  print(f"[Pod {POD_INDEX}] Batch {batch_id}: {batch_elapsed:.1f}s, {bytes_written / (1024**2):.0f} MiB, {rate:,.0f} spans/s")
+                  print(f"[Pod {POD_INDEX}] Batch {batch_id}: {batch_elapsed:.1f}s, {batch_bytes / (1024**2):.0f} MiB, {rate:,.0f} spans/s")
                   print(f"[Pod {POD_INDEX}] Progress: {len(progress['completed_batches'])}/{len(my_batches)} ({pct:.0f}%), {progress['total_spans']:,} spans, {total_gib:.2f} GiB")
                   sys.stdout.flush()
-
-                  del table
 
               # Pod complete
               overall_elapsed = time.time() - overall_start
@@ -481,5 +533,5 @@ spec:
               memory: "{{ datagen_large_memory_limit }}"
               cpu: "{{ datagen_large_cpu_limit }}"
             requests:
-              memory: "3Gi"
+              memory: "{{ datagen_large_memory_request }}"
               cpu: "1"

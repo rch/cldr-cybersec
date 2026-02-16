@@ -31,6 +31,19 @@
 # Phase 1: Minimal Dataset (quick, synchronous)
 # -------------------------------------------------------------------------
 
+- name: Delete existing minimal datagen job (spec.template is immutable)
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: absent
+    kind: Job
+    api_version: batch/v1
+    namespace: "{{ datagen_namespace }}"
+    name: datagen-minimal
+    wait: true
+    wait_timeout: 60
+  ignore_errors: true
+  when: datagen_minimal_enabled | default(true)
+
 - name: Deploy minimal datagen job
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/rke2/rke2.yaml
@@ -78,6 +91,19 @@
 # -------------------------------------------------------------------------
 # Phase 2: Large Dataset (async, runs in background)
 # -------------------------------------------------------------------------
+
+- name: Delete existing large datagen job (spec.template is immutable)
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    state: absent
+    kind: Job
+    api_version: batch/v1
+    namespace: "{{ datagen_namespace }}"
+    name: datagen-large
+    wait: true
+    wait_timeout: 60
+  ignore_errors: true
+  when: datagen_large_enabled | default(true)
 
 - name: Deploy large datagen job (async)
   kubernetes.core.k8s:

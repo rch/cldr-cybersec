@@ -63,7 +63,7 @@ variable "rke2_version" {
 variable "control_plane_count" {
   description = "Number of control plane nodes"
   type        = number
-  default     = 3
+  default     = 1
 }
 
 variable "control_plane_instance_type" {
@@ -75,13 +75,13 @@ variable "control_plane_instance_type" {
 variable "worker_count" {
   description = "Number of worker nodes"
   type        = number
-  default     = 3
+  default     = 8
 }
 
 variable "worker_instance_type" {
-  description = "Instance type for worker nodes"
+  description = "Instance type for worker nodes (r6i = memory-optimized, 4 vCPU / 32 GiB)"
   type        = string
-  default     = "m6i.2xlarge"
+  default     = "r6i.xlarge"
 }
 
 variable "root_volume_size" {
@@ -201,12 +201,14 @@ locals {
 variable "ingress_subdomains" {
   description = "Subdomain prefixes for services"
   type = object({
+    bastion    = string
     dask       = string
     jupyterhub = string
     k8s        = string
     viz        = string
   })
   default = {
+    bastion    = "bastion"
     dask       = "dask"
     jupyterhub = "jupyter"
     k8s        = "k8s"
@@ -245,6 +247,7 @@ locals {
 
   # Full FQDNs for ingress services
   ingress_domains = {
+    bastion    = "${var.ingress_subdomains.bastion}.${local.ingress_base_domain}"
     dask       = "${var.ingress_subdomains.dask}.${local.ingress_base_domain}"
     jupyterhub = "${var.ingress_subdomains.jupyterhub}.${local.ingress_base_domain}"
     k8s        = "${var.ingress_subdomains.k8s}.${local.ingress_base_domain}"

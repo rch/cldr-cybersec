@@ -49,7 +49,7 @@ spec:
           resources:
             limits:
               cpu: "{{ dask_worker_cpu_limit }}"
-              memory: {{ dask_worker_memory_request }}
+              memory: {{ dask_worker_memory_limit }}
             requests:
               cpu: "{{ dask_worker_cpu_request }}"
               memory: {{ dask_worker_memory_request }}

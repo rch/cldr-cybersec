@@ -22,17 +22,18 @@ vpc_cidr = "10.100.0.0/16"
 
 # Cluster sizing
 control_plane_count         = 1
-control_plane_instance_type = "t3.large"
+control_plane_instance_type = "m6i.xlarge"
 worker_count                = 8
-worker_instance_type        = "t3.xlarge"
+worker_instance_type        = "r6i.xlarge"  # 4 vCPU, 32 GiB memory-optimized
 
 # Storage
 root_volume_size = 50
 data_volume_size = 100
 
-# Access - restricted to Cloudflare WARP CGNAT range only
-# Only devices enrolled in WARP can SSH to cluster nodes
-allowed_ssh_cidrs = ["100.96.0.0/12"]
+# Access - Cloudflare WARP CGNAT range + developer IP for debugging
+# 100.96.0.0/12 = WARP enrolled devices
+# 216.147.122.181/32 = developer IP (temporary, for cloudflared debugging)
+allowed_ssh_cidrs = ["100.96.0.0/12", "216.147.122.181/32"]
 
 # Cloudflare WARP posture rule (pre-created in Zero Trust dashboard)
 # Required because API token lacks Zero Trust permissions to create rules

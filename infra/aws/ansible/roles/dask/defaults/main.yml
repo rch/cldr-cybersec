@@ -9,11 +9,11 @@ dask_namespace: dask
 
 # Dask cluster configuration
 dask_cluster_name: simple
-dask_worker_replicas: 16
+dask_worker_replicas: 32
 dask_worker_memory_limit: "6Gi"
 dask_worker_memory_request: "4Gi"
-dask_worker_cpu_limit: "2"
-dask_worker_cpu_request: "500m"
+dask_worker_cpu_limit: "1"
+dask_worker_cpu_request: "250m"
 dask_worker_threads: 2
 
 # Image configuration
