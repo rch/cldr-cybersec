@@ -1,0 +1,19 @@
+---
+# Zarf air-gap deployment orchestrator
+# Runs on control_plane[0] with become: true
+
+- name: Stage Zarf artifacts
+  import_tasks: stage.yml
+  tags: [stage]
+
+- name: Initialize Zarf
+  import_tasks: init.yml
+  tags: [init]
+
+- name: Deploy Zarf package
+  import_tasks: deploy.yml
+  tags: [deploy]
+
+- name: Verify deployment
+  import_tasks: verify.yml
+  tags: [verify]

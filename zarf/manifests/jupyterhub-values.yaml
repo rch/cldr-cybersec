@@ -59,7 +59,7 @@ singleuser:
   # Use custom cybersec-dask image with pre-installed dependencies
   # Note: Image will be rewritten by Zarf
   image:
-    name: cybersec-dask
+    name: localhost:5555/cybersec-dask
     tag: "2025.2.0"
   # Resource allocation per user
   cpu:
@@ -69,12 +69,22 @@ singleuser:
     limit: 4G
     guarantee: 1G
   # Storage for notebooks
+  # Using emptyDir (no StorageClass provisioner in bare RKE2 air-gap).
+  # Notebooks persist until pod restart. Users should save work to S3.
+  # To enable persistent storage, deploy a local-path-provisioner and
+  # change type to 'dynamic'.
   storage:
-    type: dynamic
-    capacity: 10Gi
-    # Use default StorageClass
-    dynamic:
-      storageClass: ""
+    type: none
+    # Mount sample notebooks from ConfigMap (read-only)
+    # Users copy to ~/work to edit
+    extraVolumes:
+      - name: sample-notebooks
+        configMap:
+          name: sample-notebooks
+    extraVolumeMounts:
+      - name: sample-notebooks
+        mountPath: /home/jovyan/sample-notebooks
+        readOnly: true
   # Environment variables for S3 access
   extraEnv:
     S3_ENDPOINT: "###ZARF_VAR_S3_ENDPOINT###"
@@ -82,18 +92,6 @@ singleuser:
     AWS_SECRET_ACCESS_KEY: "###ZARF_VAR_S3_SECRET_KEY###"
     # Dask scheduler address in same cluster
     DASK_SCHEDULER_ADDRESS: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
-  # Default packages already installed in image - no pip install needed
-  # This is critical for air-gap: no runtime package installation
-  # Mount sample notebooks from ConfigMap (read-only)
-  # Users copy to ~/work to edit
-  extraVolumes:
-    - name: sample-notebooks
-      configMap:
-        name: sample-notebooks
-  extraVolumeMounts:
-    - name: sample-notebooks
-      mountPath: /home/jovyan/sample-notebooks
-      readOnly: true
 
 # Scheduling - allow users on any node
 scheduling:

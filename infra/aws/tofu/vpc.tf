@@ -63,6 +63,7 @@ resource "aws_internet_gateway" "main" {
 # -----------------------------------------------------------------------------
 
 resource "aws_eip" "nat" {
+  count  = var.airgap_mode ? 0 : 1
   domain = "vpc"
 
   tags = merge(local.common_tags, {
@@ -73,7 +74,8 @@ resource "aws_eip" "nat" {
 }
 
 resource "aws_nat_gateway" "main" {
-  allocation_id = aws_eip.nat.id
+  count         = var.airgap_mode ? 0 : 1
+  allocation_id = aws_eip.nat[0].id
   subnet_id     = aws_subnet.public[0].id
 
   tags = merge(local.common_tags, {
@@ -107,13 +109,17 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
-# Private route table - routes through NAT gateway
+# Private route table - routes through NAT gateway (soft air-gap) or no egress (true air-gap)
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
 
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main.id
+  # NAT route only when not in air-gap mode
+  dynamic "route" {
+    for_each = var.airgap_mode ? [] : [1]
+    content {
+      cidr_block     = "0.0.0.0/0"
+      nat_gateway_id = aws_nat_gateway.main[0].id
+    }
   }
 
   tags = merge(local.common_tags, {
@@ -143,8 +149,9 @@ resource "aws_vpc_endpoint" "s3" {
   })
 }
 
-# ECR API Interface Endpoint
+# ECR API Interface Endpoint (not needed in true air-gap — images come from Zarf registry)
 resource "aws_vpc_endpoint" "ecr_api" {
+  count               = var.airgap_mode ? 0 : 1
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${var.aws_region}.ecr.api"
   vpc_endpoint_type   = "Interface"
@@ -157,8 +164,9 @@ resource "aws_vpc_endpoint" "ecr_api" {
   })
 }
 
-# ECR DKR Interface Endpoint (for docker pull)
+# ECR DKR Interface Endpoint (not needed in true air-gap — images come from Zarf registry)
 resource "aws_vpc_endpoint" "ecr_dkr" {
+  count               = var.airgap_mode ? 0 : 1
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"
   vpc_endpoint_type   = "Interface"

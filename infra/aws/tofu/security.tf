@@ -106,11 +106,39 @@ resource "aws_security_group" "control_plane" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+  # Full egress when not in air-gap mode
+  dynamic "egress" {
+    for_each = var.airgap_mode ? [] : [1]
+    content {
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+
+  # Air-gap: VPC-only egress (all protocols)
+  dynamic "egress" {
+    for_each = var.airgap_mode ? [1] : []
+    content {
+      description = "VPC internal traffic"
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = [var.vpc_cidr]
+    }
+  }
+
+  # Air-gap: S3 via VPC gateway endpoint (prefix list)
+  dynamic "egress" {
+    for_each = var.airgap_mode ? [1] : []
+    content {
+      description     = "S3 via VPC endpoint"
+      from_port       = 443
+      to_port         = 443
+      protocol        = "tcp"
+      prefix_list_ids = [aws_vpc_endpoint.s3.prefix_list_id]
+    }
   }
 
   tags = merge(local.common_tags, {
@@ -178,11 +206,39 @@ resource "aws_security_group" "worker" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+  # Full egress when not in air-gap mode
+  dynamic "egress" {
+    for_each = var.airgap_mode ? [] : [1]
+    content {
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+
+  # Air-gap: VPC-only egress (all protocols)
+  dynamic "egress" {
+    for_each = var.airgap_mode ? [1] : []
+    content {
+      description = "VPC internal traffic"
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = [var.vpc_cidr]
+    }
+  }
+
+  # Air-gap: S3 via VPC gateway endpoint (prefix list)
+  dynamic "egress" {
+    for_each = var.airgap_mode ? [1] : []
+    content {
+      description     = "S3 via VPC endpoint"
+      from_port       = 443
+      to_port         = 443
+      protocol        = "tcp"
+      prefix_list_ids = [aws_vpc_endpoint.s3.prefix_list_id]
+    }
   }
 
   tags = merge(local.common_tags, {

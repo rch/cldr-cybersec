@@ -75,21 +75,23 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "cybersec" {
     }
 
     # Dask Dashboard
+    # Soft air-gap: K8s service DNS (cloudflared inside cluster)
+    # True air-gap: bastion routes to control plane NodePort
     ingress_rule {
       hostname = local.ingress_domains.dask
-      service  = "http://simple-scheduler.dask.svc.cluster.local:8787"
+      service  = var.airgap_mode ? "http://${aws_instance.control_plane[0].private_ip}:30087" : "http://simple-scheduler.dask.svc.cluster.local:8787"
     }
 
     # JupyterHub
     ingress_rule {
       hostname = local.ingress_domains.jupyterhub
-      service  = "http://proxy-public.jupyterhub.svc.cluster.local:80"
+      service  = var.airgap_mode ? "http://${aws_instance.control_plane[0].private_ip}:30080" : "http://proxy-public.jupyterhub.svc.cluster.local:80"
     }
 
-    # Kubernetes Dashboard
+    # Kubernetes API (replaces dashboard in air-gap)
     ingress_rule {
       hostname = local.ingress_domains.k8s
-      service  = "https://kubernetes-dashboard.kubernetes-dashboard.svc.cluster.local:443"
+      service  = var.airgap_mode ? "https://${aws_instance.control_plane[0].private_ip}:6443" : "https://kubernetes-dashboard.kubernetes-dashboard.svc.cluster.local:443"
       origin_request {
         no_tls_verify = true
       }
@@ -98,7 +100,7 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "cybersec" {
     # Panel Visualization
     ingress_rule {
       hostname = local.ingress_domains.viz
-      service  = "http://panel-viz.panel-viz.svc.cluster.local:80"
+      service  = var.airgap_mode ? "http://${aws_instance.control_plane[0].private_ip}:30506" : "http://panel-viz.panel-viz.svc.cluster.local:80"
     }
 
     # Catch-all (required)

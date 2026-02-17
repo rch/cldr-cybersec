@@ -1,0 +1,37 @@
+---
+# Zarf air-gap deployment defaults
+
+# Zarf binary version
+zarf_version: "v0.66.0"
+
+# Local paths (relative to project root)
+zarf_local_dir: "{{ playbook_dir }}/../../../../zarf"
+zarf_local_binary: "{{ zarf_local_dir }}/zarf"
+
+# Remote paths on control plane
+zarf_remote_dir: "/opt/zarf"
+zarf_kubeconfig: "/etc/rancher/rke2/rke2.yaml"
+zarf_kubectl: "/var/lib/rancher/rke2/bin/kubectl"
+
+# Package artifacts
+zarf_init_package: "zarf-init-amd64-{{ zarf_version }}.tar.zst"
+zarf_app_package: "zarf-package-cybersec-dask-amd64-1.1.0.tar.zst"
+
+# Registry PV
+zarf_registry_path: "/var/lib/zarf-registry"
+zarf_registry_size: "20Gi"
+
+# Gitea PV (bare RKE2 has no StorageClass provisioner)
+zarf_gitea_path: "/var/lib/zarf-gitea"
+zarf_gitea_size: "10Gi"
+
+# JupyterHub hub-db PV (SQLite database for JupyterHub state)
+zarf_jupyterhub_db_path: "/var/lib/jupyterhub-db"
+zarf_jupyterhub_db_size: "1Gi"
+
+# Deploy variables (passed to zarf package deploy --set)
+zarf_dask_worker_replicas: "4"
+zarf_dask_spill_dir: "/tmp/dask-spill"
+zarf_s3_endpoint: ""
+zarf_s3_access_key: ""
+zarf_s3_secret_key: ""

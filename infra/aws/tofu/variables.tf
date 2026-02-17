@@ -143,6 +143,16 @@ variable "tags" {
 }
 
 # -----------------------------------------------------------------------------
+# Air-Gap Configuration
+# -----------------------------------------------------------------------------
+
+variable "airgap_mode" {
+  description = "True air-gap: remove NAT gateway and ECR endpoints; route tunnel via bastion to NodePorts"
+  type        = bool
+  default     = false
+}
+
+# -----------------------------------------------------------------------------
 # Cloudflare Configuration (for Cloudflare Tunnel ingress)
 # -----------------------------------------------------------------------------
 

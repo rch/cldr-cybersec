@@ -1,0 +1,107 @@
+---
+# Teardown all user workloads, leaving bare RKE2 cluster
+# Usage: ansible-playbook playbooks/teardown.yml
+#
+# Preserves: kube-system, kube-node-lease, kube-public, default
+# Deletes: dask, dask-operator, jupyterhub, panel-viz, datagen,
+#          cloudflare-system, zarf, kubernetes-dashboard, ngrok-system
+# Cleans: Helm releases, /var/lib/zarf-registry
+
+- name: Teardown user workloads
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  vars:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kubectl: /var/lib/rancher/rke2/bin/kubectl
+    teardown_namespaces:
+      - dask
+      - dask-operator
+      - jupyterhub
+      - panel-viz
+      - datagen
+      - cloudflare-system
+      - zarf
+      - kubernetes-dashboard
+      - ngrok-system
+  tasks:
+    - name: Get current namespaces
+      command: "{{ kubectl }} --kubeconfig {{ kubeconfig }} get namespaces -o jsonpath='{.items[*].metadata.name}'"
+      register: current_namespaces
+      changed_when: false
+
+    - name: Display current namespaces
+      debug:
+        msg: "Current namespaces: {{ current_namespaces.stdout }}"
+
+    - name: Remove Helm releases in target namespaces
+      shell: |
+        export KUBECONFIG={{ kubeconfig }}
+        for ns in {{ teardown_namespaces | join(' ') }}; do
+          if {{ kubectl }} --kubeconfig {{ kubeconfig }} get namespace "$ns" &>/dev/null; then
+            helm list -n "$ns" -q 2>/dev/null | while read release; do
+              echo "Removing Helm release: $release in $ns"
+              helm uninstall "$release" -n "$ns" --wait 2>/dev/null || true
+            done
+          fi
+        done
+      register: helm_cleanup
+      changed_when: "'Removing' in helm_cleanup.stdout"
+      ignore_errors: true
+
+    - name: Delete DaskCluster CRDs (prevents finalizer hang)
+      command: >
+        {{ kubectl }} --kubeconfig {{ kubeconfig }}
+        delete daskcluster --all -n dask --timeout=60s
+      register: dask_crd_cleanup
+      changed_when: dask_crd_cleanup.rc == 0
+      ignore_errors: true
+
+    - name: Delete target namespaces
+      command: >
+        {{ kubectl }} --kubeconfig {{ kubeconfig }}
+        delete namespace {{ item }} --timeout=120s
+      loop: "{{ teardown_namespaces }}"
+      when: item in current_namespaces.stdout
+      register: ns_delete
+      changed_when: ns_delete.rc == 0
+      ignore_errors: true
+
+    - name: Wait for namespace deletion to complete
+      command: >
+        {{ kubectl }} --kubeconfig {{ kubeconfig }}
+        get namespace {{ item }}
+      loop: "{{ teardown_namespaces }}"
+      register: ns_check
+      until: ns_check.rc != 0
+      retries: 30
+      delay: 10
+      changed_when: false
+      failed_when: false
+
+    - name: Clean Zarf registry data
+      file:
+        path: /var/lib/zarf-registry
+        state: absent
+
+    - name: Clean Zarf state directory
+      file:
+        path: /opt/zarf
+        state: absent
+
+    - name: Get remaining namespaces
+      command: "{{ kubectl }} --kubeconfig {{ kubeconfig }} get namespaces"
+      register: remaining_namespaces
+      changed_when: false
+
+    - name: Display remaining namespaces
+      debug:
+        msg: |
+          ============================================
+                    TEARDOWN COMPLETE
+          ============================================
+
+          Remaining namespaces:
+          {{ remaining_namespaces.stdout }}
+
+          ============================================

@@ -1,0 +1,222 @@
+---
+# Initialize Zarf on the cluster (creates internal registry)
+# Requires: init package staged, RKE2 running, kube-system pods ready
+#
+# Lessons from E2E 2026-02-17:
+# - Registry hostPath must exist on the node where the pod lands (nodeAffinity)
+# - Gitea needs a PV too (bare RKE2 has no StorageClass provisioner)
+# - SELinux container_file_t context needed for hostPath volumes
+# - Zarf's Gitea post-deploy can time out; manual fixup tasks included
+
+- name: Check if Zarf is already initialized
+  command: "{{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }} get namespace zarf"
+  register: zarf_ns_check
+  changed_when: false
+  failed_when: false
+
+- name: Skip init if already done
+  debug:
+    msg: "Zarf already initialized (namespace exists), skipping init"
+  when: zarf_ns_check.rc == 0
+
+- name: Wait for kube-system pods to be ready
+  shell: |
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }} \
+      wait --for=condition=Ready pods \
+      --field-selector=status.phase!=Succeeded \
+      --all -n kube-system --timeout=300s
+  changed_when: false
+  when: zarf_ns_check.rc != 0
+
+# --- Registry hostPath setup ---
+# The registry container runs as UID 1000 with readOnlyRootFilesystem.
+# We pin the PV to control-plane-1 via nodeAffinity, so only that node
+# strictly needs the directory — but we create on all nodes as a safety net.
+
+- name: Get control plane node name
+  shell: |
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }} \
+      get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].metadata.name}'
+  register: cp_node_name
+  changed_when: false
+  when: zarf_ns_check.rc != 0
+
+- name: Create Zarf registry host directory
+  file:
+    path: "{{ zarf_registry_path }}"
+    state: directory
+    owner: "1000"
+    group: "2000"
+    mode: "0777"
+  when: zarf_ns_check.rc != 0
+
+- name: Set SELinux context for registry directory
+  command: chcon -R -t container_file_t {{ zarf_registry_path }}
+  changed_when: false
+  failed_when: false
+  when: zarf_ns_check.rc != 0
+
+- name: Create Zarf gitea host directory
+  file:
+    path: "{{ zarf_gitea_path }}"
+    state: directory
+    owner: "1000"
+    group: "1000"
+    mode: "0777"
+  when: zarf_ns_check.rc != 0
+
+- name: Set SELinux context for gitea directory
+  command: chcon -R -t container_file_t {{ zarf_gitea_path }}
+  changed_when: false
+  failed_when: false
+  when: zarf_ns_check.rc != 0
+
+# --- PersistentVolumes with nodeAffinity ---
+# Pin both PVs to control-plane-1 so hostPath dirs are guaranteed to exist.
+
+- name: Create Zarf registry PersistentVolume
+  shell: |
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }} apply -f - <<'EOF'
+    apiVersion: v1
+    kind: PersistentVolume
+    metadata:
+      name: zarf-registry-pv
+    spec:
+      capacity:
+        storage: {{ zarf_registry_size }}
+      accessModes: [ReadWriteOnce]
+      persistentVolumeReclaimPolicy: Retain
+      hostPath:
+        path: {{ zarf_registry_path }}
+        type: DirectoryOrCreate
+      claimRef:
+        namespace: zarf
+        name: zarf-docker-registry
+      nodeAffinity:
+        required:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values:
+                    - "{{ cp_node_name.stdout }}"
+    EOF
+  register: pv_result
+  changed_when: "'created' in pv_result.stdout or 'configured' in pv_result.stdout"
+  when: zarf_ns_check.rc != 0
+
+- name: Create Zarf gitea PersistentVolume
+  shell: |
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }} apply -f - <<'EOF'
+    apiVersion: v1
+    kind: PersistentVolume
+    metadata:
+      name: zarf-gitea-pv
+    spec:
+      capacity:
+        storage: {{ zarf_gitea_size }}
+      accessModes: [ReadWriteOnce]
+      persistentVolumeReclaimPolicy: Retain
+      hostPath:
+        path: {{ zarf_gitea_path }}
+        type: DirectoryOrCreate
+      claimRef:
+        namespace: zarf
+        name: data-zarf-gitea-0
+      nodeAffinity:
+        required:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values:
+                    - "{{ cp_node_name.stdout }}"
+    EOF
+  register: gitea_pv_result
+  changed_when: "'created' in gitea_pv_result.stdout or 'configured' in gitea_pv_result.stdout"
+  when: zarf_ns_check.rc != 0
+
+- name: Create JupyterHub host directory
+  file:
+    path: "{{ zarf_jupyterhub_db_path }}"
+    state: directory
+    owner: "1000"
+    group: "1000"
+    mode: "0777"
+  when: zarf_ns_check.rc != 0
+
+- name: Set SELinux context for JupyterHub directory
+  command: chcon -R -t container_file_t {{ zarf_jupyterhub_db_path }}
+  changed_when: false
+  failed_when: false
+  when: zarf_ns_check.rc != 0
+
+- name: Create JupyterHub hub-db PersistentVolume
+  shell: |
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }} apply -f - <<'EOF'
+    apiVersion: v1
+    kind: PersistentVolume
+    metadata:
+      name: jupyterhub-hub-db-pv
+    spec:
+      capacity:
+        storage: {{ zarf_jupyterhub_db_size }}
+      accessModes: [ReadWriteOnce]
+      persistentVolumeReclaimPolicy: Retain
+      hostPath:
+        path: {{ zarf_jupyterhub_db_path }}
+        type: DirectoryOrCreate
+      claimRef:
+        namespace: jupyterhub
+        name: hub-db-dir
+      nodeAffinity:
+        required:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values:
+                    - "{{ cp_node_name.stdout }}"
+    EOF
+  register: jhub_pv_result
+  changed_when: "'created' in jhub_pv_result.stdout or 'configured' in jhub_pv_result.stdout"
+  when: zarf_ns_check.rc != 0
+
+- name: Run Zarf init
+  command: >
+    {{ zarf_remote_dir }}/zarf init --confirm
+    --components=git-server
+  args:
+    chdir: "{{ zarf_remote_dir }}"
+  environment:
+    KUBECONFIG: "{{ zarf_kubeconfig }}"
+  register: zarf_init_result
+  when: zarf_ns_check.rc != 0
+  timeout: 900
+
+- name: Display Zarf init result
+  debug:
+    msg: "{{ zarf_init_result.stdout_lines | default(['Init skipped - already initialized']) }}"
+
+# --- Post-init fixup ---
+# If Gitea init timed out waiting for PVC, the post-deploy actions
+# (create-read-only-gitea-user, create-artifact-registry-token) don't run.
+# These are idempotent, so always run them after init.
+
+- name: Ensure Zarf gitea read-only user exists
+  command: >
+    {{ zarf_remote_dir }}/zarf internal create-read-only-gitea-user
+  environment:
+    KUBECONFIG: "{{ zarf_kubeconfig }}"
+  changed_when: false
+  failed_when: false
+  when: zarf_ns_check.rc != 0
+
+- name: Ensure Zarf artifact registry token exists
+  command: >
+    {{ zarf_remote_dir }}/zarf internal create-artifact-registry-token
+  environment:
+    KUBECONFIG: "{{ zarf_kubeconfig }}"
+  changed_when: false
+  failed_when: false
+  when: zarf_ns_check.rc != 0

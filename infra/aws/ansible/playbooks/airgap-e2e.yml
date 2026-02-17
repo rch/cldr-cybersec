@@ -1,0 +1,243 @@
+---
+# Air-Gap E2E Zarf Deployment Verification
+#
+# Full pipeline: verify air-gap → teardown → deploy via Zarf → verify services
+#
+# Usage:
+#   ansible-playbook playbooks/airgap-e2e.yml                    # Full E2E
+#   ansible-playbook playbooks/airgap-e2e.yml --tags deploy      # Deploy only
+#   ansible-playbook playbooks/airgap-e2e.yml --tags verify      # Verify only
+#   ansible-playbook playbooks/airgap-e2e.yml -e zarf_dask_worker_replicas=8
+
+# Phase 1: Verify air-gap network isolation
+- name: "Phase 1: Verify air-gap isolation"
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tags: [verify-airgap]
+  tasks:
+    - name: Confirm no internet egress (should fail)
+      command: curl -sf --connect-timeout 5 https://google.com
+      register: internet_check
+      failed_when: internet_check.rc == 0
+      changed_when: false
+      ignore_errors: true
+
+    - name: Internet egress blocked
+      debug:
+        msg: >-
+          {{ 'PASS: No internet egress (curl failed as expected)'
+             if internet_check.rc != 0
+             else 'FAIL: Internet egress detected — not a true air-gap!' }}
+
+    - name: Confirm S3 access via VPC endpoint
+      command: aws s3 ls --region {{ aws_region | default('us-west-1') }}
+      register: s3_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: S3 VPC endpoint access
+      debug:
+        msg: >-
+          {{ 'PASS: S3 accessible via VPC endpoint'
+             if s3_check.rc == 0
+             else 'WARN: S3 access failed (may need IAM role)' }}
+
+    - name: Confirm RKE2 cluster is healthy
+      command: /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes
+      register: nodes_check
+      changed_when: false
+
+    - name: Display cluster nodes
+      debug:
+        msg: "{{ nodes_check.stdout_lines }}"
+
+# Phase 2: Teardown existing workloads
+- name: "Phase 2: Teardown existing workloads"
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tags: [teardown]
+  vars:
+    kubeconfig: /etc/rancher/rke2/rke2.yaml
+    kubectl: /var/lib/rancher/rke2/bin/kubectl
+    teardown_namespaces:
+      - dask
+      - dask-operator
+      - jupyterhub
+      - panel-viz
+      - datagen
+      - cloudflare-system
+      - zarf
+      - kubernetes-dashboard
+      - ngrok-system
+  tasks:
+    - name: Get current namespaces
+      command: "{{ kubectl }} --kubeconfig {{ kubeconfig }} get namespaces -o jsonpath='{.items[*].metadata.name}'"
+      register: current_namespaces
+      changed_when: false
+
+    - name: Remove Helm releases
+      shell: |
+        export KUBECONFIG={{ kubeconfig }}
+        for ns in {{ teardown_namespaces | join(' ') }}; do
+          if {{ kubectl }} --kubeconfig {{ kubeconfig }} get namespace "$ns" &>/dev/null; then
+            helm list -n "$ns" -q 2>/dev/null | while read release; do
+              helm uninstall "$release" -n "$ns" --wait 2>/dev/null || true
+            done
+          fi
+        done
+      changed_when: false
+      ignore_errors: true
+
+    - name: Delete DaskCluster CRDs
+      command: >
+        {{ kubectl }} --kubeconfig {{ kubeconfig }}
+        delete daskcluster --all -n dask --timeout=60s
+      changed_when: false
+      ignore_errors: true
+
+    - name: Delete target namespaces
+      command: >
+        {{ kubectl }} --kubeconfig {{ kubeconfig }}
+        delete namespace {{ item }} --timeout=120s
+      loop: "{{ teardown_namespaces }}"
+      when: item in current_namespaces.stdout
+      changed_when: false
+      ignore_errors: true
+
+    - name: Wait for namespace cleanup
+      command: "{{ kubectl }} --kubeconfig {{ kubeconfig }} get namespace {{ item }}"
+      loop: "{{ teardown_namespaces }}"
+      register: ns_check
+      until: ns_check.rc != 0
+      retries: 30
+      delay: 10
+      changed_when: false
+      failed_when: false
+
+    - name: Clean Zarf state
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/zarf-registry
+        - /opt/zarf
+
+    - name: Verify clean state
+      command: "{{ kubectl }} --kubeconfig {{ kubeconfig }} get namespaces"
+      register: clean_namespaces
+      changed_when: false
+
+    - name: Display clean state
+      debug:
+        msg: "{{ clean_namespaces.stdout_lines }}"
+
+# Phase 3: Deploy via Zarf
+- name: "Phase 3: Deploy via Zarf"
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tags: [deploy]
+  vars_files:
+    - ../group_vars/all.yml
+  roles:
+    - role: zarf-deploy
+
+# Phase 4: Verify tunnel access from bastion
+- name: "Phase 4: Verify tunnel routing"
+  hosts: bastion
+  become: false
+  gather_facts: false
+  tags: [verify]
+  vars:
+    control_plane_ip: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] | default(groups['control_plane'][0]) }}"
+  tasks:
+    - name: Check cloudflared service on bastion
+      command: systemctl is-active cloudflared
+      register: cloudflared_status
+      changed_when: false
+      ignore_errors: true
+
+    - name: Cloudflared status
+      debug:
+        msg: >-
+          {{ 'PASS: cloudflared running on bastion'
+             if cloudflared_status.rc == 0
+             else 'FAIL: cloudflared not running on bastion' }}
+
+    - name: Test Dask dashboard via NodePort
+      command: "curl -sf --connect-timeout 10 http://{{ control_plane_ip }}:30087/health"
+      register: dask_nodeport
+      changed_when: false
+      ignore_errors: true
+
+    - name: Test JupyterHub via NodePort
+      command: "curl -sf --connect-timeout 10 http://{{ control_plane_ip }}:30080"
+      register: jhub_nodeport
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display tunnel verification
+      debug:
+        msg: |
+          ============================================
+               TUNNEL ROUTING VERIFICATION
+          ============================================
+
+          Bastion cloudflared:  {{ 'ACTIVE' if cloudflared_status.rc == 0 else 'INACTIVE' }}
+          Control plane IP:     {{ control_plane_ip }}
+
+          NodePort Health:
+            Dask    (30087): {{ 'OK' if dask_nodeport.rc == 0 else 'UNREACHABLE' }}
+            Jupyter (30080): {{ 'OK' if jhub_nodeport.rc == 0 else 'UNREACHABLE' }}
+
+          External URLs (via Cloudflare WARP):
+            Dask:       https://dask.dev.aws.zndx.org
+            JupyterHub: https://jupyter.dev.aws.zndx.org
+            Viz:        https://viz.dev.aws.zndx.org
+
+          ============================================
+
+# Phase 5: Final report
+- name: "Phase 5: E2E Report"
+  hosts: control_plane[0]
+  become: true
+  gather_facts: false
+  tags: [report]
+  tasks:
+    - name: Get all pods across namespaces
+      command: /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get pods -A -o wide
+      register: final_pods
+      changed_when: false
+
+    - name: Get DaskCluster status
+      command: /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get daskcluster -n dask -o wide
+      register: final_dask
+      changed_when: false
+      ignore_errors: true
+
+    - name: Test Dask health
+      command: curl -sf http://127.0.0.1:30087/health
+      register: final_health
+      changed_when: false
+      ignore_errors: true
+
+    - name: Display final E2E report
+      debug:
+        msg: |
+          ============================================================
+                     AIR-GAP E2E DEPLOYMENT REPORT
+          ============================================================
+
+          DASK CLUSTER
+          {{ final_dask.stdout | default('Not deployed') }}
+
+          SCHEDULER HEALTH: {{ 'PASS' if final_health.rc == 0 else 'FAIL' }}
+
+          ALL PODS
+          {{ final_pods.stdout }}
+
+          ============================================================
+          Result: {{ 'ALL CHECKS PASSED' if final_health.rc == 0 else 'SOME CHECKS FAILED' }}
+          ============================================================

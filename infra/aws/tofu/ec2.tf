@@ -42,6 +42,7 @@ resource "aws_iam_role_policy_attachment" "ssm" {
 }
 
 resource "aws_iam_role_policy_attachment" "ecr_readonly" {
+  count      = var.airgap_mode ? 0 : 1
   role       = aws_iam_role.rke2_node.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }

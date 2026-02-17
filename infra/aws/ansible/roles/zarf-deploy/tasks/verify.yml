@@ -1,0 +1,111 @@
+---
+# Verify Zarf deployment — check all expected pods and services
+
+- name: Wait for Dask scheduler to be ready
+  command: >
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }}
+    wait --for=condition=Ready pod
+    -l app.kubernetes.io/name=cybersec-dask,dask.org/component=scheduler
+    -n dask --timeout=120s
+  register: scheduler_wait
+  changed_when: false
+  ignore_errors: true
+
+- name: Wait for Dask workers to be ready
+  command: >
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }}
+    wait --for=condition=Ready pod
+    -l dask.org/component=worker
+    -n dask --timeout=180s
+  register: workers_wait
+  changed_when: false
+  ignore_errors: true
+
+- name: Wait for JupyterHub to be ready
+  command: >
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }}
+    wait --for=condition=Ready pod
+    -l component=hub
+    -n jupyterhub --timeout=120s
+  register: hub_wait
+  changed_when: false
+  ignore_errors: true
+
+- name: Wait for Panel-Viz to be ready
+  command: >
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }}
+    wait --for=condition=Ready pod
+    -l app=panel-viz
+    -n panel-viz --timeout=120s
+  register: viz_wait
+  changed_when: false
+  ignore_errors: true
+
+- name: Get all pods
+  command: "{{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }} get pods -A -o wide"
+  register: all_pods
+  changed_when: false
+
+- name: Get Zarf registry catalog
+  shell: |
+    REG_PASS=$({{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }} \
+      get secret -n zarf zarf-state -o jsonpath='{.data.state}' \
+      | base64 -d | python3 -c "import sys,json; print(json.load(sys.stdin)['registryInfo']['pullPassword'])")
+    curl -sf -u "zarf-pull:$REG_PASS" http://127.0.0.1:31999/v2/_catalog 2>/dev/null || echo '{"repositories":[]}'
+  register: registry_catalog
+  changed_when: false
+  ignore_errors: true
+
+- name: Test Dask scheduler health endpoint
+  command: "curl -sf http://127.0.0.1:30087/health"
+  register: dask_health
+  changed_when: false
+  ignore_errors: true
+
+- name: Get DaskCluster status
+  command: >
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }}
+    get daskcluster -n dask -o wide
+  register: dask_cluster_status
+  changed_when: false
+  ignore_errors: true
+
+- name: Display verification summary
+  debug:
+    msg: |
+      ============================================
+            ZARF DEPLOYMENT VERIFICATION
+      ============================================
+
+      DASK
+      ----
+      Scheduler: {{ 'READY' if scheduler_wait.rc == 0 else 'NOT READY' }}
+      Workers:   {{ 'READY' if workers_wait.rc == 0 else 'NOT READY' }}
+      Health:    {{ 'OK' if dask_health.rc == 0 else 'FAILED' }}
+      Cluster:   {{ dask_cluster_status.stdout | default('not found') }}
+
+      JUPYTERHUB
+      ----------
+      Hub: {{ 'READY' if hub_wait.rc == 0 else 'NOT READY' }}
+
+      PANEL-VIZ
+      ---------
+      Pod: {{ 'READY' if viz_wait.rc == 0 else 'NOT READY' }}
+
+      ZARF REGISTRY
+      -------------
+      Catalog: {{ registry_catalog.stdout | default('unavailable') }}
+
+      ALL PODS
+      --------
+      {{ all_pods.stdout }}
+
+      ============================================
+
+- name: Assert critical components running
+  assert:
+    that:
+      - scheduler_wait.rc == 0
+      - workers_wait.rc == 0
+      - dask_health.rc == 0
+    fail_msg: "Critical Zarf deployment components not ready"

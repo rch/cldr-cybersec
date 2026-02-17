@@ -49,6 +49,7 @@ OTEL_DATA_PATH = os.environ.get('OTEL_DATA_PATH', f's3://{S3_BUCKET}/otel-minima
 S3_ENDPOINT = os.environ.get('S3_ENDPOINT', '')
 AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
 AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
+AWS_SESSION_TOKEN = os.environ.get('AWS_SESSION_TOKEN', '')
 AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 
 # Fixed canvas size to prevent collapse
@@ -93,7 +94,16 @@ def get_dask_stats() -> dict:
 # -------------------------------------------------------------------------
 
 def get_storage_options() -> dict:
-    opts = {'key': AWS_ACCESS_KEY_ID, 'secret': AWS_SECRET_ACCESS_KEY}
+    # When explicit credentials are provided (e.g. MinIO), use them directly.
+    # When AWS_SESSION_TOKEN is set (IAM role / STS), include it.
+    # When no credentials are set, omit key/secret so botocore uses its
+    # default credential chain (instance role, env vars, config files).
+    opts = {}
+    if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+        opts['key'] = AWS_ACCESS_KEY_ID
+        opts['secret'] = AWS_SECRET_ACCESS_KEY
+        if AWS_SESSION_TOKEN:
+            opts['token'] = AWS_SESSION_TOKEN
     if S3_ENDPOINT:
         opts['client_kwargs'] = {'endpoint_url': S3_ENDPOINT}
     if AWS_REGION:

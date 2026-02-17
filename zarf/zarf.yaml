@@ -88,7 +88,7 @@ components:
           - wait:
               cluster:
                 kind: Pod
-                name: app.kubernetes.io/name=dask-scheduler
+                name: dask.org/component=scheduler
                 namespace: dask
                 condition: Ready
 
@@ -117,7 +117,7 @@ components:
           - wait:
               cluster:
                 kind: Pod
-                name: app.kubernetes.io/component=hub
+                name: component=hub
                 namespace: jupyterhub
                 condition: Ready
 
@@ -138,7 +138,7 @@ components:
           - wait:
               cluster:
                 kind: Pod
-                name: app=panel-viz
+                name: app=otel-navigator
                 namespace: panel-viz
                 condition: Ready
 

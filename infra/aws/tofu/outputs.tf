@@ -113,5 +113,15 @@ output "cluster_info" {
       prefix = var.developer_prefix
       email  = var.developer_email
     }
+    airgap = {
+      enabled   = var.airgap_mode
+      nodeports = var.airgap_mode ? {
+        dask_dashboard = 30087
+        dask_scheduler = 30086
+        jupyterhub     = 30080
+        panel_viz      = 30506
+      } : {}
+      routing = var.airgap_mode ? "bastion → control_plane NodePorts" : "K8s service DNS"
+    }
   }
 }

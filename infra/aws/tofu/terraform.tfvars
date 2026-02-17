@@ -39,5 +39,8 @@ allowed_ssh_cidrs = ["100.96.0.0/12", "216.147.122.181/32"]
 # Required because API token lacks Zero Trust permissions to create rules
 cloudflare_warp_posture_rule_id = "5a0ce53e-f932-46c9-935e-31f79b68e597"
 
+# Air-gap mode: remove NAT gateway, restrict egress, route tunnel via bastion NodePorts
+airgap_mode = true
+
 # Base tags (Owner is set automatically from developer_email)
 tags = {}
