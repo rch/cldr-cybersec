@@ -67,6 +67,56 @@ singleuser:
     image:
       name: localhost:5555/cybersec-dask
       tag: "2025.2.0"
+  # Disable block-cloud-metadata init container (requires iptables,
+  # which is not present in the cybersec-dask image)
+  cloudMetadata:
+    blockWithIptables: false
+  # Init container: copy jupyterhub package from hub image into shared volume.
+  # The cybersec-dask image has jupyterlab + jupyter_server but NOT the
+  # jupyterhub package needed for jupyterhub-singleuser. The hub image (k8s-hub)
+  # has it pre-installed. This avoids rebuilding the cybersec-dask image.
+  initContainers:
+    - name: inject-jupyterhub-pkg
+      image: quay.io/jupyterhub/k8s-hub:4.0.0
+      command:
+        - sh
+        - -c
+        - |
+          SP=/usr/local/lib/python3.12/site-packages
+          DST=/srv/jupyterhub-pkg
+          # Copy jupyterhub and its pure-Python dependencies that are
+          # missing from the cybersec-dask image. Skip .so files since
+          # they are cpython-312 but the target image runs cpython-310;
+          # all these packages have pure-Python fallbacks.
+          for pkg in jupyterhub oauthlib certipy pamela pydantic pydantic_core \
+                     sqlalchemy alembic mako greenlet typing_extensions \
+                     annotated_types; do
+            if [ -d "$SP/$pkg" ]; then
+              cp -a "$SP/$pkg" "$DST/$pkg"
+            fi
+          done
+          # Also copy single-file modules and .dist-info metadata
+          for f in $SP/sqlalchemy_cockroachdb* $SP/typing_extensions* \
+                   $SP/annotated_types*; do
+            [ -e "$f" ] && cp -a "$f" "$DST/" 2>/dev/null || true
+          done
+          # Remove compiled .so extensions (won't work cross-version)
+          find "$DST" -name "*.cpython-312*.so" -delete 2>/dev/null || true
+          echo "jupyterhub + deps copied (pure-Python, no .so files)"
+      volumeMounts:
+        - name: jupyterhub-pkg
+          mountPath: /srv/jupyterhub-pkg
+  # Use 'python -m jupyterhub.singleuser' instead of the 'jupyterhub-singleuser'
+  # entry-point script, since the binary is not on PATH in the cybersec-dask image.
+  cmd:
+    - python
+    - -m
+    - jupyterhub.singleuser
+    - --allow-root
+  # Run as root (UID 0) because the Dask base image has no 'jovyan' user.
+  # Z2JH defaults runAsUser=1000 but the cybersec-dask image only has root.
+  uid: 0
+  fsGid: 0
   # Resource allocation per user
   cpu:
     limit: 2
@@ -87,12 +137,21 @@ singleuser:
       - name: sample-notebooks
         configMap:
           name: sample-notebooks
+      - name: jupyterhub-pkg
+        emptyDir: {}
     extraVolumeMounts:
       - name: sample-notebooks
         mountPath: /home/jovyan/sample-notebooks
         readOnly: true
+      - name: jupyterhub-pkg
+        mountPath: /srv/jupyterhub-pkg
+        readOnly: true
   # Environment variables for S3 access
   extraEnv:
+    # Make the injected jupyterhub package importable
+    PYTHONPATH: "/srv/jupyterhub-pkg"
+    # Ensure HOME is writable (Dask base image runs as root)
+    HOME: "/root"
     S3_ENDPOINT: "###ZARF_VAR_S3_ENDPOINT###"
     AWS_ACCESS_KEY_ID: "###ZARF_VAR_S3_ACCESS_KEY###"
     AWS_SECRET_ACCESS_KEY: "###ZARF_VAR_S3_SECRET_KEY###"

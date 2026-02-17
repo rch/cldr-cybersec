@@ -175,15 +175,21 @@ def load_span_data(start_time: datetime, end_time: datetime, data_path: str = No
     if not s3_base.endswith('/spans'):
         s3_base = f"{s3_base}/spans"
 
-    start_date, end_date = start_time.date(), end_time.date()
-    date_strings = []
-    current = start_date
-    while current <= end_date:
-        date_strings.append(current.strftime('%Y-%m-%d'))
-        current += timedelta(days=1)
+    if start_time is not None:
+        start_date, end_date = start_time.date(), end_time.date()
+        date_strings = []
+        current = start_date
+        while current <= end_date:
+            date_strings.append(current.strftime('%Y-%m-%d'))
+            current += timedelta(days=1)
+    else:
+        date_strings = None  # All Data mode: skip date filtering
 
     if on_progress:
-        on_progress(f"Scanning {len(date_strings)} days...")
+        if date_strings is not None:
+            on_progress(f"Scanning {len(date_strings)} days...")
+        else:
+            on_progress("Loading all available data...")
 
     # --- File discovery (cached) ---
     cache_key = s3_base
@@ -210,11 +216,25 @@ def load_span_data(start_time: datetime, end_time: datetime, data_path: str = No
     else:
         all_files = _file_list_cache[cache_key]
 
-    # --- Date filtering ---
-    parquet_files = [
-        f for f in all_files
-        if any(f"date={d}" in f for d in date_strings)
-    ]
+    # --- Date filtering (with fallback to all data) ---
+    if date_strings is not None:
+        parquet_files = [
+            f for f in all_files
+            if any(f"date={d}" in f for d in date_strings)
+        ]
+        if not parquet_files and all_files:
+            # Fallback: no files match the requested date range, but data exists.
+            # This happens when data is older than the time preset (e.g., data from
+            # Feb 14-15 but preset is "Last 24 Hours" on Feb 17).
+            logger.warning(
+                f"No files match dates {date_strings}, falling back to all "
+                f"{len(all_files)} files"
+            )
+            if on_progress:
+                on_progress(f"No recent data, loading all {len(all_files)} files...")
+            parquet_files = all_files
+    else:
+        parquet_files = all_files
 
     if not parquet_files:
         import pandas as pd
@@ -264,8 +284,8 @@ class SpanExplorer(param.Parameterized):
 
     # Controls
     time_preset = param.Selector(
-        default='Last 24 Hours',
-        objects=['Last Hour', 'Last 6 Hours', 'Last 24 Hours', 'Last 7 Days'],
+        default='All Data',
+        objects=['All Data', 'Last Hour', 'Last 6 Hours', 'Last 24 Hours', 'Last 7 Days'],
     )
     cmap = param.Selector(default='fire', objects=['fire', 'viridis', 'plasma', 'inferno', 'blues'])
     spread_enabled = param.Boolean(default=True)
@@ -296,6 +316,8 @@ class SpanExplorer(param.Parameterized):
         self._current_data_path = ds_info['path']
 
     def _get_time_range(self):
+        if self.time_preset == 'All Data':
+            return (None, None)
         now = datetime.now(timezone.utc)
         deltas = {
             'Last Hour': timedelta(hours=1),
