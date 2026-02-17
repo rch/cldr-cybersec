@@ -15,7 +15,7 @@ zarf_kubectl: "/var/lib/rancher/rke2/bin/kubectl"
 
 # Package artifacts
 zarf_init_package: "zarf-init-amd64-{{ zarf_version }}.tar.zst"
-zarf_app_package: "zarf-package-cybersec-dask-amd64-1.1.0.tar.zst"
+zarf_app_package: "zarf-package-cybersec-dask-amd64-1.1.1.tar.zst"
 
 # Registry PV
 zarf_registry_path: "/var/lib/zarf-registry"
