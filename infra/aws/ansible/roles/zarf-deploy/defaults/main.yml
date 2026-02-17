@@ -30,8 +30,11 @@ zarf_jupyterhub_db_path: "/var/lib/jupyterhub-db"
 zarf_jupyterhub_db_size: "1Gi"
 
 # Deploy variables (passed to zarf package deploy --set)
-zarf_dask_worker_replicas: "4"
+zarf_dask_worker_replicas: "32"
 zarf_dask_spill_dir: "/tmp/dask-spill"
 zarf_s3_endpoint: ""
+zarf_s3_bucket: ""
+zarf_s3_region: "us-east-1"
 zarf_s3_access_key: ""
 zarf_s3_secret_key: ""
+zarf_s3_session_token: ""

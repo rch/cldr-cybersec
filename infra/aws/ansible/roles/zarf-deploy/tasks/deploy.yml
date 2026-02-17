@@ -11,8 +11,11 @@
     --set DASK_WORKER_REPLICAS={{ zarf_dask_worker_replicas }}
     --set DASK_SPILL_DIR={{ zarf_dask_spill_dir }}
     {% if zarf_s3_endpoint != "" %}--set S3_ENDPOINT={{ zarf_s3_endpoint }}{% endif %}
+    {% if zarf_s3_bucket != "" %}--set S3_BUCKET={{ zarf_s3_bucket }}{% endif %}
+    {% if zarf_s3_region != "us-east-1" %}--set S3_REGION={{ zarf_s3_region }}{% endif %}
     {% if zarf_s3_access_key != "" %}--set S3_ACCESS_KEY={{ zarf_s3_access_key }}{% endif %}
     {% if zarf_s3_secret_key != "" %}--set S3_SECRET_KEY={{ zarf_s3_secret_key }}{% endif %}
+    {% if zarf_s3_session_token != "" %}--set S3_SESSION_TOKEN={{ zarf_s3_session_token }}{% endif %}
   environment:
     KUBECONFIG: "{{ zarf_kubeconfig }}"
   register: zarf_deploy_result

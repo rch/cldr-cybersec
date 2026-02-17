@@ -61,6 +61,12 @@ singleuser:
   image:
     name: localhost:5555/cybersec-dask
     tag: "2025.2.0"
+  # Network tools init container - uses our bundled image
+  # (avoids needing a separate k8s-network-tools image in air-gap)
+  networkTools:
+    image:
+      name: localhost:5555/cybersec-dask
+      tag: "2025.2.0"
   # Resource allocation per user
   cpu:
     limit: 2

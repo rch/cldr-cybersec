@@ -369,6 +369,7 @@ class SpanExplorer(param.Parameterized):
         are not thread-safe, we batch all param updates via pn.state.execute()
         so they run on the event loop.
         """
+        print(f"[OTEL-NAV] load_data called, dataset={self.current_dataset}", flush=True)
         import logging as _logging_bg
         import panel as _pn_bg
 
@@ -577,6 +578,7 @@ class SpanExplorer(param.Parameterized):
             theme="dark",
         )
 
+        # Auto-load data when page loads
         def on_load():
             self.load_data()
 
@@ -588,3 +590,4 @@ class SpanExplorer(param.Parameterized):
 # Create and serve
 explorer = SpanExplorer()
 explorer.servable().servable()
+print("[OTEL-NAV] App ready", flush=True)

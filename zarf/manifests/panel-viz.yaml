@@ -31,11 +31,11 @@ metadata:
     app.kubernetes.io/managed-by: zarf
 data:
   # S3 bucket containing OTEL data
-  S3_BUCKET: "cybersec-dask-data"
+  S3_BUCKET: "###ZARF_VAR_S3_BUCKET###"
   # Path to OTEL span data (Parquet files)
-  OTEL_DATA_PATH: "s3://cybersec-dask-data/otel-minimal/"
+  OTEL_DATA_PATH: "s3://###ZARF_VAR_S3_BUCKET###/otel-minimal/"
   # AWS region for S3 access
-  AWS_REGION: "us-east-1"
+  AWS_REGION: "###ZARF_VAR_S3_REGION###"
 ---
 apiVersion: v1
 kind: Secret
@@ -50,6 +50,8 @@ stringData:
   # S3/MinIO credentials - populated by Zarf variables
   AWS_ACCESS_KEY_ID: "###ZARF_VAR_S3_ACCESS_KEY###"
   AWS_SECRET_ACCESS_KEY: "###ZARF_VAR_S3_SECRET_KEY###"
+  # AWS STS session token (for IAM role / temporary credentials)
+  AWS_SESSION_TOKEN: "###ZARF_VAR_S3_SESSION_TOKEN###"
   # Optional: S3 endpoint for MinIO (leave empty for AWS S3)
   S3_ENDPOINT: "###ZARF_VAR_S3_ENDPOINT###"
 ---
@@ -114,10 +116,10 @@ spec:
           resources:
             requests:
               cpu: 500m
-              memory: 2Gi
+              memory: 4Gi
             limits:
               cpu: 2
-              memory: 4Gi
+              memory: 8Gi
           # TCP probe: Panel app loads data from S3 on HTTP requests, which
           # blocks in air-gap environments. Use TCP to verify Bokeh server is up.
           readinessProbe:
