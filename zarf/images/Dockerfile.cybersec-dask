@@ -45,6 +45,9 @@ RUN mkdir -p /app
 # Copy OTEL Navigator application
 COPY otel-navigator.py /app/otel-navigator.py
 
+# Copy sample notebooks for JupyterHub users
+COPY sample-notebooks/ /app/sample-notebooks/
+
 # Verify app can be imported (catches syntax errors at build time)
 RUN python -c "import ast; ast.parse(open('/app/otel-navigator.py').read()); print('App syntax OK')"
 

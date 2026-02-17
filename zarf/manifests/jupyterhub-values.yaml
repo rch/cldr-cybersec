@@ -141,7 +141,7 @@ singleuser:
         emptyDir: {}
     extraVolumeMounts:
       - name: sample-notebooks
-        mountPath: /home/jovyan/sample-notebooks
+        mountPath: /app/sample-notebooks
         readOnly: true
       - name: jupyterhub-pkg
         mountPath: /srv/jupyterhub-pkg

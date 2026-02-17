@@ -1545,6 +1545,153 @@ EOF
     '';
 
     # -------------------------------------------------------------------------
+    # AWS Credential Refresh
+    # -------------------------------------------------------------------------
+    # Refreshes temporary AWS session tokens across all namespaces on the
+    # Zarf-deployed RKE2 cluster. Run when S3 access fails due to expired
+    # credentials (~5 hour STS token lifetime).
+    #
+    # Updates: panel-viz Secret, Dask worker/scheduler env, JupyterHub Helm values
+    # Also SCPs the latest jupyterhub-values.yaml for mount path fixes.
+    #
+    # Usage:
+    #   devenv tasks run aws:refresh-tokens
+
+    "aws:refresh-tokens".exec = ''
+      set -euo pipefail
+      echo "=== AWS Credential Refresh ==="
+      echo ""
+
+      # 1. Read credentials from local AWS profile
+      PROFILE="''${AWS_PROFILE:-default}"
+      ACCESS_KEY=$(aws configure get aws_access_key_id --profile "$PROFILE")
+      SECRET_KEY=$(aws configure get aws_secret_access_key --profile "$PROFILE")
+      SESSION_TOKEN=$(aws configure get aws_session_token --profile "$PROFILE" 2>/dev/null || echo "")
+
+      if [ -z "$ACCESS_KEY" ] || [ -z "$SECRET_KEY" ]; then
+        echo "Error: Could not read AWS credentials from profile '$PROFILE'"
+        echo "Set AWS_PROFILE or run 'aws configure'"
+        exit 1
+      fi
+
+      echo "AWS Profile: $PROFILE"
+      echo "Access Key:  ''${ACCESS_KEY:0:8}..."
+      echo "Session Token: $([ -n "$SESSION_TOKEN" ] && echo "''${SESSION_TOKEN:0:12}... ($(echo -n "$SESSION_TOKEN" | wc -c) chars)" || echo "none")"
+
+      # 2. Get infrastructure IPs from tofu state
+      TOFU_DIR="infra/aws/tofu"
+      BASTION_IP=$(cd "$TOFU_DIR" && tofu output -raw bastion_public_ip 2>/dev/null || echo "")
+      CONTROL_IP=$(cd "$TOFU_DIR" && tofu output -json control_plane_private_ips 2>/dev/null | jq -r '.[0] // empty' || echo "")
+
+      if [ -z "$BASTION_IP" ] || [ -z "$CONTROL_IP" ]; then
+        echo "Error: Could not get cluster IPs from tofu state"
+        exit 1
+      fi
+      echo "Bastion:     $BASTION_IP"
+      echo "Control:     $CONTROL_IP"
+      echo ""
+
+      SSH_KEY="$HOME/.ssh/cybersec-dask.pem"
+      SSH_CMD="ssh -i $SSH_KEY -o ProxyCommand=\"ssh -i $SSH_KEY -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP\" -o StrictHostKeyChecking=no"
+      SCP_CMD="scp -i $SSH_KEY -o ProxyCommand=\"ssh -i $SSH_KEY -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP\" -o StrictHostKeyChecking=no"
+      KUBECTL="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
+
+      # 3. Write a remote script that does all kubectl/helm work in one SSH call.
+      #    This avoids quoting issues with eval+SSH+nested-quotes.
+      REMOTE_SCRIPT=$(mktemp)
+      cat > "$REMOTE_SCRIPT" << 'REMOTE_HEADER'
+      #!/bin/bash
+      set -euo pipefail
+      KUBECTL="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
+      HELM="sudo /usr/local/bin/helm"
+      REMOTE_HEADER
+
+      cat >> "$REMOTE_SCRIPT" << REMOTE_BODY
+      ACCESS_KEY="$ACCESS_KEY"
+      SECRET_KEY="$SECRET_KEY"
+      SESSION_TOKEN="$SESSION_TOKEN"
+      REMOTE_BODY
+
+      cat >> "$REMOTE_SCRIPT" << 'REMOTE_TAIL'
+
+      echo "--- panel-viz: updating otel-navigator-credentials ---"
+      $KUBECTL -n panel-viz create secret generic otel-navigator-credentials \
+        --from-literal=AWS_ACCESS_KEY_ID="$ACCESS_KEY" \
+        --from-literal=AWS_SECRET_ACCESS_KEY="$SECRET_KEY" \
+        --from-literal=AWS_SESSION_TOKEN="$SESSION_TOKEN" \
+        --from-literal=S3_ENDPOINT= \
+        --dry-run=client -o yaml | $KUBECTL apply -f -
+      $KUBECTL -n panel-viz delete pod -l app=otel-navigator --ignore-not-found
+      echo "  panel-viz: secret updated + pod restarted"
+
+      echo ""
+      echo "--- dask: patching scheduler and worker env vars ---"
+      DEPLOYS=$($KUBECTL -n dask get deploy -o name 2>/dev/null)
+      for DEPLOY in $DEPLOYS; do
+        $KUBECTL -n dask set env "$DEPLOY" \
+          AWS_ACCESS_KEY_ID="$ACCESS_KEY" \
+          AWS_SECRET_ACCESS_KEY="$SECRET_KEY" \
+          AWS_SESSION_TOKEN="$SESSION_TOKEN"
+        echo "  patched: $DEPLOY"
+      done
+      echo "  dask: env vars updated (pods will rolling-restart)"
+
+      echo ""
+      echo "--- jupyterhub: helm upgrade with fresh credentials ---"
+      cat > /tmp/jupyterhub-creds-override.yaml << EOYAML
+      singleuser:
+        extraEnv:
+          PYTHONPATH: "/srv/jupyterhub-pkg"
+          HOME: "/root"
+          S3_ENDPOINT: ""
+          AWS_ACCESS_KEY_ID: "$ACCESS_KEY"
+          AWS_SECRET_ACCESS_KEY: "$SECRET_KEY"
+          AWS_SESSION_TOKEN: "$SESSION_TOKEN"
+          DASK_SCHEDULER_ADDRESS: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
+      EOYAML
+      $HELM upgrade jupyterhub \
+        /home/ec2-user/jupyterhub-4.0.0.tgz \
+        -n jupyterhub \
+        -f /home/ec2-user/jupyterhub-values.yaml \
+        -f /tmp/jupyterhub-creds-override.yaml \
+        --timeout 120s
+      echo "  jupyterhub: helm upgraded"
+      $KUBECTL -n jupyterhub delete pod -l component=singleuser-server --ignore-not-found
+      echo "  jupyterhub: singleuser pods deleted (will respawn on login)"
+
+      echo ""
+      echo "--- jupyterhub: updating sample-notebooks ConfigMap ---"
+      $KUBECTL apply -f /tmp/sample-notebooks-configmap.yaml 2>/dev/null && echo "  configmap updated" || echo "  configmap: skipped (file not found on remote)"
+
+      echo ""
+      echo "=== Credential Refresh Complete ==="
+      echo ""
+      echo "Waiting for panel-viz pod..."
+      $KUBECTL -n panel-viz wait --for=condition=Ready pod -l app=otel-navigator --timeout=120s 2>/dev/null || true
+      echo ""
+      echo "Pod status:"
+      echo "panel-viz:"; $KUBECTL -n panel-viz get pods --no-headers
+      echo "---"
+      echo "dask: $($KUBECTL -n dask get pods --no-headers | wc -l) pods"
+      echo "---"
+      echo "jupyterhub:"; $KUBECTL -n jupyterhub get pods --no-headers
+      REMOTE_TAIL
+
+      # SCP supporting files to control plane
+      echo "Uploading files to control plane..."
+      eval $SCP_CMD zarf/manifests/jupyterhub-values.yaml ec2-user@$CONTROL_IP:/home/ec2-user/jupyterhub-values.yaml
+      eval $SCP_CMD zarf/manifests/sample-notebooks-configmap.yaml ec2-user@$CONTROL_IP:/tmp/sample-notebooks-configmap.yaml
+      eval $SCP_CMD "$REMOTE_SCRIPT" ec2-user@$CONTROL_IP:/tmp/refresh-tokens.sh
+
+      # Execute the remote script
+      echo "Executing credential refresh on control plane..."
+      eval $SSH_CMD ec2-user@$CONTROL_IP "bash /tmp/refresh-tokens.sh"
+      rm -f "$REMOTE_SCRIPT"
+      echo ""
+      echo "Done. S3 access should be restored across all namespaces."
+    '';
+
+    # -------------------------------------------------------------------------
     # Dataset Generation
     # -------------------------------------------------------------------------
     # Generates a 1TB+ synthetic OTEL span dataset using shard-partitioned
