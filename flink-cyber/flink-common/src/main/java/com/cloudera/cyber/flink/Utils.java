@@ -30,8 +30,7 @@ import org.apache.flink.core.fs.FSDataInputStream;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.util.Preconditions;
-// Removed Cloudera-specific EncryptTool - not available in Apache Flink
-// import org.apache.flink.util.encrypttool.EncryptTool;
+import java.util.ServiceLoader;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 
@@ -230,14 +229,28 @@ public class Utils {
 
     public static String decrypt(String input) {
         Preconditions.checkNotNull(input, "key is null");
-        // EncryptTool not available in Apache Flink - return input as-is
-        // In production, implement proper encryption/decryption here
-        return input;
-        // return EncryptTool.getInstance(getConfiguration()).decrypt(input);
+        return DecryptorHolder.INSTANCE.decrypt(input);
     }
 
     public static Configuration getConfiguration() {
         return ConfigHolder.INSTANCE;
+    }
+
+    private static class DecryptorHolder {
+        static final ConfigValueDecryptor INSTANCE;
+        static {
+            ServiceLoader<ConfigValueDecryptor> loader = ServiceLoader.load(ConfigValueDecryptor.class);
+            ConfigValueDecryptor decryptor = new NoOpConfigValueDecryptor();
+            for (ConfigValueDecryptor spi : loader) {
+                if (!(spi instanceof NoOpConfigValueDecryptor)) {
+                    decryptor = spi;
+                    break;
+                }
+            }
+            decryptor.init(getConfiguration());
+            log.info("ConfigValueDecryptor: {}", decryptor.getClass().getName());
+            INSTANCE = decryptor;
+        }
     }
 
     public static boolean isTimeEqual(Long unit1, String unitType1, Long unit2, String unitType2) {
