@@ -2,7 +2,7 @@
 
 Zarf package for deploying Dask + JupyterHub + Panel-Viz to air-gapped RKE2.
 
-**Current release**: [`v1.1.0-M1`](https://github.com/rch/cldr-cybersec/releases/tag/v1.1.0-M1)
+**Current release**: [`v1.1.1`](https://github.com/rch/cldr-cybersec/releases/tag/v1.1.1)
 
 ---
 
@@ -14,7 +14,7 @@ Zarf package for deploying Dask + JupyterHub + Panel-Viz to air-gapped RKE2.
 | Dask Cluster | 2025.2.0 | Scheduler + workers with spill-to-disk |
 | JupyterHub | 4.0.0 | Interactive notebooks, Dask-connected |
 | Panel-Viz | 2025.2.0 | OTEL heatmap with smart windowing |
-| Sample Notebooks | 3 | OTel Explorer, Dask Viz, S3 Validation |
+| Sample Notebooks | 2 | OTEL Data Generator, S3 Validation |
 
 Container images baked into the `.tar.zst` (~1.3 GB total):
 
@@ -44,7 +44,7 @@ graph LR
 ## Deploy Variables
 
 ```bash
-zarf package deploy zarf-package-cybersec-dask-amd64-1.1.0.tar.zst --confirm \
+zarf package deploy zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
   --set S3_ENDPOINT=http://minio:9000 \
   --set S3_ACCESS_KEY=<key> \
   --set S3_SECRET_KEY=<secret> \
@@ -72,7 +72,7 @@ zarf package deploy zarf-package-cybersec-dask-amd64-1.1.0.tar.zst --confirm \
 |----------|-----------|------|
 | `zarf` binary | [Zarf releases](https://github.com/zarf-dev/zarf/releases) (Linux amd64) | ~100 MB |
 | `zarf-init-amd64-v0.66.0.tar.zst` | `zarf tools download-init` | ~300 MB |
-| `zarf-package-cybersec-dask-amd64-1.1.0.tar.zst` | [GitHub Releases](https://github.com/rch/cldr-cybersec/releases/tag/v1.1.0-M1) | ~1.3 GB |
+| `zarf-package-cybersec-dask-amd64-1.1.1.tar.zst` | [GitHub Releases](https://github.com/rch/cldr-cybersec/releases/tag/v1.1.1) | ~1.3 GB |
 
 ```bash
 # Download on a machine with internet access
@@ -116,7 +116,7 @@ sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf init --confirm
 
 # 3. Deploy
 sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
-  zarf-package-cybersec-dask-amd64-1.1.0.tar.zst --confirm \
+  zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
   --set DASK_SPILL_DIR=/mnt/nfs/dask-spill   # or /tmp/dask-spill
 ```
 
@@ -140,7 +140,7 @@ cd /path/to/cybersec/zarf
 DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock \
   zarf package create . --confirm --skip-sbom
 
-# Output: zarf-package-cybersec-dask-amd64-1.1.0.tar.zst (~1.3 GB)
+# Output: zarf-package-cybersec-dask-amd64-1.1.1.tar.zst (~1.3 GB)
 ```
 
 Upstream images (`dask-kubernetes-operator`, `k8s-hub`, `configurable-http-proxy`) are pulled automatically during `zarf package create`.
@@ -211,7 +211,7 @@ sudo ./scripts/verify-zarf-deployment.sh --skip-init --skip-build
 | Dask Dashboard | `http://<node>:30087` | — |
 | Dask Scheduler | `tcp://<node>:30086` | — |
 | JupyterHub | `http://<node>:30080` | admin / changeme |
-| Sample Notebooks | `/home/jovyan/sample-notebooks/` | (inside JupyterLab) |
+| Sample Notebooks | `/app/sample-notebooks/` | (inside JupyterLab) |
 
 ---
 
@@ -252,6 +252,152 @@ zarf package deploy ... --set DASK_WORKER_REPLICAS=8 --confirm
 
 ## Troubleshooting
 
+### Registry PVC won't bind (no StorageClass provisioner)
+
+Bare RKE2 without Rancher has no default StorageClass. The Zarf internal
+registry requests a 20 Gi PVC which will stay `Pending` indefinitely.
+
+**Option A — Disable PVC entirely (simplest, data in emptyDir):**
+
+Registry data is lost on pod restart, but `zarf package deploy` re-pushes
+images automatically. Best for resource-constrained nodes.
+
+```bash
+# Clean any previous failed init
+sudo zarf package remove --confirm 2>/dev/null; true
+sudo kubectl delete pvc -n zarf zarf-docker-registry --force --grace-period=0 2>/dev/null; true
+sudo kubectl delete pv -l app=zarf-registry --force --grace-period=0 2>/dev/null; true
+
+# Init with PVC disabled
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
+  zarf init --confirm --set REGISTRY_PVC_ENABLED=false
+```
+
+**Option B — Smaller PVC (disk-constrained nodes):**
+
+The default 20 Gi PVC is a label, not a reservation — actual usage is ~2 GB
+for this package. But the PVC request must match an available PV.
+
+```bash
+# Create PV with reduced capacity
+sudo kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zarf-registry-pv
+spec:
+  storageClassName: ""
+  capacity:
+    storage: 5Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /var/lib/zarf-registry
+    type: DirectoryOrCreate
+EOF
+
+# Init with matching PVC size
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
+  zarf init --confirm --set REGISTRY_PVC_SIZE=5Gi
+```
+
+**Option C — Pre-bound PV (recommended for production):**
+
+Pre-create the PV with a `claimRef` so it binds immediately when the PVC
+is created during init. This is the approach used in the Quickstart.
+
+```bash
+sudo kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zarf-registry-pv
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /var/lib/zarf-registry
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: zarf
+    name: zarf-docker-registry
+EOF
+
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf init --confirm
+```
+
+**Registry init variables** (all passed via `--set KEY=value`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REGISTRY_PVC_ENABLED` | `true` | Set `false` to use emptyDir instead of PVC |
+| `REGISTRY_PVC_SIZE` | `20Gi` | PVC storage request size |
+| `REGISTRY_EXISTING_PVC` | _(empty)_ | Name of a pre-existing PVC to use |
+| `--storage-class` | _(flag)_ | StorageClass for registry and git server |
+
+### Registry PVC stuck in Terminating
+
+PVCs and PVs with finalizers can hang on delete. Force removal:
+
+```bash
+# Remove finalizers, then delete
+sudo kubectl patch pvc zarf-docker-registry -n zarf -p '{"metadata":{"finalizers":null}}'
+sudo kubectl delete pvc zarf-docker-registry -n zarf --force --grace-period=0
+
+sudo kubectl patch pv zarf-registry-pv -p '{"metadata":{"finalizers":null}}'
+sudo kubectl delete pv zarf-registry-pv --force --grace-period=0
+```
+
+### Registry push fails with "Filesystem" error (NFS)
+
+The Docker registry uses hard links and atomic renames that NFS does not
+support. **Do not use NFS for the registry PV.** Use local disk (HostPath).
+
+NFS is fine for:
+- Dask spill-to-disk (`DASK_SPILL_DIR`)
+- User data / notebook storage
+
+### `zarf init` hangs at "performing Helm upgrade"
+
+The Helm upgrade waits for the registry pod to become Ready. Check why
+the pod is stuck:
+
+```bash
+KUBECTL="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
+
+# Pod status
+$KUBECTL get pods -n zarf
+
+# Why it's not scheduling
+$KUBECTL describe pods -n zarf | grep -A 5 -E "Events:|Warning"
+
+# PVC binding
+$KUBECTL get pvc -n zarf
+$KUBECTL get pv
+```
+
+| Pod status | Probable cause | Fix |
+|-----------|----------------|-----|
+| `Pending` | Unbound PVC | See "Registry PVC won't bind" above |
+| `Pending` | Insufficient resources | Free memory or reduce resource requests |
+| `ContainerCreating` | Image pull from seed registry slow | Wait, or increase `--timeout 15m` |
+| `CrashLoopBackOff` | Disk full or OOM | Check `df -h` and `free -h` |
+
+### `zarf init` fails with "cannot patch PersistentVolumeClaim"
+
+This occurs when re-running init after a failed attempt left a PVC with
+a different size. PVC storage requests are immutable.
+
+```bash
+# Remove old state
+sudo zarf package remove --confirm 2>/dev/null; true
+sudo kubectl delete pvc -n zarf zarf-docker-registry --force --grace-period=0
+sudo kubectl patch pvc zarf-docker-registry -n zarf -p '{"metadata":{"finalizers":null}}' 2>/dev/null
+# Then re-run init
+```
+
 ### ImagePullBackOff (Zarf suffix mismatch)
 
 Zarf rewrites image tags with a suffix derived from the init package. If the init and application packages were built at different times, suffixes won't match.
@@ -273,13 +419,6 @@ podman tag  127.0.0.1:31999/cybersec-dask:2025.2.0 \
 podman push 127.0.0.1:31999/library/cybersec-dask:2025.2.0-zarf-<SUFFIX> --tls-verify=false
 sudo kubectl delete pods -n dask --all
 ```
-
-### Zarf init fails
-
-| Error | Fix |
-|-------|-----|
-| `permission denied` on registry | `sudo mkdir -p /var/lib/zarf-registry && sudo chmod 777 /var/lib/zarf-registry` |
-| `unable to find an image to inject` | Wait for kube-system pods: `sudo kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=300s` |
 
 ### RKE2 won't start
 
@@ -329,7 +468,8 @@ zarf/
 ├── images/
 │   ├── Dockerfile.cybersec-dask        # Custom image: Dask + Panel + Datashader + s3fs
 │   ├── otel-navigator.py               # Panel-Viz app (smart windowing, embedded in image)
-│   └── requirements-airgap.txt         # Pinned Python deps for reproducible builds
+│   ├── requirements-airgap.txt         # Pinned Python deps for reproducible builds
+│   └── sample-notebooks/               # Stripped notebooks baked into image at /app/
 ├── manifests/
 │   ├── dask-cluster.yaml               # DaskCluster CRD (scheduler + workers + spill volume)
 │   ├── dask-operator-values.yaml       # Operator Helm values
@@ -340,10 +480,10 @@ zarf/
 │   ├── jupyterhub-namespace.yaml       # jupyterhub namespace
 │   └── ingress.yaml                    # Traefik ingress rules
 ├── notebooks/
-│   ├── OTel_Telemetry_Explorer.ipynb   # OTEL span analysis with self-generating test data
-│   ├── Dask_Kub_Viz_Sample_Problem.ipynb
-│   └── Dask_S3_Validation.ipynb
+│   ├── OTEL_Data_Generator.ipynb       # Vectorized synthetic OTEL span generator
+│   └── Dask_S3_Validation.ipynb        # Out-of-core Dask stress test (30 GB)
 └── scripts/
+    ├── embed-notebooks.py              # Strips outputs, embeds in ConfigMap YAML
     └── verify-zarf-deployment.sh       # Post-deploy validation
 ```
 
