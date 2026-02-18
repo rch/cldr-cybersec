@@ -94,6 +94,9 @@ async def run_preflight_checks(
     # Resource checks
     await _check_namespace_quotas(result)
 
+    # Disk pressure checks
+    await _check_node_disk(result)
+
     return result
 
 
@@ -467,6 +470,64 @@ async def _check_namespace_quotas(result: ZarfPreflightResult) -> None:
                 )
     except Exception:
         pass  # Not critical
+
+
+async def _check_node_disk(result: ZarfPreflightResult) -> None:
+    """Check for DiskPressure taint on cluster nodes."""
+    kubectl_path = shutil.which("kubectl")
+    if not kubectl_path:
+        return  # Skip gracefully if no kubectl
+
+    try:
+        proc = subprocess.run(
+            ["kubectl", "get", "nodes", "-o", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode != 0:
+            return  # Skip if cluster not reachable
+
+        data = json.loads(proc.stdout)
+        nodes = data.get("items", [])
+
+        for node in nodes:
+            node_name = node.get("metadata", {}).get("name", "unknown")
+
+            # Check conditions for DiskPressure
+            conditions = node.get("status", {}).get("conditions", [])
+            for cond in conditions:
+                if cond.get("type") == "DiskPressure" and cond.get("status") == "True":
+                    result.add_check(
+                        "node_disk_pressure",
+                        False,
+                        f"Node {node_name} has DiskPressure condition. "
+                        "Consider using --disk-light flag for deployment.",
+                        "warn",
+                    )
+                    return
+
+            # Check taints for disk-pressure
+            taints = node.get("spec", {}).get("taints", [])
+            for taint in taints:
+                if taint.get("key") == "node.kubernetes.io/disk-pressure":
+                    result.add_check(
+                        "node_disk_pressure",
+                        False,
+                        f"Node {node_name} has disk-pressure taint. "
+                        "Consider using --disk-light flag for deployment.",
+                        "warn",
+                    )
+                    return
+
+        result.add_check(
+            "node_disk_pressure",
+            True,
+            "No disk pressure detected on cluster nodes",
+            "info",
+        )
+    except Exception:
+        pass  # Skip gracefully
 
 
 def get_package_info() -> dict[str, Any]:

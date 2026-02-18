@@ -25,7 +25,7 @@ variables:
   # Dask configuration
   - name: DASK_WORKER_REPLICAS
     description: Number of Dask worker replicas
-    default: "32"
+    default: "4"
   - name: DASK_SPILL_DIR
     description: Host path for Dask worker spill-to-disk (set to NFS mount if available)
     default: /tmp/dask-spill

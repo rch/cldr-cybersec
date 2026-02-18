@@ -165,7 +165,7 @@ async def gather_runtime_config() -> dict[str, Any]:
     # Service health checks
     runtime["services"] = {
         "postgres": await _check_tcp("localhost", 5438),
-        "minio": await _check_http("http://localhost:9010/minio/health/live"),
+        "minio": await _check_http(f"http://localhost:{os.environ.get('LOCAL_S3_PORT', '9010')}/minio/health/live"),
         "polaris": await _check_http("http://localhost:8182/q/health/ready"),
         "flink": await _check_flink("http://localhost:8081"),
         "iceberg_browser": await _check_http("http://localhost:5050/health"),
@@ -231,7 +231,9 @@ def _detect_kubernetes_target() -> dict[str, Any]:
         "target": "none",
         "needs_k3d_provisioning": False,
         "kubeconfig_exists": False,
+        "kubeconfig_readable": False,
         "kubeconfig_path": "",
+        "kubeconfig_error": "",
         "cluster_type": "none",
         "kubectl_available": False,
         "kubectl_connected": False,
@@ -255,6 +257,8 @@ def _detect_kubernetes_target() -> dict[str, Any]:
             result["kubeconfig_exists"] = True
             try:
                 content = kubeconfig_file.read_text()
+                result["kubeconfig_readable"] = True
+                # Check file content for cluster type markers
                 if "rancher" in content or "rke2" in content:
                     result["cluster_type"] = "rke2"
                     if result["target"] in ("none", "auto"):
@@ -263,8 +267,20 @@ def _detect_kubernetes_target() -> dict[str, Any]:
                     result["cluster_type"] = "k3d"
                     if result["target"] in ("none", "auto"):
                         result["target"] = "k3d"
-            except Exception:
-                pass
+                # Fallback: check the file path for markers (e.g. ~/.kube/rke2.yaml)
+                elif "rke2" in kubeconfig_path or "rancher" in kubeconfig_path:
+                    result["cluster_type"] = "rke2"
+                    if result["target"] in ("none", "auto"):
+                        result["target"] = "rke2"
+            except PermissionError:
+                result["kubeconfig_error"] = "permission_denied"
+                # Infer type from path even if we can't read the file
+                if "rke2" in kubeconfig_path or "rancher" in kubeconfig_path:
+                    result["cluster_type"] = "rke2"
+                    if result["target"] in ("none", "auto"):
+                        result["target"] = "rke2"
+            except Exception as e:
+                result["kubeconfig_error"] = str(e)
 
     # Check kubectl availability
     try:
@@ -285,6 +301,28 @@ def _detect_kubernetes_target() -> dict[str, Any]:
                     env={**os.environ, "KUBECONFIG": kubeconfig_path},
                 )
                 result["kubectl_connected"] = conn_result.returncode == 0
+
+                # If connected but cluster_type still unknown, check kubelet version
+                if result["kubectl_connected"] and result["cluster_type"] == "none":
+                    try:
+                        ver_result = subprocess.run(
+                            ["kubectl", "get", "nodes", "-o",
+                             "jsonpath={.items[0].status.nodeInfo.kubeletVersion}"],
+                            capture_output=True, text=True, timeout=10,
+                            env={**os.environ, "KUBECONFIG": kubeconfig_path},
+                        )
+                        if ver_result.returncode == 0:
+                            ver = ver_result.stdout.strip().lower()
+                            if "rke2" in ver:
+                                result["cluster_type"] = "rke2"
+                                if result["target"] in ("none", "auto"):
+                                    result["target"] = "rke2"
+                            elif "k3s" in ver:
+                                result["cluster_type"] = "k3d"
+                                if result["target"] in ("none", "auto"):
+                                    result["target"] = "k3d"
+                    except Exception:
+                        pass
             except Exception:
                 pass
     except Exception:
@@ -321,7 +359,20 @@ def _check_tools() -> dict[str, Any]:
         "ansible_playbook": shutil.which("ansible-playbook") is not None,
         "iac_tool": None,  # tofu or terraform
         "ssh_key_exists": Path("~/.ssh/cybersec-dask.pem").expanduser().exists(),
+        "zarf": shutil.which("zarf") is not None,
+        "zarf_version": "",
     }
+
+    # Check zarf version
+    if result["zarf"]:
+        try:
+            proc = subprocess.run(
+                ["zarf", "version"], capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode == 0:
+                result["zarf_version"] = proc.stdout.strip()
+        except Exception:
+            pass
 
     # Check for IaC tool (prefer tofu over terraform)
     if shutil.which("tofu"):

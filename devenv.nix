@@ -27,7 +27,7 @@
   # https://devenv.sh/packages/
   packages = with pkgs; [
     awscli2
-    claude-code
+    #claude-code
     cloudflared
     conftest
     d2
@@ -2557,6 +2557,622 @@ asyncio.run(main())
         --bucket "$S3_BUCKET" \
         --region "''${AWS_REGION:-us-east-1}" \
         ''${S3_ENDPOINT:+--endpoint "$S3_ENDPOINT"}
+    '';
+
+    # ========================================================================
+    # Local Zarf Deployment Tasks
+    #
+    # Deploy Dask+JupyterHub+Panel-Viz to a local RKE2 or k3d cluster
+    # running alongside the Flink devenv stack. Uses disk-light defaults
+    # (no registry PVC, emptyDir spill).
+    # ========================================================================
+
+    "zarf:local:preflight".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Local Zarf Deployment Preflight ==="
+
+      # --- Detect kubeconfig (with permission-aware fallback) ---
+      _resolve_kubeconfig() {
+        # 1. Explicit KUBECONFIG
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          if [ -r "$KUBECONFIG" ]; then
+            log_info "Using KUBECONFIG=$KUBECONFIG"
+            return 0
+          else
+            log_warn "KUBECONFIG=$KUBECONFIG exists but is not readable"
+          fi
+        fi
+        # 2. User-readable copy at ~/.kube/rke2.yaml
+        if [ -f "$HOME/.kube/rke2.yaml" ] && [ -r "$HOME/.kube/rke2.yaml" ]; then
+          KUBECONFIG="$HOME/.kube/rke2.yaml"
+          export KUBECONFIG
+          log_info "Using user kubeconfig: $KUBECONFIG"
+          return 0
+        fi
+        # 3. k3d kubeconfig
+        if [ "''${CYBERSEC_K8S_TARGET:-}" = "k3d" ]; then
+          KUBECONFIG="''${DEVENV_STATE:-.devenv/state}/kubeconfig"
+          export KUBECONFIG
+          log_info "Using k3d kubeconfig: $KUBECONFIG"
+          return 0
+        fi
+        # 4. System RKE2 kubeconfig (may need permission fix)
+        if [ -f "/etc/rancher/rke2/rke2.yaml" ]; then
+          if [ -r "/etc/rancher/rke2/rke2.yaml" ]; then
+            KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
+            export KUBECONFIG
+            log_info "Using RKE2 kubeconfig: $KUBECONFIG"
+            return 0
+          else
+            log_error "RKE2 kubeconfig exists but is not readable: /etc/rancher/rke2/rke2.yaml"
+            echo ""
+            echo "Fix with:"
+            echo "  sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/rke2.yaml"
+            echo "  sudo chown \$(id -u):\$(id -g) ~/.kube/rke2.yaml"
+            echo "  export KUBECONFIG=~/.kube/rke2.yaml"
+            return 1
+          fi
+        fi
+        # 5. Default kubeconfig
+        if [ -f "$HOME/.kube/config" ] && [ -r "$HOME/.kube/config" ]; then
+          KUBECONFIG="$HOME/.kube/config"
+          export KUBECONFIG
+          log_info "Using default kubeconfig: $KUBECONFIG"
+          return 0
+        fi
+        log_error "No kubeconfig found. Set KUBECONFIG or install a local cluster."
+        return 1
+      }
+      _resolve_kubeconfig || exit 1
+
+      # --- Quick MinIO check ---
+      S3_PORT="''${LOCAL_S3_PORT:-9010}"
+      if ! curl -sf --max-time 5 "http://localhost:''${S3_PORT}/minio/health/live" >/dev/null 2>&1; then
+        log_warn "MinIO not running on localhost:''${S3_PORT}. Required for local deployment: devenv up -d"
+      fi
+
+      # --- Gather config and run conftest ---
+      log_info "Gathering runtime configuration..."
+      uv run python -c "
+import asyncio, json
+from cybersec.zarf.local import gather_local_zarf_config
+config = asyncio.run(gather_local_zarf_config())
+from pathlib import Path
+Path('build').mkdir(exist_ok=True)
+Path('build/environment.json').write_text(json.dumps(config, indent=2))
+print('Config written to build/environment.json')
+      "
+
+      if [ $? -ne 0 ]; then
+        log_error "Failed to gather runtime config"
+        exit 1
+      fi
+
+      log_info "Running conftest policy validation..."
+      conftest test build/environment.json \
+        --policy policy/k8s/base.rego \
+        --policy policy/k8s/local/ \
+        --all-namespaces
+
+      RESULT=$?
+      echo ""
+      if [ $RESULT -eq 0 ]; then
+        log_success "Preflight PASSED"
+        echo ""
+        echo "Next: devenv tasks run zarf:local:init"
+      else
+        log_error "Preflight FAILED — resolve errors above before proceeding"
+        exit 1
+      fi
+    '';
+
+    "zarf:local:init".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Local Zarf Init (disk-light) ==="
+
+      # --- Detect kubeconfig (with permission-aware fallback) ---
+      _resolve_kubeconfig() {
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          if [ -r "$KUBECONFIG" ]; then
+            log_info "Using KUBECONFIG=$KUBECONFIG"
+            return 0
+          else
+            log_warn "KUBECONFIG=$KUBECONFIG exists but is not readable"
+          fi
+        fi
+        if [ -f "$HOME/.kube/rke2.yaml" ] && [ -r "$HOME/.kube/rke2.yaml" ]; then
+          KUBECONFIG="$HOME/.kube/rke2.yaml"; export KUBECONFIG
+          log_info "Using user kubeconfig: $KUBECONFIG"; return 0
+        fi
+        if [ "''${CYBERSEC_K8S_TARGET:-}" = "k3d" ]; then
+          KUBECONFIG="''${DEVENV_STATE:-.devenv/state}/kubeconfig"; export KUBECONFIG
+          log_info "Using k3d kubeconfig: $KUBECONFIG"; return 0
+        fi
+        if [ -f "/etc/rancher/rke2/rke2.yaml" ]; then
+          if [ -r "/etc/rancher/rke2/rke2.yaml" ]; then
+            KUBECONFIG="/etc/rancher/rke2/rke2.yaml"; export KUBECONFIG
+            log_info "Using RKE2 kubeconfig: $KUBECONFIG"; return 0
+          else
+            log_error "RKE2 kubeconfig not readable. Fix: sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/rke2.yaml && sudo chown \$(id -u):\$(id -g) ~/.kube/rke2.yaml"
+            return 1
+          fi
+        fi
+        if [ -f "$HOME/.kube/config" ] && [ -r "$HOME/.kube/config" ]; then
+          KUBECONFIG="$HOME/.kube/config"; export KUBECONFIG
+          log_info "Using default kubeconfig: $KUBECONFIG"; return 0
+        fi
+        log_error "No kubeconfig found. Set KUBECONFIG."
+        return 1
+      }
+      _resolve_kubeconfig || exit 1
+
+      # --- Check if already initialized ---
+      if kubectl get ns zarf &>/dev/null; then
+        if kubectl get deploy -n zarf zarf-docker-registry &>/dev/null; then
+          log_success "Zarf already initialized (registry running). Skipping init."
+          echo ""
+          echo "Next: devenv tasks run zarf:local:deploy"
+          exit 0
+        fi
+      fi
+
+      # --- Find or download init package ---
+      cd zarf
+      INIT_PKG=$(ls -t zarf-init-*.tar.zst 2>/dev/null | head -1)
+
+      if [ -z "$INIT_PKG" ]; then
+        log_info "No init package found in zarf/. Downloading..."
+        ZARF_VERSION=$(zarf version 2>/dev/null || echo "v0.41.0")
+        zarf tools download-init
+        INIT_PKG=$(ls -t zarf-init-*.tar.zst 2>/dev/null | head -1)
+        if [ -z "$INIT_PKG" ]; then
+          log_error "Failed to download init package"
+          exit 1
+        fi
+      fi
+
+      log_info "Using init package: $INIT_PKG"
+
+      # Check if a default StorageClass exists
+      DEFAULT_SC=$(kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{end}' 2>/dev/null)
+
+      if [ -n "$DEFAULT_SC" ]; then
+        log_info "StorageClass '$DEFAULT_SC' available — using small PVC for registry"
+        zarf init --confirm --set REGISTRY_PVC_SIZE=1Gi
+      else
+        log_info "No StorageClass — installing local-path-provisioner"
+        kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.30/deploy/local-path-storage.yaml 2>/dev/null || true
+        kubectl wait --for=condition=ready pod -l app=local-path-provisioner -n local-path-storage --timeout=60s 2>/dev/null || true
+        # Set as default so PVCs bind automatically
+        kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' 2>/dev/null || true
+        log_success "local-path StorageClass installed and set as default"
+        zarf init --confirm --set REGISTRY_PVC_SIZE=1Gi
+      fi
+
+      if [ $? -eq 0 ]; then
+        log_success "Zarf initialized successfully"
+        echo ""
+        echo "Next: devenv tasks run zarf:local:deploy"
+      else
+        log_error "Zarf init failed"
+        exit 1
+      fi
+    '';
+
+    "zarf:local:deploy".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Local Zarf Deploy ==="
+
+      # --- Detect kubeconfig (with permission-aware fallback) ---
+      _resolve_kubeconfig() {
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          if [ -r "$KUBECONFIG" ]; then
+            log_info "Using KUBECONFIG=$KUBECONFIG"
+            return 0
+          else
+            log_warn "KUBECONFIG=$KUBECONFIG exists but is not readable"
+          fi
+        fi
+        if [ -f "$HOME/.kube/rke2.yaml" ] && [ -r "$HOME/.kube/rke2.yaml" ]; then
+          KUBECONFIG="$HOME/.kube/rke2.yaml"; export KUBECONFIG
+          log_info "Using user kubeconfig: $KUBECONFIG"; return 0
+        fi
+        if [ "''${CYBERSEC_K8S_TARGET:-}" = "k3d" ]; then
+          KUBECONFIG="''${DEVENV_STATE:-.devenv/state}/kubeconfig"; export KUBECONFIG
+          log_info "Using k3d kubeconfig: $KUBECONFIG"; return 0
+        fi
+        if [ -f "/etc/rancher/rke2/rke2.yaml" ]; then
+          if [ -r "/etc/rancher/rke2/rke2.yaml" ]; then
+            KUBECONFIG="/etc/rancher/rke2/rke2.yaml"; export KUBECONFIG
+            log_info "Using RKE2 kubeconfig: $KUBECONFIG"; return 0
+          else
+            log_error "RKE2 kubeconfig not readable. Fix: sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/rke2.yaml && sudo chown \$(id -u):\$(id -g) ~/.kube/rke2.yaml"
+            return 1
+          fi
+        fi
+        if [ -f "$HOME/.kube/config" ] && [ -r "$HOME/.kube/config" ]; then
+          KUBECONFIG="$HOME/.kube/config"; export KUBECONFIG
+          log_info "Using default kubeconfig: $KUBECONFIG"; return 0
+        fi
+        log_error "No kubeconfig found. Set KUBECONFIG."
+        return 1
+      }
+      _resolve_kubeconfig || exit 1
+
+      # --- Verify Zarf is initialized ---
+      if ! kubectl get ns zarf &>/dev/null; then
+        log_error "Zarf not initialized. Run: devenv tasks run zarf:local:init"
+        exit 1
+      fi
+
+      # --- Find deploy package ---
+      cd zarf
+      PKG=$(ls -t zarf-package-cybersec-dask-*.tar.zst 2>/dev/null | head -1)
+      if [ -z "$PKG" ]; then
+        log_error "No deploy package found. Run: devenv tasks run zarf:package"
+        exit 1
+      fi
+
+      WORKERS="''${DASK_WORKER_REPLICAS:-2}"
+      SPILL_DIR="''${DASK_SPILL_DIR:-}"
+      S3_PORT="''${LOCAL_S3_PORT:-9010}"
+
+      # --- Detect MinIO endpoint for K8s pods ---
+      NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+      if [ -z "$NODE_IP" ]; then
+        log_error "Cannot detect node InternalIP. Is the cluster running?"
+        exit 1
+      fi
+
+      # Verify MinIO reachable at node IP (confirms 0.0.0.0 binding works)
+      if ! curl -sf --max-time 5 "http://''${NODE_IP}:''${S3_PORT}/minio/health/live" >/dev/null 2>&1; then
+        if curl -sf --max-time 5 "http://localhost:''${S3_PORT}/minio/health/live" >/dev/null 2>&1; then
+          log_warn "MinIO reachable at localhost but not at ''${NODE_IP}:''${S3_PORT} — pods may fail"
+        else
+          log_error "MinIO not running. Start with: devenv up -d"
+          exit 1
+        fi
+      fi
+
+      S3_EP="http://''${NODE_IP}:''${S3_PORT}"
+      S3_AK="''${MINIO_ACCESS_KEY:-minioadmin}"
+      S3_SK="''${MINIO_SECRET_KEY:-minioadmin}"
+      S3_BK="cybersec"
+      S3_RG="us-east-1"
+
+      log_info "Deploying: $PKG"
+      log_info "Workers: $WORKERS"
+      log_info "Spill dir: ''${SPILL_DIR:-emptyDir (disk-light)}"
+      log_info "S3 endpoint: $S3_EP (MinIO on node $NODE_IP)"
+
+      zarf package deploy "$PKG" --confirm \
+        --set DASK_WORKER_REPLICAS="$WORKERS" \
+        --set S3_ENDPOINT="$S3_EP" \
+        --set S3_BUCKET="$S3_BK" \
+        --set S3_REGION="$S3_RG" \
+        --set S3_ACCESS_KEY="$S3_AK" \
+        --set S3_SECRET_KEY="$S3_SK" \
+        ''${SPILL_DIR:+--set DASK_SPILL_DIR="$SPILL_DIR"}
+
+      if [ $? -ne 0 ]; then
+        log_error "Zarf deploy failed"
+        exit 1
+      fi
+
+      # --- Post-deploy spill patch ---
+      # If DASK_SPILL_DIR is empty or path doesn't exist, patch to emptyDir
+      if [ -z "$SPILL_DIR" ] || [ ! -d "$SPILL_DIR" ]; then
+        log_info "Patching Dask workers for emptyDir spill (disk-light)..."
+
+        # Check if daskcluster exists before patching
+        if kubectl get daskcluster cybersec-dask -n dask &>/dev/null; then
+          kubectl patch daskcluster cybersec-dask -n dask --type=json \
+            -p '[{"op":"replace","path":"/spec/worker/spec/volumes/0","value":{"name":"dask-spill","emptyDir":{"sizeLimit":"512Mi"}}}]' \
+            2>/dev/null || log_warn "Could not patch daskcluster spill volume (may not have volume at index 0)"
+
+          # Restart workers to pick up the change
+          kubectl rollout restart deployment -n dask -l dask.org/component=worker 2>/dev/null \
+            || kubectl delete pods -n dask -l dask.org/component=worker 2>/dev/null \
+            || true
+          log_info "Workers restarting with emptyDir spill"
+        fi
+      else
+        log_info "Spill dir exists at $SPILL_DIR — keeping hostPath volume"
+      fi
+
+      # --- Wait for Panel-Viz ---
+      log_info "Waiting for Panel-Viz pod to be ready (120s timeout)..."
+      if kubectl wait --for=condition=ready pod -l app=otel-navigator -n panel-viz --timeout=120s 2>/dev/null; then
+        PANEL_READY=0
+      else
+        PANEL_READY=1
+      fi
+
+      # --- Check Panel-Viz accessibility ---
+      PANEL_PORT="''${PANEL_PORT:-30506}"
+      PANEL_BIND="''${PANEL_BIND_ADDRESS:-0.0.0.0}"
+
+      if [ $PANEL_READY -eq 0 ]; then
+        # Try NodePort first (RKE2 usually exposes NodePorts directly)
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PANEL_PORT/" 2>/dev/null || echo "000")
+        if echo "$HTTP_CODE" | grep -q "200\|301\|302"; then
+          log_success "Panel-Viz accessible via NodePort $PANEL_PORT (HTTP $HTTP_CODE)"
+        else
+          log_info "NodePort not directly accessible (HTTP $HTTP_CODE). Starting port-forward..."
+          kubectl port-forward -n panel-viz svc/otel-navigator "$PANEL_PORT:5006" --address="$PANEL_BIND" &
+          PF_PID=$!
+          sleep 2
+          if kill -0 $PF_PID 2>/dev/null; then
+            log_success "Port-forward started (PID $PF_PID)"
+          else
+            log_warn "Port-forward may have failed. Check manually."
+          fi
+        fi
+      else
+        log_warn "Panel-Viz not ready within 120s. Check: kubectl get pods -n panel-viz"
+      fi
+
+      # --- Service URLs banner ---
+      echo ""
+      log_success "=== Deployment Complete ==="
+      echo ""
+      echo "Service URLs:"
+      echo "  Panel-Viz:      http://$PANEL_BIND:$PANEL_PORT/"
+      echo "  Dask Dashboard: http://localhost:30087/"
+      echo "  JupyterHub:     http://localhost:30080/"
+      echo ""
+      echo "Status:  devenv tasks run zarf:local:status"
+      echo "Logs:    kubectl logs -n panel-viz -l app=otel-navigator -f"
+    '';
+
+    "zarf:local:status".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Local Zarf Deployment Status ==="
+
+      # --- Detect kubeconfig (with permission-aware fallback) ---
+      _resolve_kubeconfig() {
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          if [ -r "$KUBECONFIG" ]; then
+            log_info "Using KUBECONFIG=$KUBECONFIG"
+            return 0
+          else
+            log_warn "KUBECONFIG=$KUBECONFIG exists but is not readable"
+          fi
+        fi
+        if [ -f "$HOME/.kube/rke2.yaml" ] && [ -r "$HOME/.kube/rke2.yaml" ]; then
+          KUBECONFIG="$HOME/.kube/rke2.yaml"; export KUBECONFIG
+          log_info "Using user kubeconfig: $KUBECONFIG"; return 0
+        fi
+        if [ "''${CYBERSEC_K8S_TARGET:-}" = "k3d" ]; then
+          KUBECONFIG="''${DEVENV_STATE:-.devenv/state}/kubeconfig"; export KUBECONFIG
+          log_info "Using k3d kubeconfig: $KUBECONFIG"; return 0
+        fi
+        if [ -f "/etc/rancher/rke2/rke2.yaml" ]; then
+          if [ -r "/etc/rancher/rke2/rke2.yaml" ]; then
+            KUBECONFIG="/etc/rancher/rke2/rke2.yaml"; export KUBECONFIG
+            log_info "Using RKE2 kubeconfig: $KUBECONFIG"; return 0
+          else
+            log_error "RKE2 kubeconfig not readable. Fix: sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/rke2.yaml && sudo chown \$(id -u):\$(id -g) ~/.kube/rke2.yaml"
+            return 1
+          fi
+        fi
+        if [ -f "$HOME/.kube/config" ] && [ -r "$HOME/.kube/config" ]; then
+          KUBECONFIG="$HOME/.kube/config"; export KUBECONFIG
+          log_info "Using default kubeconfig: $KUBECONFIG"; return 0
+        fi
+        log_error "No kubeconfig found. Set KUBECONFIG."
+        return 1
+      }
+      _resolve_kubeconfig || exit 1
+
+      echo "KUBECONFIG: $KUBECONFIG"
+      echo ""
+
+      # --- MinIO ---
+      S3_PORT="''${LOCAL_S3_PORT:-9010}"
+      echo "MinIO:"
+      if curl -sf --max-time 3 "http://localhost:''${S3_PORT}/minio/health/live" >/dev/null 2>&1; then
+        log_success "  http://localhost:''${S3_PORT}/ (healthy)"
+        NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "unknown")
+        echo "  Pod endpoint: http://''${NODE_IP}:''${S3_PORT}"
+        echo "  Bucket: cybersec  Credentials: minioadmin/minioadmin"
+      else
+        log_warn "  http://localhost:''${S3_PORT}/ (not running — devenv up -d)"
+      fi
+      echo ""
+
+      # --- Zarf namespace ---
+      echo "Zarf:"
+      if kubectl get ns zarf &>/dev/null; then
+        kubectl get pods -n zarf --no-headers 2>/dev/null | sed 's/^/  /'
+      else
+        echo "  (not initialized)"
+      fi
+
+      # --- Dask operator ---
+      echo ""
+      echo "Dask Operator:"
+      if kubectl get ns dask-operator &>/dev/null; then
+        kubectl get pods -n dask-operator --no-headers 2>/dev/null | sed 's/^/  /'
+      else
+        echo "  (namespace not found)"
+      fi
+
+      # --- Dask cluster ---
+      echo ""
+      echo "Dask:"
+      if kubectl get ns dask &>/dev/null; then
+        kubectl get pods -n dask --no-headers 2>/dev/null | sed 's/^/  /'
+        echo ""
+        echo "  DaskCluster:"
+        kubectl get daskcluster -n dask --no-headers 2>/dev/null | sed 's/^/    /' || echo "    (none)"
+      else
+        echo "  (namespace not found)"
+      fi
+
+      # --- JupyterHub ---
+      echo ""
+      echo "JupyterHub:"
+      if kubectl get ns jupyterhub &>/dev/null; then
+        kubectl get pods -n jupyterhub --no-headers 2>/dev/null | sed 's/^/  /'
+      else
+        echo "  (namespace not found)"
+      fi
+
+      # --- Panel-Viz ---
+      echo ""
+      echo "Panel-Viz:"
+      if kubectl get ns panel-viz &>/dev/null; then
+        kubectl get pods -n panel-viz --no-headers 2>/dev/null | sed 's/^/  /'
+      else
+        echo "  (namespace not found)"
+      fi
+
+      # --- Service accessibility ---
+      echo ""
+      echo "Service Accessibility:"
+      PANEL_PORT="''${PANEL_PORT:-30506}"
+
+      # Panel-Viz
+      HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PANEL_PORT/" 2>/dev/null || echo "000")
+      if echo "$HTTP_CODE" | grep -q "200\|301\|302"; then
+        log_success "  Panel-Viz:      http://0.0.0.0:$PANEL_PORT/ (HTTP $HTTP_CODE)"
+      else
+        log_warn "  Panel-Viz:      http://0.0.0.0:$PANEL_PORT/ (not accessible, HTTP $HTTP_CODE)"
+      fi
+
+      # Dask Dashboard
+      HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:30087/" 2>/dev/null || echo "000")
+      if echo "$HTTP_CODE" | grep -q "200\|301\|302"; then
+        log_success "  Dask Dashboard: http://localhost:30087/ (HTTP $HTTP_CODE)"
+      else
+        log_warn "  Dask Dashboard: http://localhost:30087/ (not accessible, HTTP $HTTP_CODE)"
+      fi
+
+      # JupyterHub
+      HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:30080/" 2>/dev/null || echo "000")
+      if echo "$HTTP_CODE" | grep -q "200\|301\|302"; then
+        log_success "  JupyterHub:     http://localhost:30080/ (HTTP $HTTP_CODE)"
+      else
+        log_warn "  JupyterHub:     http://localhost:30080/ (not accessible, HTTP $HTTP_CODE)"
+      fi
+
+      # MinIO (pod-reachable via node IP)
+      NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "")
+      if [ -n "$NODE_IP" ]; then
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://''${NODE_IP}:''${S3_PORT}/minio/health/live" 2>/dev/null || echo "000")
+        if echo "$HTTP_CODE" | grep -q "200"; then
+          log_success "  MinIO (pods):   http://''${NODE_IP}:''${S3_PORT}/ (reachable)"
+        else
+          log_warn "  MinIO (pods):   http://''${NODE_IP}:''${S3_PORT}/ (not reachable from node, HTTP $HTTP_CODE)"
+        fi
+      fi
+
+      # --- Node resources ---
+      echo ""
+      echo "Node Resources:"
+      kubectl top nodes 2>/dev/null | sed 's/^/  /' || echo "  (metrics-server not available)"
+    '';
+
+    "zarf:local:reset".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Local Zarf Reset (full teardown for E2E testing) ==="
+
+      # --- Detect kubeconfig (with permission-aware fallback) ---
+      _resolve_kubeconfig() {
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          if [ -r "$KUBECONFIG" ]; then
+            log_info "Using KUBECONFIG=$KUBECONFIG"
+            return 0
+          else
+            log_warn "KUBECONFIG=$KUBECONFIG exists but is not readable"
+          fi
+        fi
+        if [ -f "$HOME/.kube/rke2.yaml" ] && [ -r "$HOME/.kube/rke2.yaml" ]; then
+          KUBECONFIG="$HOME/.kube/rke2.yaml"; export KUBECONFIG
+          log_info "Using user kubeconfig: $KUBECONFIG"; return 0
+        fi
+        if [ "''${CYBERSEC_K8S_TARGET:-}" = "k3d" ]; then
+          KUBECONFIG="''${DEVENV_STATE:-.devenv/state}/kubeconfig"; export KUBECONFIG
+          log_info "Using k3d kubeconfig: $KUBECONFIG"; return 0
+        fi
+        if [ -f "/etc/rancher/rke2/rke2.yaml" ]; then
+          if [ -r "/etc/rancher/rke2/rke2.yaml" ]; then
+            KUBECONFIG="/etc/rancher/rke2/rke2.yaml"; export KUBECONFIG
+            log_info "Using RKE2 kubeconfig: $KUBECONFIG"; return 0
+          else
+            log_error "RKE2 kubeconfig not readable. Fix: sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/rke2.yaml && sudo chown \$(id -u):\$(id -g) ~/.kube/rke2.yaml"
+            return 1
+          fi
+        fi
+        if [ -f "$HOME/.kube/config" ] && [ -r "$HOME/.kube/config" ]; then
+          KUBECONFIG="$HOME/.kube/config"; export KUBECONFIG
+          log_info "Using default kubeconfig: $KUBECONFIG"; return 0
+        fi
+        log_error "No kubeconfig found. Set KUBECONFIG."
+        return 1
+      }
+      _resolve_kubeconfig || exit 1
+
+      # --- Remove deployed Zarf packages (reverse order) ---
+      log_info "Removing deployed Zarf packages..."
+
+      if zarf package list 2>/dev/null | grep -q "cybersec-dask"; then
+        log_info "Removing cybersec-dask package..."
+        zarf package remove cybersec-dask --confirm 2>&1 | tail -5
+        log_success "cybersec-dask package removed"
+      else
+        log_info "cybersec-dask package not deployed (skipping)"
+      fi
+
+      if zarf package list 2>/dev/null | grep -q "init"; then
+        log_info "Removing zarf init package..."
+        zarf package remove init --confirm 2>&1 | tail -5
+        log_success "zarf init package removed"
+      else
+        log_info "zarf init not deployed (skipping)"
+      fi
+
+      # --- Clean up any remaining namespaces ---
+      log_info "Cleaning up remaining namespaces..."
+      for ns in panel-viz jupyterhub dask dask-operator zarf; do
+        if kubectl get ns "$ns" &>/dev/null; then
+          log_info "Deleting namespace: $ns"
+          kubectl delete ns "$ns" --timeout=120s 2>/dev/null || \
+            log_warn "Namespace $ns deletion timed out (may need manual cleanup)"
+        fi
+      done
+
+      # --- Clean up Dask CRDs ---
+      for crd in daskclusters.kubernetes.dask.org daskjobs.kubernetes.dask.org daskworkergroups.kubernetes.dask.org daskautoscalers.kubernetes.dask.org; do
+        if kubectl get crd "$crd" &>/dev/null; then
+          log_info "Deleting CRD: $crd"
+          kubectl delete crd "$crd" 2>/dev/null || true
+        fi
+      done
+
+      # --- Kill any lingering port-forwards ---
+      pkill -f "kubectl port-forward.*panel-viz" 2>/dev/null || true
+      pkill -f "kubectl port-forward.*dask" 2>/dev/null || true
+
+      # --- Verify clean state ---
+      echo ""
+      log_info "Verifying clean state..."
+      REMAINING=$(kubectl get ns --no-headers 2>/dev/null | grep -cE "dask|zarf|jupyter|panel" || true)
+      if [ "$REMAINING" -eq 0 ]; then
+        log_success "All Zarf-managed namespaces removed"
+      else
+        log_warn "Some namespaces still exist:"
+        kubectl get ns --no-headers 2>/dev/null | grep -E "dask|zarf|jupyter|panel" | sed 's/^/  /'
+      fi
+
+      echo ""
+      log_success "=== Reset Complete (clean slate) ==="
+      echo ""
+      echo "E2E deployment:"
+      echo "  devenv tasks run zarf:local:preflight"
+      echo "  devenv tasks run zarf:local:init"
+      echo "  devenv tasks run zarf:local:deploy"
     '';
 
     "restart:clean".exec = ''

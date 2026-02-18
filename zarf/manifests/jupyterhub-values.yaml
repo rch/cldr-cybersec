@@ -138,7 +138,8 @@ singleuser:
         configMap:
           name: sample-notebooks
       - name: jupyterhub-pkg
-        emptyDir: {}
+        emptyDir:
+          sizeLimit: 256Mi
     extraVolumeMounts:
       - name: sample-notebooks
         mountPath: /app/sample-notebooks

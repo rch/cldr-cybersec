@@ -267,6 +267,8 @@ def _flatten_for_policy(runtime_config: dict[str, Any]) -> dict[str, Any]:
         "services": runtime_config.get("services", {}),
         "developer": runtime_config.get("developer", {}),
         "paths": runtime_config.get("paths", {}),
+        "node_resources": runtime_config.get("node_resources", {}),
+        "zarf_local": runtime_config.get("zarf_local", {}),
     }
 
 

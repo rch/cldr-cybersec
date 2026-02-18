@@ -122,6 +122,44 @@ sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
 
 ---
 
+## Disk-Constrained Deployment
+
+For nodes with limited local disk (<10% free), use disk-light mode:
+
+```bash
+sudo ./scripts/verify-zarf-deployment.sh --skip-build --disk-light
+```
+
+This mode:
+- Skips `setup_storage()` (no hostPath PV creation)
+- Passes `--set REGISTRY_PVC_ENABLED=false` to `zarf init` (emptyDir registry)
+- Post-deploy patches the Dask spill volume from hostPath to `emptyDir` (512Mi)
+- Defaults `DASK_WORKER_REPLICAS=4`
+
+Or manually:
+
+```bash
+# Init without registry PVC
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
+  zarf init --confirm --set REGISTRY_PVC_ENABLED=false
+
+# Deploy
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
+  zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
+  --set DASK_WORKER_REPLICAS=4
+
+# Patch spill volume to emptyDir
+sudo kubectl patch daskcluster cybersec-dask -n dask --type=json -p \
+  '[{"op":"replace","path":"/spec/worker/spec/volumes/0","value":{"name":"dask-spill","emptyDir":{"sizeLimit":"512Mi"}}}]'
+sudo kubectl delete pods -n dask -l dask.org/component=worker
+```
+
+**Auto-detection**: The script automatically enables disk-light mode when
+`df /var/lib/rancher` shows <10% free or a `node.kubernetes.io/disk-pressure`
+taint is detected.
+
+---
+
 ## Build from Source
 
 Required when modifying images, manifests, or notebooks.

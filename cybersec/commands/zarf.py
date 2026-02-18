@@ -5,6 +5,9 @@ Commands:
     /zarf preflight          - Validate air-gap deployment requirements
     /zarf package            - Build Zarf package
     /zarf deploy             - Deploy to cluster
+    /zarf local              - Show local deployment info
+    /zarf local preflight    - Validate local deployment requirements
+    /zarf local status       - Show local deployment status
 """
 
 from .parser import ParsedCommand, CommandResult
@@ -311,6 +314,268 @@ async def cmd_zarf_deploy(cmd: ParsedCommand) -> CommandResult:
         )
 
 
+async def cmd_zarf_local(cmd: ParsedCommand) -> CommandResult:
+    """Show local Zarf deployment info.
+
+    Usage:
+        /zarf local              Show local deployment configuration
+        /zarf local --json       Output as JSON
+
+    Options:
+        --json, -j    Output as JSON
+    """
+    from ..zarf.local import gather_local_zarf_config
+
+    try:
+        config = await gather_local_zarf_config()
+    except Exception as e:
+        return CommandResult(
+            success=False,
+            error=f"Failed to gather local config: {e}",
+        )
+
+    k8s = config.get("kubernetes", {})
+    nodes = config.get("node_resources", {})
+    zarf_local = config.get("zarf_local", {})
+    tools = config.get("tools", {})
+
+    lines = [
+        "Local Zarf Deployment Info",
+        "=" * 50,
+        "",
+        "Cluster:",
+        f"  Target: {k8s.get('target', 'none')}",
+        f"  Type: {k8s.get('cluster_type', 'none')}",
+        f"  Connected: {k8s.get('kubectl_connected', False)}",
+        f"  KUBECONFIG: {k8s.get('kubeconfig_path', 'not set')}",
+        "",
+        "Node Resources:",
+        f"  Total RAM: {nodes.get('total_memory_gb', 0)} GB",
+        f"  Disk Free: {nodes.get('disk_free_pct', 0)}%",
+        f"  Disk Pressure: {nodes.get('disk_pressure', False)}",
+        f"  Storage Classes: {', '.join(nodes.get('storage_classes', [])) or 'none'}",
+        f"  Default SC: {nodes.get('default_storage_class', 'none')}",
+        "",
+        "Zarf Local Config:",
+        f"  Init Package: {'found' if zarf_local.get('init_package_exists') else 'not found'}",
+        f"  Deploy Package: {'found' if zarf_local.get('deploy_package_exists') else 'not found'}",
+        f"  Worker Replicas: {zarf_local.get('worker_replicas', 2)}",
+        f"  Spill Dir: {zarf_local.get('spill_dir') or 'emptyDir (disk-light)'}",
+        f"  Registry PVC: {zarf_local.get('registry_pvc_enabled', False)}",
+        "",
+        "Tools:",
+        f"  zarf: {'installed' if tools.get('zarf') else 'not found'}"
+        + (f" ({tools.get('zarf_version', '')})" if tools.get('zarf_version') else ""),
+        f"  kubectl: {'installed' if tools.get('kubectl') else 'not found'}",
+        f"  helm: {'installed' if tools.get('helm') else 'not found'}",
+        "",
+        "Commands:",
+        "  /zarf local preflight    Validate requirements",
+        "  /zarf local status       Show deployment status",
+        "  devenv tasks run zarf:local:preflight",
+        "  devenv tasks run zarf:local:init",
+        "  devenv tasks run zarf:local:deploy",
+        "  devenv tasks run zarf:local:status",
+    ]
+
+    return CommandResult(
+        success=True,
+        data=config,
+        formatted="\n".join(lines),
+    )
+
+
+async def cmd_zarf_local_preflight(cmd: ParsedCommand) -> CommandResult:
+    """Validate local Zarf deployment requirements.
+
+    Runs conftest policies against gathered runtime config to validate
+    that the local environment is ready for Zarf deployment.
+
+    Usage:
+        /zarf local preflight       Run local preflight checks
+        /zarf local preflight --json Output as JSON
+
+    Options:
+        --json, -j    Output as JSON
+    """
+    import json
+    import subprocess
+    from pathlib import Path
+
+    from ..zarf.local import gather_local_zarf_config
+
+    try:
+        config = await gather_local_zarf_config()
+    except Exception as e:
+        return CommandResult(
+            success=False,
+            error=f"Failed to gather local config: {e}",
+        )
+
+    # Write environment.json for conftest
+    build_dir = Path("build")
+    build_dir.mkdir(exist_ok=True)
+    env_file = build_dir / "environment.json"
+    env_file.write_text(json.dumps(config, indent=2))
+
+    # Run conftest
+    project_root = Path(__file__).parent.parent.parent
+    conftest_cmd = [
+        "conftest", "test", str(env_file),
+        "--policy", str(project_root / "policy" / "k8s" / "base.rego"),
+        "--policy", str(project_root / "policy" / "k8s" / "local"),
+        "--all-namespaces",
+        "--output", "json",
+    ]
+
+    denies: list[str] = []
+    warnings: list[str] = []
+    infos: list[str] = []
+
+    try:
+        proc = subprocess.run(
+            conftest_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if proc.stdout:
+            try:
+                output = json.loads(proc.stdout)
+                for item in output:
+                    for failure in item.get("failures", []):
+                        denies.append(failure.get("msg", str(failure)))
+                    for warning in item.get("warnings", []):
+                        warnings.append(warning.get("msg", str(warning)))
+            except json.JSONDecodeError:
+                for line in proc.stdout.split("\n"):
+                    if "FAIL" in line:
+                        denies.append(line)
+                    elif "WARN" in line:
+                        warnings.append(line)
+    except FileNotFoundError:
+        denies.append("conftest not installed. Install: brew install conftest")
+    except Exception as e:
+        denies.append(f"conftest error: {e}")
+
+    success = len(denies) == 0
+
+    data = {
+        "success": success,
+        "config": config,
+        "denies": denies,
+        "warnings": warnings,
+        "infos": infos,
+    }
+
+    lines = [
+        "Local Zarf Preflight Validation",
+        "=" * 50,
+    ]
+
+    if denies:
+        lines.append("")
+        lines.append("ERRORS:")
+        for deny in denies:
+            lines.append(f"  - {deny}")
+
+    if warnings:
+        lines.append("")
+        lines.append("WARNINGS:")
+        for warn in warnings:
+            lines.append(f"  - {warn}")
+
+    lines.append("")
+    if success:
+        lines.append("Preflight PASSED - Ready for local Zarf deployment")
+        lines.append("")
+        lines.append("Next steps:")
+        lines.append("  devenv tasks run zarf:local:init")
+        lines.append("  devenv tasks run zarf:local:deploy")
+    else:
+        lines.append(f"Preflight FAILED - {len(denies)} error(s) must be resolved")
+
+    return CommandResult(
+        success=success,
+        data=data,
+        formatted="\n".join(lines),
+    )
+
+
+async def cmd_zarf_local_status(cmd: ParsedCommand) -> CommandResult:
+    """Show local Zarf deployment status.
+
+    Checks pod status in zarf, dask, jupyterhub, and panel-viz namespaces,
+    and verifies service accessibility.
+
+    Usage:
+        /zarf local status       Show deployment status
+        /zarf local status --json Output as JSON
+
+    Options:
+        --json, -j    Output as JSON
+    """
+    import subprocess
+
+    namespaces = {
+        "zarf": "Zarf Registry",
+        "dask-operator": "Dask Operator",
+        "dask": "Dask Cluster",
+        "jupyterhub": "JupyterHub",
+        "panel-viz": "Panel-Viz",
+    }
+
+    data: dict = {"namespaces": {}, "services": {}}
+    lines = [
+        "Local Zarf Deployment Status",
+        "=" * 50,
+    ]
+
+    for ns, label in namespaces.items():
+        lines.append(f"\n{label} ({ns}):")
+        try:
+            proc = subprocess.run(
+                ["kubectl", "get", "pods", "-n", ns, "--no-headers"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                pods = proc.stdout.strip()
+                data["namespaces"][ns] = {"exists": True, "pods": pods}
+                for line in pods.split("\n"):
+                    lines.append(f"  {line}")
+            else:
+                data["namespaces"][ns] = {"exists": False}
+                lines.append("  (namespace not found or no pods)")
+        except Exception:
+            data["namespaces"][ns] = {"exists": False, "error": "kubectl failed"}
+            lines.append("  (kubectl not available)")
+
+    # Check service accessibility
+    lines.append("\nService Accessibility:")
+    for name, port in [("Panel-Viz", 30506), ("Dask Dashboard", 30087)]:
+        try:
+            proc = subprocess.run(
+                ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                 f"http://localhost:{port}/"],
+                capture_output=True, text=True, timeout=5,
+            )
+            code = proc.stdout.strip()
+            accessible = code in ("200", "302")
+            data["services"][name] = {"port": port, "accessible": accessible, "http_code": code}
+            status = f"OK (HTTP {code})" if accessible else f"not accessible (HTTP {code})"
+            lines.append(f"  {name}: http://0.0.0.0:{port}/ - {status}")
+        except Exception:
+            data["services"][name] = {"port": port, "accessible": False}
+            lines.append(f"  {name}: http://0.0.0.0:{port}/ - not accessible")
+
+    return CommandResult(
+        success=True,
+        data=data,
+        formatted="\n".join(lines),
+    )
+
+
 def register_zarf_commands():
     """Register all Zarf commands."""
     register_command(
@@ -353,5 +618,33 @@ def register_zarf_commands():
             "/zarf deploy",
             "/zarf deploy --confirm",
             "/zarf deploy zarf-package-cybersec-dask-v1.0.0.tar.zst",
+        ],
+    )
+
+    # Local deployment commands
+    register_command(
+        "zarf.local",
+        cmd_zarf_local,
+        description="Show local Zarf deployment info",
+        examples=["/zarf local", "/zarf local --json"],
+    )
+
+    register_command(
+        "zarf.local.preflight",
+        cmd_zarf_local_preflight,
+        description="Validate local deployment requirements",
+        examples=[
+            "/zarf local preflight",
+            "/zarf local preflight --json",
+        ],
+    )
+
+    register_command(
+        "zarf.local.status",
+        cmd_zarf_local_status,
+        description="Show local Zarf deployment status",
+        examples=[
+            "/zarf local status",
+            "/zarf local status --json",
         ],
     )

@@ -42,6 +42,8 @@ NC='\033[0m' # No Color
 SKIP_INIT=false
 SKIP_BUILD=false
 DRY_RUN=false
+DISK_LIGHT=false
+DISK_LIGHT_AUTO=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -49,8 +51,16 @@ while [[ $# -gt 0 ]]; do
         --skip-init) SKIP_INIT=true; shift ;;
         --skip-build) SKIP_BUILD=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --disk-light) DISK_LIGHT=true; shift ;;
         -h|--help)
-            echo "Usage: $0 [--skip-init] [--skip-build] [--dry-run]"
+            echo "Usage: $0 [--skip-init] [--skip-build] [--dry-run] [--disk-light]"
+            echo ""
+            echo "Options:"
+            echo "  --skip-init    Skip Zarf init (already initialized)"
+            echo "  --skip-build   Skip image/package build (use pre-built packages)"
+            echo "  --dry-run      Show what would be done without executing"
+            echo "  --disk-light   Disable registry PVC, use emptyDir for spill volumes"
+            echo "                 (auto-enabled when <10% disk free or DiskPressure taint)"
             exit 0
             ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -63,6 +73,95 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
+
+# =============================================================================
+# Disk-Light Mode: Auto-detection and banner
+# =============================================================================
+detect_disk_constraints() {
+    # Auto-enable disk-light mode when disk is constrained
+
+    if [[ "$DISK_LIGHT" == "true" ]]; then
+        return 0  # Already explicitly enabled
+    fi
+
+    # Check free disk on /var/lib/rancher (where RKE2/Zarf store data)
+    local check_path="/var/lib/rancher"
+    if [[ ! -d "$check_path" ]]; then
+        check_path="/"
+    fi
+    local pct_free
+    pct_free=$(df "$check_path" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print 100-$5}')
+    if [[ -n "$pct_free" ]] && [[ "$pct_free" -lt 10 ]]; then
+        log_warn "Low disk: ${pct_free}% free on $check_path — enabling disk-light mode"
+        DISK_LIGHT=true
+        DISK_LIGHT_AUTO=true
+    fi
+
+    # Check for DiskPressure taint on any node
+    local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
+    local KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
+    if [[ -x "$KUBECTL" ]]; then
+        local disk_pressure
+        disk_pressure=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get nodes -o json 2>/dev/null \
+            | grep -c '"node.kubernetes.io/disk-pressure"' || echo "0")
+        if [[ "$disk_pressure" -gt 0 ]]; then
+            log_warn "DiskPressure taint detected — enabling disk-light mode"
+            DISK_LIGHT=true
+            DISK_LIGHT_AUTO=true
+        fi
+    fi
+}
+
+print_disk_light_banner() {
+    if [[ "$DISK_LIGHT" != "true" ]]; then
+        return
+    fi
+
+    local trigger="--disk-light flag"
+    if [[ "$DISK_LIGHT_AUTO" == "true" ]]; then
+        trigger="auto-detected disk constraints"
+    fi
+
+    echo ""
+    echo -e "${YELLOW}╔══════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║            DISK-LIGHT MODE ACTIVE                ║${NC}"
+    echo -e "${YELLOW}╠══════════════════════════════════════════════════╣${NC}"
+    echo -e "${YELLOW}║${NC} Trigger:  $trigger"
+    echo -e "${YELLOW}║${NC} Registry: emptyDir (REGISTRY_PVC_ENABLED=false)"
+    echo -e "${YELLOW}║${NC} Storage:  setup_storage() skipped"
+    echo -e "${YELLOW}║${NC} Spill:    emptyDir 512Mi (post-deploy patch)"
+    echo -e "${YELLOW}║${NC} Workers:  ${DASK_WORKER_REPLICAS:-4}"
+    echo -e "${YELLOW}╚══════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+apply_disk_light_patches() {
+    # Post-deploy: convert Dask spill volume from hostPath to emptyDir
+    log_step "Disk-Light: Patching spill volume to emptyDir"
+
+    local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
+    local KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would patch daskcluster spill volume to emptyDir (512Mi)"
+        log_info "[DRY-RUN] Would restart dask workers"
+        return 0
+    fi
+
+    # Patch the DaskCluster spill volume from hostPath to emptyDir
+    if sudo $KUBECTL --kubeconfig=$KUBECONFIG patch daskcluster cybersec-dask -n dask --type=json \
+        -p '[{"op":"replace","path":"/spec/worker/spec/volumes/0","value":{"name":"dask-spill","emptyDir":{"sizeLimit":"512Mi"}}}]' 2>&1; then
+        log_success "Patched spill volume to emptyDir (512Mi)"
+    else
+        log_warn "Could not patch spill volume — DaskCluster may not be deployed yet"
+        return 0
+    fi
+
+    # Restart workers to pick up volume change
+    log_info "Restarting dask workers..."
+    sudo $KUBECTL --kubeconfig=$KUBECONFIG delete pods -n dask -l dask.org/component=worker 2>/dev/null || true
+    log_success "Dask workers restarted with emptyDir spill volume"
+}
 
 # =============================================================================
 # Step 1: Check Prerequisites
@@ -322,6 +421,11 @@ download_zarf_init() {
 setup_storage() {
     log_step "Step 5.5: Setting Up Storage for Zarf Registry"
 
+    if [[ "$DISK_LIGHT" == "true" ]]; then
+        log_info "Skipping storage setup (disk-light mode — registry will use emptyDir)"
+        return 0
+    fi
+
     local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
     local KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
     local STORAGE_PATH="/var/lib/zarf-registry"
@@ -402,13 +506,20 @@ initialize_zarf() {
     cd "$ZARF_DIR"
 
     log_info "Running Zarf init..."
+
+    local ZARF_INIT_ARGS="--confirm"
+    if [[ "$DISK_LIGHT" == "true" ]]; then
+        ZARF_INIT_ARGS="$ZARF_INIT_ARGS --set REGISTRY_PVC_ENABLED=false"
+        log_info "Disk-light: registry will use emptyDir (REGISTRY_PVC_ENABLED=false)"
+    fi
+
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY-RUN] Would run: zarf init --confirm"
+        log_info "[DRY-RUN] Would run: zarf init $ZARF_INIT_ARGS"
         return 0
     fi
 
     # Run Zarf init with detailed output
-    if zarf init --confirm 2>&1 | tee /tmp/zarf-init.log | tail -30; then
+    if zarf init $ZARF_INIT_ARGS 2>&1 | tee /tmp/zarf-init.log | tail -30; then
         log_success "Zarf initialized successfully"
     else
         log_error "Zarf init failed - check /tmp/zarf-init.log for details"
@@ -705,7 +816,12 @@ main() {
     echo "SKIP_INIT: $SKIP_INIT"
     echo "SKIP_BUILD: $SKIP_BUILD"
     echo "DRY_RUN: $DRY_RUN"
+    echo "DISK_LIGHT: $DISK_LIGHT"
     echo "=============================================="
+
+    # Auto-detect disk constraints (may enable DISK_LIGHT)
+    detect_disk_constraints
+    print_disk_light_banner
 
     local failed=0
 
@@ -741,6 +857,10 @@ main() {
 
     if [[ $failed -eq 0 ]]; then
         deploy_zarf_package || ((failed++))
+    fi
+
+    if [[ $failed -eq 0 ]] && [[ "$DISK_LIGHT" == "true" ]]; then
+        apply_disk_light_patches || log_warn "Disk-light patches may have failed, but continuing..."
     fi
 
     if [[ $failed -eq 0 ]]; then
