@@ -2925,6 +2925,112 @@ print('Config written to build/environment.json')
       echo "Logs:    kubectl logs -n panel-viz -l app=otel-navigator -f"
     '';
 
+    # ===========================================================================
+    # K8s Dashboard — separate Zarf package (keeps main package under size limit)
+    # ===========================================================================
+
+    "zarf:local:package-dashboard".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Creating K8s Dashboard Zarf Package ==="
+
+      cd zarf/kubernetes-dashboard
+      zarf package create --confirm
+
+      PKG=$(ls -t zarf-package-cybersec-k8s-dashboard-*.tar.zst 2>/dev/null | head -1)
+      if [ -n "$PKG" ]; then
+        log_success "Package created: $PKG"
+      else
+        log_error "Package creation failed"
+        exit 1
+      fi
+    '';
+
+    "zarf:local:deploy-dashboard".exec = ''
+      source scripts/polaris_bootstrap_helper.sh
+      log_info "=== Deploying K8s Dashboard ==="
+
+      # --- Detect kubeconfig (with permission-aware fallback) ---
+      _resolve_kubeconfig() {
+        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
+          if [ -r "$KUBECONFIG" ]; then
+            log_info "Using KUBECONFIG=$KUBECONFIG"
+            return 0
+          else
+            log_warn "KUBECONFIG=$KUBECONFIG exists but is not readable"
+          fi
+        fi
+        if [ -f "$HOME/.kube/rke2.yaml" ] && [ -r "$HOME/.kube/rke2.yaml" ]; then
+          KUBECONFIG="$HOME/.kube/rke2.yaml"; export KUBECONFIG
+          log_info "Using user kubeconfig: $KUBECONFIG"; return 0
+        fi
+        if [ "''${CYBERSEC_K8S_TARGET:-}" = "k3d" ]; then
+          KUBECONFIG="''${DEVENV_STATE:-.devenv/state}/kubeconfig"; export KUBECONFIG
+          log_info "Using k3d kubeconfig: $KUBECONFIG"; return 0
+        fi
+        if [ -f "/etc/rancher/rke2/rke2.yaml" ]; then
+          if [ -r "/etc/rancher/rke2/rke2.yaml" ]; then
+            KUBECONFIG="/etc/rancher/rke2/rke2.yaml"; export KUBECONFIG
+            log_info "Using RKE2 kubeconfig: $KUBECONFIG"; return 0
+          else
+            log_error "RKE2 kubeconfig not readable. Fix: sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/rke2.yaml && sudo chown \$(id -u):\$(id -g) ~/.kube/rke2.yaml"
+            return 1
+          fi
+        fi
+        if [ -f "$HOME/.kube/config" ] && [ -r "$HOME/.kube/config" ]; then
+          KUBECONFIG="$HOME/.kube/config"; export KUBECONFIG
+          log_info "Using default kubeconfig: $KUBECONFIG"; return 0
+        fi
+        log_error "No kubeconfig found. Set KUBECONFIG."
+        return 1
+      }
+      _resolve_kubeconfig || exit 1
+
+      # --- Verify Zarf is initialized ---
+      if ! kubectl get ns zarf &>/dev/null; then
+        log_error "Zarf not initialized. Run: devenv tasks run zarf:local:init"
+        exit 1
+      fi
+
+      # --- Find or create package ---
+      cd zarf/kubernetes-dashboard
+      PKG=$(ls -t zarf-package-cybersec-k8s-dashboard-*.tar.zst 2>/dev/null | head -1)
+      if [ -z "$PKG" ]; then
+        log_info "No dashboard package found — building..."
+        zarf package create --confirm
+        PKG=$(ls -t zarf-package-cybersec-k8s-dashboard-*.tar.zst 2>/dev/null | head -1)
+        if [ -z "$PKG" ]; then
+          log_error "Package creation failed"
+          exit 1
+        fi
+      fi
+
+      log_info "Deploying: $PKG"
+      if ! zarf package deploy "$PKG" --confirm; then
+        log_error "Dashboard deploy failed"
+        exit 1
+      fi
+
+      # --- Wait for dashboard ---
+      log_info "Waiting for dashboard pod..."
+      kubectl -n kubernetes-dashboard rollout status deploy/kubernetes-dashboard --timeout=120s || true
+
+      # --- Kick process-compose port-forward if available (devenv up) ---
+      if process-compose process restart k8s-dashboard 2>/dev/null; then
+        log_info "Port-forward started via process-compose"
+      fi
+
+      echo ""
+      log_success "=== K8s Dashboard Deployed ==="
+      echo ""
+      echo "  Access (pick one):"
+      echo "    zarf connect kubernetes-dashboard          # Zarf-native (works anywhere)"
+      echo "    https://localhost:10443                    # devenv up (auto port-forward)"
+      echo ""
+      echo "  Token:"
+      echo "    kubectl -n kubernetes-dashboard create token admin-user"
+      echo "    Or generate from Settings page: http://localhost:5050/settings"
+    '';
+
     "zarf:local:status".exec = ''
       source scripts/polaris_bootstrap_helper.sh
       log_info "=== Local Zarf Deployment Status ==="
@@ -3971,91 +4077,56 @@ EOF
       exec = ''
         set -euo pipefail
 
-        # K8s dashboard runs on any K8s target (k3d or RKE2)
-        # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
-        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
-          KUBECONFIG_PATH="$KUBECONFIG"
-        else
-          KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        # Port-forward only — deployment handled by Zarf package:
+        #   devenv tasks run zarf:local:deploy-dashboard
+
+        # Try kubeconfig locations in priority order
+        KUBECONFIG_PATH=""
+        for candidate in \
+          "$(grep '^KUBECONFIG=' "$PWD/.env" 2>/dev/null | cut -d= -f2-)" \
+          "$HOME/.kube/rke2.yaml" \
+          "''${KUBECONFIG:-}" \
+          "$PWD/.devenv/state/kubeconfig"; do
+          if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+            KUBECONFIG_PATH="$candidate"
+            break
+          fi
+        done
+
+        if [ -z "$KUBECONFIG_PATH" ]; then
+          echo "No kubeconfig found — skipping dashboard port-forward."
+          sleep infinity
         fi
         export KUBECONFIG="$KUBECONFIG_PATH"
 
-        echo "Waiting for Kubernetes API..."
+        # Wait for dashboard namespace to exist (deployed by Zarf)
+        echo "Waiting for kubernetes-dashboard namespace..."
         for _ in $(seq 1 60); do
-          if kubectl get namespace kube-system >/dev/null 2>&1; then
+          if kubectl get ns kubernetes-dashboard >/dev/null 2>&1; then
             break
           fi
-          sleep 2
+          sleep 5
         done
 
-        echo "Installing Kubernetes Dashboard..."
-        kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
-
-        cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: admin-user
-  namespace: kubernetes-dashboard
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: admin-user
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-admin
-subjects:
-  - kind: ServiceAccount
-    name: admin-user
-    namespace: kubernetes-dashboard
-EOF
-
-        kubectl -n kubernetes-dashboard rollout status deploy/kubernetes-dashboard --timeout=300s || true
-
-        if kubectl -n kubernetes-dashboard get sa admin-user >/dev/null 2>&1; then
-          TOKEN=$(kubectl -n kubernetes-dashboard create token admin-user 2>/dev/null || true)
-          if [ -n "$TOKEN" ]; then
-            echo "Kubernetes Dashboard token: $TOKEN"
-            CA_DATA=$(awk '/certificate-authority-data:/ {print $2; exit}' "$KUBECONFIG_PATH")
-            SERVER=$(awk '/server:/ {print $2; exit}' "$KUBECONFIG_PATH")
-            if [ -n "$CA_DATA" ] && [ -n "$SERVER" ]; then
-              mkdir -p "$PWD/build"
-              cat > "$PWD/build/kubeconfig-dashboard" <<EOF
-apiVersion: v1
-kind: Config
-clusters:
-- name: k3d-cybersec
-  cluster:
-    certificate-authority-data: $CA_DATA
-    server: $SERVER
-contexts:
-- name: k3d-cybersec
-  context:
-    cluster: k3d-cybersec
-    user: dashboard-admin
-current-context: k3d-cybersec
-users:
-- name: dashboard-admin
-  user:
-    token: $TOKEN
-EOF
-              chmod 600 "$PWD/build/kubeconfig-dashboard"
-              ln -sfn "$PWD/build/kubeconfig-dashboard" "$PWD/kubeconfig-dashboard"
-            fi
-          fi
+        if ! kubectl get ns kubernetes-dashboard >/dev/null 2>&1; then
+          echo "kubernetes-dashboard not deployed."
+          echo "Deploy with: devenv tasks run zarf:local:deploy-dashboard"
+          sleep infinity
         fi
 
-        echo "Starting Kubernetes Dashboard on https://localhost:10443 ..."
-        kubectl -n kubernetes-dashboard port-forward svc/kubernetes-dashboard 10443:443 --address 127.0.0.1,::1
+        # Wait for dashboard pod to be ready
+        kubectl -n kubernetes-dashboard rollout status deploy/kubernetes-dashboard --timeout=120s || true
+
+        echo "Starting Kubernetes Dashboard port-forward on https://localhost:10443 ..."
+        echo "  Generate login token:  kubectl -n kubernetes-dashboard create token admin-user"
+        echo "  Or use Settings page:  http://localhost:5050/settings"
+        kubectl -n kubernetes-dashboard port-forward svc/kubernetes-dashboard 10443:443 --address 0.0.0.0,::1
       '';
       process-compose = {
-        disabled = true;  # Started via k8s:forward task
-        depends_on = {
-          k3d-cluster = {
-            condition = "process_started";
-          };
+        # Starts automatically; sleeps if dashboard not deployed
+        availability = {
+          restart = "on_failure";
+          max_restarts = 3;
         };
       };
     };

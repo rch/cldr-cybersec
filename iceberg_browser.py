@@ -16,6 +16,7 @@ import time
 import json
 import threading
 from urllib.parse import urlparse
+import subprocess
 
 app = Flask(__name__)
 
@@ -38,6 +39,11 @@ SERVICE_PORTS = {
     "otel_grpc": 4317,
     "otel_http": 4318,
     "otel_metrics": 8889,
+    # K8s stack (NodePort services from Zarf local deploy)
+    "viz": 30506,           # OTEL Navigator (Panel-Viz)
+    "dask": 30087,          # Dask Dashboard
+    "jupyterhub": 30080,    # JupyterHub
+    "k8s_dashboard": 10443, # Kubernetes Dashboard (HTTPS)
 }
 
 
@@ -74,9 +80,11 @@ def get_service_url(service_name: str, path: str = "") -> str:
     base_host = get_base_host()
     port = SERVICE_PORTS.get(service_name, 80)
 
-    # Determine protocol - assume HTTP for local dev
-    # Could be extended to check X-Forwarded-Proto for HTTPS
-    proto = request.headers.get("X-Forwarded-Proto", "http")
+    # K8s Dashboard is always HTTPS
+    if service_name == "k8s_dashboard":
+        proto = "https"
+    else:
+        proto = request.headers.get("X-Forwarded-Proto", "http")
 
     # Build the URL
     if port == 80:
@@ -107,6 +115,10 @@ def get_all_service_urls() -> dict:
         "nifi": get_service_url("nifi", "/nifi"),
         "prometheus": get_service_url("prometheus"),
         "iceberg_browser": get_service_url("iceberg_browser"),
+        "viz": get_service_url("viz"),
+        "dask": get_service_url("dask"),
+        "jupyterhub": get_service_url("jupyterhub"),
+        "k8s_dashboard": get_service_url("k8s_dashboard"),
     }
 
 
@@ -1079,6 +1091,52 @@ def polaris_page():
 def settings_page():
     """Bootstrap settings page"""
     return render_template("settings.html")
+
+
+# ============================================================================
+# K8s Dashboard Token API
+# ============================================================================
+
+
+@app.route("/api/k8s-dashboard-token")
+def k8s_dashboard_token():
+    """Generate a fresh K8s dashboard bearer token."""
+    try:
+        # Resolve kubeconfig: .env override > ~/.kube/rke2.yaml > KUBECONFIG env > devenv default
+        kubeconfig = None
+        env_file = os.path.join(os.path.dirname(__file__), ".env")
+        if os.path.isfile(env_file):
+            with open(env_file) as f:
+                for line in f:
+                    if line.startswith("KUBECONFIG="):
+                        candidate = line.strip().split("=", 1)[1]
+                        if os.path.isfile(candidate):
+                            kubeconfig = candidate
+                            break
+        if not kubeconfig:
+            for candidate in [
+                os.path.expanduser("~/.kube/rke2.yaml"),
+                os.environ.get("KUBECONFIG", ""),
+            ]:
+                if candidate and os.path.isfile(candidate):
+                    kubeconfig = candidate
+                    break
+
+        env = dict(os.environ)
+        if kubeconfig:
+            env["KUBECONFIG"] = kubeconfig
+
+        result = subprocess.run(
+            ["kubectl", "-n", "kubernetes-dashboard", "create", "token", "admin-user"],
+            capture_output=True, text=True, timeout=10, env=env,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return jsonify({"token": result.stdout.strip()})
+        return jsonify({"error": "Could not generate token. Is the dashboard deployed?"}), 503
+    except FileNotFoundError:
+        return jsonify({"error": "kubectl not found"}), 503
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ============================================================================

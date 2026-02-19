@@ -1,0 +1,2 @@
+# Built Zarf packages (can exceed GitHub file size limits)
+zarf-package-*.tar.zst

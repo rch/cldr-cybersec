@@ -575,7 +575,11 @@
                 <a href="{{ service_urls.flink }}" target="_blank" class="service-link" data-service="flink">Flink</a>
                 <a href="{{ service_urls.minio_console }}" target="_blank" class="service-link" data-service="minio_console">MinIO</a>
                 <a href="{{ service_urls.nifi }}" target="_blank" class="service-link" data-service="nifi">NiFi</a>
+                <a href="{{ service_urls.viz }}" target="_blank" class="service-link" data-service="viz">Viz</a>
+                <a href="{{ service_urls.dask }}" target="_blank" class="service-link" data-service="dask">Dask</a>
+                <a href="{{ service_urls.jupyterhub }}" target="_blank" class="service-link" data-service="jupyterhub">Jupyter</a>
                 <a href="{{ service_urls.prometheus }}" target="_blank" class="service-link" data-service="prometheus">Prometheus</a>
+                <a href="{{ service_urls.k8s_dashboard }}" target="_blank" class="service-link" data-service="k8s_dashboard">K8s</a>
             </div>
         </div>
     </header>
@@ -618,6 +622,30 @@
                         Running verification checks...
                     </div>
                     <div id="verify-results" class="checks-list"></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2>Kubernetes Dashboard</h2>
+                    <button class="btn btn-secondary" onclick="generateK8sToken()">Generate Token</button>
+                </div>
+                <div class="card-body">
+                    <p style="color: var(--text-secondary); margin-bottom: 12px;">
+                        The K8s Dashboard requires a bearer token for login.
+                        Click "Generate Token" and paste it into the dashboard login at
+                        <a href="{{ service_urls.k8s_dashboard }}" target="_blank" style="color: var(--color-amber);">{{ service_urls.k8s_dashboard }}</a>.
+                    </p>
+                    <div id="k8s-token-display" style="display: none;">
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <input type="text" id="k8s-token" readonly
+                                style="flex: 1; font-family: var(--font-mono); font-size: 0.8rem; padding: 8px 12px;
+                                       background: var(--color-void); border: 1px solid var(--color-grid);
+                                       color: var(--text-primary); border-radius: 6px;">
+                            <button class="btn btn-secondary" onclick="copyK8sToken()" id="k8s-copy-btn">Copy</button>
+                        </div>
+                    </div>
+                    <div id="k8s-token-error" style="display: none; color: var(--color-warning); margin-top: 8px;"></div>
                 </div>
             </div>
         </div>
@@ -1182,6 +1210,51 @@
             line.textContent = text;
             log.appendChild(line);
             log.scrollTop = log.scrollHeight;
+        }
+
+        async function generateK8sToken() {
+            const display = document.getElementById('k8s-token-display');
+            const errorDiv = document.getElementById('k8s-token-error');
+            const tokenInput = document.getElementById('k8s-token');
+            errorDiv.style.display = 'none';
+            display.style.display = 'none';
+
+            try {
+                const resp = await fetch('/api/k8s-dashboard-token');
+                const data = await resp.json();
+                if (data.token) {
+                    tokenInput.value = data.token;
+                    display.style.display = 'block';
+                } else {
+                    errorDiv.textContent = data.error || 'Unknown error';
+                    errorDiv.style.display = 'block';
+                }
+            } catch (e) {
+                errorDiv.textContent = 'Failed to connect: ' + e.message;
+                errorDiv.style.display = 'block';
+            }
+        }
+
+        function copyK8sToken() {
+            const tokenInput = document.getElementById('k8s-token');
+            const btn = document.getElementById('k8s-copy-btn');
+            tokenInput.select();
+            tokenInput.setSelectionRange(0, tokenInput.value.length);
+            let copied = false;
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(tokenInput.value).then(() => {
+                    btn.textContent = 'Copied!';
+                    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+                }).catch(() => {
+                    copied = document.execCommand('copy');
+                    btn.textContent = copied ? 'Copied!' : 'Use Ctrl+C';
+                    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+                });
+            } else {
+                copied = document.execCommand('copy');
+                btn.textContent = copied ? 'Copied!' : 'Use Ctrl+C';
+                setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+            }
         }
     </script>
 </body>

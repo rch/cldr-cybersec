@@ -1,0 +1,32 @@
+kind: ZarfPackageConfig
+metadata:
+  name: cybersec-k8s-dashboard
+  description: Kubernetes Dashboard for air-gap RKE2 clusters
+  version: "2.7.0"
+  architecture: amd64
+  authors: Cybersec Toolkit Team
+  url: https://github.com/cloudera/cybersec
+
+components:
+  # ===========================================================================
+  # Kubernetes Dashboard - web UI for cluster management
+  # ===========================================================================
+  - name: kubernetes-dashboard
+    required: true
+    description: Kubernetes Dashboard v2.7.0 with admin service account
+    images:
+      - kubernetesui/dashboard:v2.7.0
+      - kubernetesui/metrics-scraper:v1.0.8
+    manifests:
+      - name: kubernetes-dashboard
+        files:
+          - manifests/dashboard.yaml
+    actions:
+      onDeploy:
+        after:
+          - wait:
+              cluster:
+                kind: Pod
+                name: k8s-app=kubernetes-dashboard
+                namespace: kubernetes-dashboard
+                condition: Ready
