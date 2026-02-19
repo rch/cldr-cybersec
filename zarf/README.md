@@ -64,27 +64,171 @@ zarf package deploy zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
 
 ---
 
-## Quickstart (Pre-Built Release)
-
-### Acquire artifacts (internet-connected machine)
+## Acquire Artifacts (Internet-Connected Machine)
 
 | Artifact | How to get | Size |
 |----------|-----------|------|
 | `zarf` binary | [Zarf releases](https://github.com/zarf-dev/zarf/releases) (Linux amd64) | ~100 MB |
 | `zarf-init-amd64-v0.66.0.tar.zst` | `zarf tools download-init` | ~300 MB |
 | `zarf-package-cybersec-dask-amd64-1.1.1.tar.zst` | [GitHub Releases](https://github.com/rch/cldr-cybersec/releases/tag/v1.1.1) | ~1.3 GB |
+| `zarf-package-cybersec-k8s-dashboard-amd64-2.7.0.tar.zst` | Same | ~30 MB |
 
 ```bash
 # Download on a machine with internet access
 curl -LO https://github.com/zarf-dev/zarf/releases/download/v0.66.0/zarf_v0.66.0_Linux_amd64
 mv zarf_v0.66.0_Linux_amd64 zarf && chmod +x zarf
 ./zarf tools download-init
-# Download cybersec-dask package from GitHub Releases (link above)
+# Download cybersec-dask and k8s-dashboard packages from GitHub Releases
 ```
 
-Transfer all three files to the air-gapped node (USB, SCP, data diode, etc.).
+Transfer all files to the air-gapped node (USB, SCP, data diode, etc.).
 
-### Deploy (air-gapped node, RKE2 already running)
+---
+
+## Deploy: Disk-Light (Recommended for Single-Node RKE2)
+
+This is the recommended deployment path for air-gapped RKE2 nodes, especially
+when disk is constrained. It eliminates PersistentVolume requirements entirely
+by using `emptyDir` for both the Zarf registry and Dask spill volumes.
+
+### Step 0: RKE2 Kubelet Eviction Thresholds
+
+**Before deploying**, ensure the RKE2 kubelet won't block pod scheduling due
+to disk pressure. By default, kubelet taints the node with
+`node.kubernetes.io/disk-pressure:NoSchedule` when `nodefs.available` drops
+below 15% — this prevents Zarf's own pods from scheduling and causes
+`zarf init` to hang indefinitely.
+
+Edit `/etc/rancher/rke2/config.yaml` and add:
+
+```yaml
+kubelet-arg:
+  - "eviction-hard=nodefs.available<5%,imagefs.available<5%,memory.available<100Mi"
+  - "eviction-soft=nodefs.available<8%,imagefs.available<8%,memory.available<200Mi"
+  - "eviction-soft-grace-period=nodefs.available=2m,imagefs.available=2m,memory.available=1m"
+```
+
+Then restart RKE2:
+
+```bash
+sudo systemctl restart rke2-server
+# Wait for node Ready
+sudo /var/lib/rancher/rke2/bin/kubectl \
+  --kubeconfig /etc/rancher/rke2/rke2.yaml \
+  wait --for=condition=Ready node --all --timeout=300s
+```
+
+If the node already has a DiskPressure taint from a previous boot, remove it:
+
+```bash
+sudo /var/lib/rancher/rke2/bin/kubectl \
+  --kubeconfig /etc/rancher/rke2/rke2.yaml \
+  taint nodes --all node.kubernetes.io/disk-pressure-
+```
+
+> **Why this matters**: `zarf init` bootstraps by injecting a seed registry
+> into an existing kube-system pod. If kubelet won't schedule new pods (due
+> to DiskPressure), the registry pod stays `Pending` forever and init hangs
+> at "performing Helm upgrade". The lowered thresholds give disk-light mode
+> room to operate.
+
+### Step 1: Deploy with the Verify Script
+
+```bash
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+export PATH=$PATH:/var/lib/rancher/rke2/bin
+sudo cp zarf /usr/local/bin/ && sudo chmod +x /usr/local/bin/zarf
+
+cd /path/to/zarf   # directory containing zarf.yaml and packages
+sudo ./scripts/verify-zarf-deployment.sh --skip-build --disk-light
+```
+
+The script handles all deployment steps automatically:
+
+1. Validates prerequisites (RKE2, kubectl, Zarf CLI)
+2. Verifies kube-system injector pods are running
+3. **Skips** storage provisioning (no hostPath PV)
+4. Runs `zarf init --confirm --set REGISTRY_PVC_ENABLED=false` (emptyDir registry)
+5. Deploys `zarf-package-cybersec-dask-*.tar.zst`
+6. Patches DaskCluster spill volume from hostPath to `emptyDir` (512Mi)
+7. Fixes any image tag mismatches (Zarf suffix drift)
+8. Verifies all pods are Running
+
+**Auto-detection**: Even without `--disk-light`, the script auto-enables it
+when `df /var/lib/rancher` shows <10% free or a `node.kubernetes.io/disk-pressure`
+taint is detected.
+
+### Step 2: Deploy the Kubernetes Dashboard
+
+```bash
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
+  zarf-package-cybersec-k8s-dashboard-amd64-2.7.0.tar.zst --confirm
+```
+
+### Step 3: Access Services
+
+```bash
+# Dashboard token (copy the output)
+zarf connect kubernetes-dashboard
+
+# Or access services directly via NodePort:
+```
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Dask Dashboard | `http://<node>:30087` | — |
+| Dask Scheduler | `tcp://<node>:30086` | — |
+| JupyterHub | `http://<node>:30080` | admin / changeme |
+| K8s Dashboard | `https://<node>:30443` | token from `zarf connect` |
+
+### What Disk-Light Changes
+
+| Aspect | Normal Mode | Disk-Light Mode |
+|--------|-------------|-----------------|
+| Zarf registry | 20 Gi hostPath PV | `emptyDir` (no PV) |
+| Dask spill volume | hostPath to `DASK_SPILL_DIR` | `emptyDir` (512Mi) |
+| JupyterHub pkg volume | `emptyDir` (unbounded) | `emptyDir` (256Mi) |
+| Worker replicas | configurable | defaults to 4 |
+| Storage provisioning | `setup_storage()` creates PV | skipped |
+
+> **Trade-off**: The emptyDir registry is ephemeral — data is lost on pod
+> restart. This is acceptable because `zarf package deploy` re-pushes all
+> images automatically. For production with ample disk, use the full-storage
+> deployment below.
+
+### Manual Disk-Light Deploy (Without the Script)
+
+If you prefer to run the steps yourself:
+
+```bash
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+
+# 1. Init Zarf without registry PVC
+sudo zarf init --confirm --set REGISTRY_PVC_ENABLED=false
+
+# 2. Deploy the Dask stack
+sudo zarf package deploy \
+  zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
+  --set DASK_WORKER_REPLICAS=4
+
+# 3. Patch spill volume to emptyDir
+sudo kubectl patch daskcluster cybersec-dask -n dask --type=json -p \
+  '[{"op":"replace","path":"/spec/worker/spec/volumes/0","value":{"name":"dask-spill","emptyDir":{"sizeLimit":"512Mi"}}}]'
+sudo kubectl delete pods -n dask -l dask.org/component=worker
+
+# 4. Deploy K8s Dashboard
+sudo zarf package deploy \
+  zarf-package-cybersec-k8s-dashboard-amd64-2.7.0.tar.zst --confirm
+
+# 5. Verify
+sudo kubectl get pods -A
+```
+
+---
+
+## Deploy: Full Storage (Ample Disk)
+
+For nodes with sufficient disk (100+ GB free), use the traditional PV-backed approach:
 
 ```bash
 export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
@@ -111,52 +255,21 @@ spec:
     name: zarf-docker-registry
 EOF
 
-# 2. Initialize Zarf (init package must be in current directory)
-sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf init --confirm
+# 2. Initialize Zarf
+sudo zarf init --confirm
 
-# 3. Deploy
-sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
+# 3. Deploy Dask stack
+sudo zarf package deploy \
   zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
   --set DASK_SPILL_DIR=/mnt/nfs/dask-spill   # or /tmp/dask-spill
+
+# 4. Deploy K8s Dashboard
+sudo zarf package deploy \
+  zarf-package-cybersec-k8s-dashboard-amd64-2.7.0.tar.zst --confirm
+
+# 5. Access dashboard
+zarf connect kubernetes-dashboard
 ```
-
----
-
-## Disk-Constrained Deployment
-
-For nodes with limited local disk (<10% free), use disk-light mode:
-
-```bash
-sudo ./scripts/verify-zarf-deployment.sh --skip-build --disk-light
-```
-
-This mode:
-- Skips `setup_storage()` (no hostPath PV creation)
-- Passes `--set REGISTRY_PVC_ENABLED=false` to `zarf init` (emptyDir registry)
-- Post-deploy patches the Dask spill volume from hostPath to `emptyDir` (512Mi)
-- Defaults `DASK_WORKER_REPLICAS=4`
-
-Or manually:
-
-```bash
-# Init without registry PVC
-sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
-  zarf init --confirm --set REGISTRY_PVC_ENABLED=false
-
-# Deploy
-sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
-  zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
-  --set DASK_WORKER_REPLICAS=4
-
-# Patch spill volume to emptyDir
-sudo kubectl patch daskcluster cybersec-dask -n dask --type=json -p \
-  '[{"op":"replace","path":"/spec/worker/spec/volumes/0","value":{"name":"dask-spill","emptyDir":{"sizeLimit":"512Mi"}}}]'
-sudo kubectl delete pods -n dask -l dask.org/component=worker
-```
-
-**Auto-detection**: The script automatically enables disk-light mode when
-`df /var/lib/rancher` shows <10% free or a `node.kubernetes.io/disk-pressure`
-taint is detected.
 
 ---
 
@@ -225,12 +338,14 @@ sudo systemctl enable --now rke2-server
 sudo kubectl get pods -A
 
 # Expected:
-#   dask-operator/  dask-kubernetes-operator-*       1/1  Running
-#   dask/           cybersec-dask-scheduler-*         1/1  Running
-#   dask/           cybersec-dask-default-worker-*    1/1  Running  (×N)
-#   jupyterhub/     hub-*                             1/1  Running
-#   jupyterhub/     proxy-*                           1/1  Running
-#   panel-viz/      panel-viz-*                       1/1  Running
+#   zarf/                   zarf-docker-registry-*           1/1  Running
+#   dask-operator/          dask-kubernetes-operator-*       1/1  Running
+#   dask/                   cybersec-dask-scheduler-*        1/1  Running
+#   dask/                   cybersec-dask-default-worker-*   1/1  Running  (×N)
+#   jupyterhub/             hub-*                            1/1  Running
+#   jupyterhub/             proxy-*                          1/1  Running
+#   panel-viz/              panel-viz-*                      1/1  Running
+#   kubernetes-dashboard/   kubernetes-dashboard-*           1/1  Running
 
 # Dask cluster health
 sudo kubectl get daskcluster -n dask
@@ -238,8 +353,11 @@ sudo kubectl get daskcluster -n dask
 # Scheduler HTTP health (should return 200)
 curl -sf http://127.0.0.1:30087/health && echo OK
 
-# Or use the included script
+# Re-run the verify step only (skips init and build)
 sudo ./scripts/verify-zarf-deployment.sh --skip-init --skip-build
+
+# Dashboard access token
+zarf connect kubernetes-dashboard
 ```
 
 ### Access Services
@@ -249,6 +367,8 @@ sudo ./scripts/verify-zarf-deployment.sh --skip-init --skip-build
 | Dask Dashboard | `http://<node>:30087` | — |
 | Dask Scheduler | `tcp://<node>:30086` | — |
 | JupyterHub | `http://<node>:30080` | admin / changeme |
+| K8s Dashboard | `https://<node>:30443` | token from `zarf connect` |
+| Panel-Viz | `http://<node>:30506` | — |
 | Sample Notebooks | `/app/sample-notebooks/` | (inside JupyterLab) |
 
 ---
@@ -469,12 +589,30 @@ sudo setenforce 0
 df -h /var/lib/rancher   # need ≥20 GB free
 ```
 
-### Disk pressure taint
+### Disk pressure taint (pods won't schedule)
+
+The kubelet applies `node.kubernetes.io/disk-pressure:NoSchedule` when
+`nodefs.available` drops below the eviction threshold (default 15%).
+This blocks ALL new pods, including Zarf's.
+
+**Immediate fix** — remove the taint:
 
 ```bash
 sudo kubectl taint nodes --all node.kubernetes.io/disk-pressure-
-sudo systemctl restart rke2-server
 ```
+
+**Permanent fix** — lower the eviction thresholds in `/etc/rancher/rke2/config.yaml`:
+
+```yaml
+kubelet-arg:
+  - "eviction-hard=nodefs.available<5%,imagefs.available<5%,memory.available<100Mi"
+  - "eviction-soft=nodefs.available<8%,imagefs.available<8%,memory.available<200Mi"
+  - "eviction-soft-grace-period=nodefs.available=2m,imagefs.available=2m,memory.available=1m"
+```
+
+Then restart: `sudo systemctl restart rke2-server`
+
+See **Deploy: Disk-Light > Step 0** for full details.
 
 ---
 
@@ -520,9 +658,14 @@ zarf/
 ├── notebooks/
 │   ├── OTEL_Data_Generator.ipynb       # Vectorized synthetic OTEL span generator
 │   └── Dask_S3_Validation.ipynb        # Out-of-core Dask stress test (30 GB)
+├── kubernetes-dashboard/
+│   ├── zarf.yaml                       # K8s Dashboard package (v2.7.0)
+│   └── manifests/dashboard.yaml        # Dashboard + metrics-scraper + RBAC
 └── scripts/
     ├── embed-notebooks.py              # Strips outputs, embeds in ConfigMap YAML
-    └── verify-zarf-deployment.sh       # Post-deploy validation
+    ├── verify-zarf-deployment.sh       # Full deploy + verify (--skip-build --disk-light)
+    ├── validate-deployment.sh          # Lightweight post-deploy checks
+    └── install-rke2-secondary.sh       # Isolated secondary RKE2 instance
 ```
 
 ## Tested Versions
