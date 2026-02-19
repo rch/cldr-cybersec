@@ -1,0 +1,189 @@
+syntax = "proto3";
+
+package cybersec.engine;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+// ─── Service ────────────────────────────────────────────────────────────────
+
+service NavigatorEngine {
+  // Execute a command — server-streaming response carrying EngineEvents.
+  rpc Execute(CommandRequest) returns (stream EngineEvent);
+
+  // Cancel an in-flight Execute stream.
+  rpc Cancel(CancelRequest) returns (google.protobuf.Empty);
+
+  // Get engine status (Dask cluster health, loaded datasets, etc.)
+  rpc Status(StatusRequest) returns (StatusResponse);
+
+  // Subscribe to engine-initiated events (dataset changes, Dask alerts).
+  // Long-lived server stream — one per PTY proxy session.
+  rpc Subscribe(SubscribeRequest) returns (stream EngineEvent);
+}
+
+// ─── Command Grammar ────────────────────────────────────────────────────────
+
+message CommandRequest {
+  string session_id = 1;        // PTY proxy session ID (one per user)
+  string command_id = 2;        // Unique per command, for cancellation
+  string text = 3;              // Raw command text from the REPL
+
+  // Structured command — set when PTY proxy parses the text before dispatch.
+  // The engine accepts EITHER text (for NL) or a structured command.
+  oneof structured {
+    QueryCommand query = 10;
+    LoadDatasetCommand load_dataset = 11;
+    SetParamCommand set_param = 12;
+    ExportCommand export = 13;
+  }
+}
+
+message QueryCommand {
+  string expression = 1;        // Filter expression or natural language
+  string time_range = 2;        // "last_1h", "last_24h", "all", or ISO range
+  int32 limit = 3;              // Max rows to return (0 = use default)
+}
+
+message LoadDatasetCommand {
+  string dataset_name = 1;      // e.g. "otel-minimal", "otel-1t"
+  string data_path = 2;         // Override S3 path (optional)
+}
+
+message SetParamCommand {
+  string param_name = 1;        // Panel param: cmap, spread_enabled, time_preset
+  string value = 2;             // String value — engine parses to correct type
+}
+
+message ExportCommand {
+  string format = 1;            // "csv", "parquet", "json"
+  string destination = 2;       // S3 path or empty for inline
+  string expression = 3;        // Optional filter before export
+}
+
+message CancelRequest {
+  string session_id = 1;
+  string command_id = 2;
+}
+
+// ─── Engine Events ──────────────────────────────────────────────────────────
+//
+// Wire Event Envelope — single oneof carries all event types on a single
+// stream, modeled after cdp_agent.proto AgentEvent pattern.
+
+message EngineEvent {
+  string event_id = 1;
+  string command_id = 2;        // Correlates to CommandRequest.command_id
+  int64 timestamp_ms = 3;
+
+  oneof event {
+    // Terminal output events (rendered in ghostty-web)
+    TextOutput text_output = 10;
+    ProgressUpdate progress = 11;
+    ErrorOutput error = 12;
+
+    // Visualization update events (applied to Panel params)
+    ParamUpdate param_update = 20;
+    DataReady data_ready = 21;
+    RenderHint render_hint = 22;
+
+    // Engine lifecycle events
+    CommandComplete command_complete = 30;
+    StatusSnapshot status_snapshot = 31;
+
+    // Data result events
+    DataResult data_result = 40;
+  }
+}
+
+// ─── Terminal Output ────────────────────────────────────────────────────────
+
+message TextOutput {
+  string text = 1;
+  string style = 2;             // "info", "success", "warning", "error", "dim"
+}
+
+message ProgressUpdate {
+  string message = 1;
+  float fraction = 2;           // 0.0..1.0, -1 for indeterminate
+  int64 eta_seconds = 3;        // Estimated time remaining, 0 if unknown
+}
+
+message ErrorOutput {
+  string message = 1;
+  string code = 2;              // e.g. "DASK_TIMEOUT", "S3_ACCESS_DENIED"
+  string suggestion = 3;        // Remediation hint
+}
+
+// ─── Visualization Updates ──────────────────────────────────────────────────
+
+// Drive a Panel param change from engine → UI.
+// This is the key message for the round-trip: engine emits it → PTY proxy
+// relays → Panel applies via pn.state.execute() → @param.depends re-renders.
+message ParamUpdate {
+  string param_name = 1;        // "cmap", "time_preset", "spread_enabled"
+  string value = 2;             // Serialized value
+  string source = 3;            // "engine" or "user" (prevents echo loops)
+}
+
+// Signal that new Dask DataFrame is ready for rendering.
+message DataReady {
+  string dataset_name = 1;
+  int32 partitions = 2;
+  int64 total_rows_estimate = 3;
+  string data_path = 4;
+}
+
+// Hint to the UI about how to re-render.
+message RenderHint {
+  string action = 1;            // "refresh", "zoom_to", "reset"
+  double x_min = 2;
+  double x_max = 3;
+  double y_min = 4;
+  double y_max = 5;
+}
+
+// ─── Lifecycle ──────────────────────────────────────────────────────────────
+
+message CommandComplete {
+  string status = 1;            // "ok", "error", "cancelled"
+  int64 duration_ms = 2;
+  string summary = 3;           // One-line summary for terminal prompt
+}
+
+message StatusSnapshot {
+  int32 workers = 1;
+  int32 processing = 2;
+  bool dask_connected = 3;
+  string current_dataset = 4;
+  string dataset_phase = 5;
+  int32 partitions = 6;
+  map<string, string> extra = 7;
+}
+
+// ─── Data Results ───────────────────────────────────────────────────────────
+
+message DataResult {
+  string format = 1;            // "table", "json", "csv_url"
+  bytes payload = 2;            // Inline data (for small results)
+  string url = 3;               // S3 URL (for large exports)
+  int64 row_count = 4;
+}
+
+// ─── Status RPC ─────────────────────────────────────────────────────────────
+
+message StatusRequest {}
+
+message StatusResponse {
+  StatusSnapshot snapshot = 1;
+  google.protobuf.Timestamp server_time = 2;
+  string engine_version = 3;
+}
+
+// ─── Subscribe RPC ──────────────────────────────────────────────────────────
+
+message SubscribeRequest {
+  string session_id = 1;
+  bool replay_history = 2;      // If true, replay recent events before live stream
+  int32 replay_limit = 3;       // Max events to replay (default: 50)
+}

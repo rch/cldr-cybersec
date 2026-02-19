@@ -42,6 +42,13 @@ dev = [
     "pytest>=8.0.0",
     "black>=24.0.0",
     "ruff>=0.2.0",
+    "grpcio-tools>=1.60.0,<2.0.0",
+]
+
+# gRPC engine — install with: uv sync --extra engine
+engine = [
+    "grpcio>=1.60.0,<2.0.0",
+    "websockets>=12.0,<14.0",
 ]
 
 # K8s/Dask stack - install with: uv sync --extra k8s
