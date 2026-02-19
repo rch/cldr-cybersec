@@ -24,3 +24,45 @@
 - name: Display deploy result
   debug:
     msg: "{{ zarf_deploy_result.stdout_lines | default([]) }}"
+
+# --- Disk-light: patch spill volume to emptyDir ---
+- name: "Disk-light: patch Dask spill volume to emptyDir"
+  command: >
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }}
+    patch daskcluster cybersec-dask -n dask --type=json
+    -p '[{"op":"replace","path":"/spec/worker/spec/volumes/0","value":{"name":"dask-spill","emptyDir":{"sizeLimit":"512Mi"}}}]'
+  register: spill_patch
+  changed_when: "'patched' in spill_patch.stdout"
+  ignore_errors: true
+  when: zarf_disk_light | bool
+
+- name: "Disk-light: restart workers for volume change"
+  command: >
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }}
+    delete pods -n dask -l dask.org/component=worker
+  changed_when: true
+  when:
+    - zarf_disk_light | bool
+    - spill_patch is defined
+    - spill_patch.rc == 0
+
+# --- Deploy K8s Dashboard (if package was staged) ---
+- name: Check if dashboard package exists on remote
+  stat:
+    path: "{{ zarf_remote_dir }}/{{ zarf_dashboard_package }}"
+  register: dashboard_staged
+
+- name: Deploy K8s Dashboard package
+  command: >
+    {{ zarf_remote_dir }}/zarf package deploy
+    {{ zarf_remote_dir }}/{{ zarf_dashboard_package }}
+    --confirm
+  environment:
+    KUBECONFIG: "{{ zarf_kubeconfig }}"
+  register: dashboard_deploy_result
+  timeout: 300
+  when: dashboard_staged.stat.exists
+
+- name: Display dashboard deploy result
+  debug:
+    msg: "{{ dashboard_deploy_result.stdout_lines | default(['Dashboard package not staged — skipped']) }}"

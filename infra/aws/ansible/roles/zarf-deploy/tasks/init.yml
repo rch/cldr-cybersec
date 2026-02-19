@@ -28,7 +28,17 @@
   changed_when: false
   when: zarf_ns_check.rc != 0
 
-# --- Registry hostPath setup ---
+# --- Disk-light: remove DiskPressure taint if present ---
+- name: Remove DiskPressure taint if present
+  shell: |
+    {{ zarf_kubectl }} --kubeconfig {{ zarf_kubeconfig }} \
+      taint nodes --all node.kubernetes.io/disk-pressure- 2>/dev/null || true
+  changed_when: false
+  when:
+    - zarf_ns_check.rc != 0
+    - zarf_disk_light | bool
+
+# --- Storage setup (skipped in disk-light mode) ---
 # The registry container runs as UID 1000 with readOnlyRootFilesystem.
 # We pin the PV to control-plane-1 via nodeAffinity, so only that node
 # strictly needs the directory — but we create on all nodes as a safety net.
@@ -39,7 +49,9 @@
       get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].metadata.name}'
   register: cp_node_name
   changed_when: false
-  when: zarf_ns_check.rc != 0
+  when:
+    - zarf_ns_check.rc != 0
+    - not (zarf_disk_light | bool)
 
 - name: Create Zarf registry host directory
   file:
@@ -48,13 +60,17 @@
     owner: "1000"
     group: "2000"
     mode: "0777"
-  when: zarf_ns_check.rc != 0
+  when:
+    - zarf_ns_check.rc != 0
+    - not (zarf_disk_light | bool)
 
 - name: Set SELinux context for registry directory
   command: chcon -R -t container_file_t {{ zarf_registry_path }}
   changed_when: false
   failed_when: false
-  when: zarf_ns_check.rc != 0
+  when:
+    - zarf_ns_check.rc != 0
+    - not (zarf_disk_light | bool)
 
 - name: Create Zarf gitea host directory
   file:
@@ -63,15 +79,19 @@
     owner: "1000"
     group: "1000"
     mode: "0777"
-  when: zarf_ns_check.rc != 0
+  when:
+    - zarf_ns_check.rc != 0
+    - not (zarf_disk_light | bool)
 
 - name: Set SELinux context for gitea directory
   command: chcon -R -t container_file_t {{ zarf_gitea_path }}
   changed_when: false
   failed_when: false
-  when: zarf_ns_check.rc != 0
+  when:
+    - zarf_ns_check.rc != 0
+    - not (zarf_disk_light | bool)
 
-# --- PersistentVolumes with nodeAffinity ---
+# --- PersistentVolumes with nodeAffinity (skipped in disk-light mode) ---
 # Pin both PVs to control-plane-1 so hostPath dirs are guaranteed to exist.
 
 - name: Create Zarf registry PersistentVolume
@@ -103,7 +123,9 @@
     EOF
   register: pv_result
   changed_when: "'created' in pv_result.stdout or 'configured' in pv_result.stdout"
-  when: zarf_ns_check.rc != 0
+  when:
+    - zarf_ns_check.rc != 0
+    - not (zarf_disk_light | bool)
 
 - name: Create Zarf gitea PersistentVolume
   shell: |
@@ -134,7 +156,9 @@
     EOF
   register: gitea_pv_result
   changed_when: "'created' in gitea_pv_result.stdout or 'configured' in gitea_pv_result.stdout"
-  when: zarf_ns_check.rc != 0
+  when:
+    - zarf_ns_check.rc != 0
+    - not (zarf_disk_light | bool)
 
 - name: Create JupyterHub host directory
   file:
@@ -143,13 +167,17 @@
     owner: "1000"
     group: "1000"
     mode: "0777"
-  when: zarf_ns_check.rc != 0
+  when:
+    - zarf_ns_check.rc != 0
+    - not (zarf_disk_light | bool)
 
 - name: Set SELinux context for JupyterHub directory
   command: chcon -R -t container_file_t {{ zarf_jupyterhub_db_path }}
   changed_when: false
   failed_when: false
-  when: zarf_ns_check.rc != 0
+  when:
+    - zarf_ns_check.rc != 0
+    - not (zarf_disk_light | bool)
 
 - name: Create JupyterHub hub-db PersistentVolume
   shell: |
@@ -180,12 +208,25 @@
     EOF
   register: jhub_pv_result
   changed_when: "'created' in jhub_pv_result.stdout or 'configured' in jhub_pv_result.stdout"
-  when: zarf_ns_check.rc != 0
+  when:
+    - zarf_ns_check.rc != 0
+    - not (zarf_disk_light | bool)
+
+# --- Disk-light: log what's being skipped ---
+- name: "Disk-light: skipping PV creation (using emptyDir)"
+  debug:
+    msg: >-
+      Disk-light mode active — skipping hostPath PV creation for registry,
+      gitea, and JupyterHub. Zarf init will use REGISTRY_PVC_ENABLED=false.
+  when:
+    - zarf_ns_check.rc != 0
+    - zarf_disk_light | bool
 
 - name: Run Zarf init
   command: >
     {{ zarf_remote_dir }}/zarf init --confirm
     --components=git-server
+    {% if zarf_disk_light | bool %}--set REGISTRY_PVC_ENABLED=false{% endif %}
   args:
     chdir: "{{ zarf_remote_dir }}"
   environment:

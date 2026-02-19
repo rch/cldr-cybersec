@@ -89,30 +89,52 @@ Note: WARP posture rule is created automatically by Terraform for repeatability.
 
 ---
 
-## Quick Start
+## Deployment Paths
+
+Two deployment paths are available:
+
+| Path | Playbook | When to Use |
+|------|----------|-------------|
+| **Zarf Air-Gap** | `airgap-e2e.yml` | Production, air-gap, disk-constrained (recommended) |
+| **Helm Direct** | `site.yml` | Development, internet-connected nodes |
+
+The Zarf path bundles all images into `.tar.zst` packages and deploys them
+through Zarf's internal registry — no internet required on cluster nodes.
+
+---
+
+## Quick Start (Zarf Air-Gap)
 
 ```bash
-# 1. Set environment variables
-export AWS_PROFILE=default
-export NGROK_AUTH_TOKEN=<your-token>
-export NGROK_API_KEY=<your-api-key>
-export NGROK_ALLOWED_EMAIL=user@company.com
+# 1. Set secrets in .env (gitignored)
+echo 'CLOUDFLARE_API_TOKEN=...' >> .env
+echo 'CLOUDFLARE_ACCOUNT_ID=...' >> .env
+echo 'CLOUDFLARE_ZONE_ID=...' >> .env
 
-# 2. Provision infrastructure
+# 2. Set Cloudflare IDs for tofu (gitignored)
+cat > infra/aws/tofu/local.auto.tfvars <<'EOF'
+cloudflare_account_id = "your-account-id"
+cloudflare_zone_id    = "your-zone-id"
+EOF
+
+# 3. Provision infrastructure
 devenv tasks run aws:provision
 
-# 3. Generate Ansible inventory
+# 4. Generate Ansible inventory
 devenv tasks run aws:inventory
 
-# 4. Deploy full stack
-devenv tasks run aws:deploy
+# 5. Deploy via Zarf (air-gap E2E)
+cd infra/aws/ansible
+ansible-playbook playbooks/airgap-e2e.yml
 
-# 5. Verify deployment
-devenv tasks run aws:verify
+# 6. Deploy Cloudflare Tunnel for external access
+devenv tasks run aws:deploy:cloudflare
 ```
 
-Access:
-- **JupyterHub**: https://jupyter.your-ngrok-domain.ngrok-free.app (or custom domain)
+Access (requires WARP enrollment):
+- **JupyterHub**: https://jupyter.dev.aws.zndx.org
+- **Dask Dashboard**: https://dask.dev.aws.zndx.org
+- **K8s Dashboard**: https://k8s.dev.aws.zndx.org
 - **SSH**: `devenv tasks run aws:ssh`
 
 ---
@@ -127,12 +149,13 @@ devenv tasks run aws:provision
 
 This runs `tofu apply` to create:
 - VPC with public and private subnets
-- NAT Gateway for outbound traffic
+- NAT Gateway for outbound traffic (removed in `airgap_mode=true`)
 - Bastion host in public subnet
 - 3 control plane nodes (m6i.xlarge)
-- 3 worker nodes (m6i.2xlarge)
+- Worker nodes (r6i.xlarge, count configurable)
 - S3 bucket for data storage
-- VPC endpoints for air-gapped operation
+- VPC endpoints for air-gapped operation (S3, ECR, SSM)
+- Cloudflare Tunnel + Zero Trust Access resources
 
 Alternatively, run OpenTofu directly:
 
@@ -165,9 +188,48 @@ cd infra/aws/tofu
 tofu output -raw ansible_inventory > ../ansible/inventory/hosts
 ```
 
-### Phase 3: Deploy Applications
+### Phase 3: Deploy via Zarf (Air-Gap)
 
-Deploy the full stack:
+The `airgap-e2e.yml` playbook orchestrates the full pipeline:
+
+```bash
+cd infra/aws/ansible
+
+# Full E2E (verify air-gap → teardown → deploy → verify tunnel)
+ansible-playbook playbooks/airgap-e2e.yml
+
+# Deploy only (skip teardown and air-gap verification)
+ansible-playbook playbooks/airgap-e2e.yml --tags deploy
+
+# Verify existing deployment
+ansible-playbook playbooks/airgap-e2e.yml --tags verify
+
+# Override worker count
+ansible-playbook playbooks/airgap-e2e.yml -e zarf_dask_worker_replicas=8
+
+# Disk-light mode (skip PV creation, emptyDir registry + spill)
+ansible-playbook playbooks/airgap-e2e.yml -e zarf_disk_light=true
+```
+
+The playbook runs 5 phases:
+1. **Verify air-gap isolation** — confirms no internet egress, S3 via VPC endpoint
+2. **Teardown existing workloads** — clean slate for fresh deploy
+3. **Deploy via Zarf** — stage artifacts, create PVs, `zarf init`, `zarf package deploy`
+4. **Verify tunnel routing** — cloudflared on bastion, NodePort reachability
+5. **E2E report** — all pods, DaskCluster status, scheduler health
+
+**Artifacts required** (pre-built, transferred to control plane):
+- `zarf` binary (v0.66.0)
+- `zarf-init-amd64-v0.66.0.tar.zst`
+- `zarf-package-cybersec-dask-amd64-1.1.1.tar.zst`
+- `zarf-package-cybersec-k8s-dashboard-amd64-2.7.0.tar.zst`
+
+The `zarf-deploy` Ansible role handles staging, init (with PV creation and
+SELinux contexts), deploy (with S3 variables), K8s Dashboard, and verification.
+
+### Phase 3 (Alternative): Deploy via Helm (Direct)
+
+For internet-connected nodes or development:
 
 ```bash
 devenv tasks run aws:deploy
@@ -176,21 +238,25 @@ devenv tasks run aws:deploy
 Or deploy components individually:
 
 ```bash
-# RKE2 cluster (automatically included in aws:deploy)
 cd infra/aws/ansible
-ansible-playbook playbooks/site.yml
+ansible-playbook playbooks/site.yml      # Full stack (RKE2 + Dask + JupyterHub)
+ansible-playbook playbooks/dask-only.yml # Dask operator only
 
-# Dask only
 devenv tasks run aws:deploy:dask
-
-# ngrok operator
-devenv tasks run aws:deploy:ngrok
-
-# JupyterHub
 devenv tasks run aws:deploy:jupyterhub
+devenv tasks run aws:deploy:panel-viz
 ```
 
-### Phase 4: Verify Deployment
+### Phase 4: Configure External Access
+
+```bash
+devenv tasks run aws:deploy:cloudflare
+```
+
+This deploys cloudflared pods that connect the cluster to Cloudflare's edge
+network. Traffic flows: User (WARP) → Cloudflare Edge → Bastion cloudflared → NodePort.
+
+### Phase 5: Verify Deployment
 
 ```bash
 devenv tasks run aws:verify
@@ -198,10 +264,10 @@ devenv tasks run aws:verify
 
 Checks:
 - All nodes are Ready
-- Dask operator is running
-- Dask workers are healthy
-- JupyterHub is accessible
-- ngrok tunnel is established
+- Dask operator and DaskCluster running
+- Dask workers healthy
+- JupyterHub and Panel-Viz accessible
+- Cloudflare tunnel established
 
 ---
 
@@ -267,11 +333,22 @@ EOF
 
 | Task | Description |
 |------|-------------|
-| `aws:deploy` | Deploy full stack (RKE2 + Dask + JupyterHub + ngrok) |
-| `aws:deploy:dask` | Deploy Dask operator and cluster |
-| `aws:deploy:jupyterhub` | Deploy JupyterHub with S3 access |
-| `aws:deploy:ngrok` | Deploy ngrok operator for HTTPS ingress |
+| `aws:deploy` | Deploy full stack via Helm (RKE2 + Dask + JupyterHub) |
+| `aws:deploy:dask` | Deploy Dask operator and cluster (Helm) |
+| `aws:deploy:jupyterhub` | Deploy JupyterHub with S3 access (Helm) |
+| `aws:deploy:cloudflare` | Deploy Cloudflare Tunnel for external access |
+| `aws:deploy:panel-viz` | Deploy Panel visualization service |
+| `aws:deploy:ngrok` | Deploy ngrok operator (deprecated — use Cloudflare) |
 | `aws:apply` | Apply all Ansible configuration |
+
+### Zarf Air-Gap Deployment (Ansible)
+
+| Playbook | Description |
+|----------|-------------|
+| `airgap-e2e.yml` | Full pipeline: verify air-gap → teardown → Zarf deploy → verify |
+| `airgap-e2e.yml --tags deploy` | Zarf deploy only (skip teardown/verify) |
+| `airgap-e2e.yml -e zarf_disk_light=true` | Disk-light: skip PVs, emptyDir registry |
+| `airgap-e2e.yml -e zarf_dask_worker_replicas=8` | Override worker count |
 
 ### Operations Tasks
 
@@ -280,7 +357,6 @@ EOF
 | `aws:status` | Show infrastructure and service status |
 | `aws:verify` | Run post-deployment verification checks |
 | `aws:ssh` | SSH to bastion host |
-| `aws:logs:ngrok` | View ngrok operator logs |
 
 ### S3 Tasks
 
@@ -507,7 +583,9 @@ Ensure WARP client is:
 
 ---
 
-### Option 2: ngrok
+### Option 2: ngrok (Deprecated)
+
+> **Deprecated**: Use Cloudflare Tunnel instead. ngrok support will be removed in a future release.
 
 ngrok provides simpler setup with OAuth-based access control.
 
@@ -609,17 +687,28 @@ kubectl logs -n dask deployment/dask-operator
 kubectl describe pods -n dask -l dask.org/component=worker
 ```
 
-### ngrok tunnel not working
+### `zarf init` hangs at "performing Helm upgrade"
+
+The registry pod is stuck Pending. Common causes:
+
+| Symptom | Fix |
+|---------|-----|
+| Unbound PVC | Create hostPath PV with `claimRef` (see `init.yml`) or use `zarf_disk_light=true` |
+| DiskPressure taint | Remove taint: `kubectl taint nodes --all node.kubernetes.io/disk-pressure-` |
+| SELinux denial | Set context: `chcon -R -t container_file_t /var/lib/zarf-registry` |
+
+### ImagePullBackOff after Zarf deploy
+
+Zarf rewrites image tags with a suffix. If init and package were built at
+different times, suffixes diverge. See `verify-zarf-deployment.sh` step 8.5
+for the automated re-tag fix, or manually:
 
 ```bash
-# Check ngrok operator logs
-devenv tasks run aws:logs:ngrok
-
-# Verify ingress
-kubectl get ingress -n jupyterhub
-
-# Check NgrokTrafficPolicy
-kubectl get ngroktrafficpolicy -A
+# Check what's expected vs what's in the registry
+kubectl get events -n dask | grep "pulling image"
+REG_PASS=$(kubectl get secret -n zarf zarf-state -o jsonpath='{.data.state}' \
+  | base64 -d | jq -r '.registryInfo.pullPassword')
+curl -s -u "zarf-pull:$REG_PASS" http://127.0.0.1:31999/v2/_catalog
 ```
 
 ### VPC endpoint issues
@@ -666,21 +755,25 @@ aws/
 │   └── local.auto.tfvars        # Per-developer secrets (gitignored)
 └── ansible/
     ├── playbooks/
-    │   ├── site.yml             # Main playbook (RKE2 + Dask)
-    │   ├── dask-only.yml        # Dask operator only
-    │   ├── jupyterhub.yml       # JupyterHub deployment
+    │   ├── site.yml             # Helm-based deploy (RKE2 + Dask + JupyterHub)
+    │   ├── airgap-e2e.yml       # Zarf air-gap E2E (verify → teardown → deploy → verify)
+    │   ├── dask-only.yml        # Dask operator only (Helm)
+    │   ├── jupyterhub.yml       # JupyterHub deployment (Helm)
     │   └── cloudflare-tunnel.yml # cloudflared deployment
     ├── roles/
-    │   ├── rke2/                # RKE2 installation
-    │   ├── dask/                # Dask operator and cluster
-    │   │   └── files/
-    │   │       └── requirements-dask.txt
-    │   ├── jupyterhub/          # JupyterHub with Dask
-    │   │   ├── defaults/main.yml
-    │   │   ├── tasks/main.yml
-    │   │   └── templates/jupyterhub-values.yaml.j2
-    │   ├── ngrok/               # ngrok operator
-    │   └── cloudflare-tunnel/   # cloudflared connector
+    │   ├── rke2-server/         # RKE2 control plane installation
+    │   ├── rke2-agent/          # RKE2 worker node installation
+    │   ├── zarf-deploy/         # Zarf air-gap deployment
+    │   │   ├── defaults/main.yml   # Package versions, PV sizes, deploy vars
+    │   │   └── tasks/
+    │   │       ├── stage.yml       # Transfer artifacts to control plane
+    │   │       ├── init.yml        # PV setup, SELinux, zarf init
+    │   │       ├── deploy.yml      # zarf package deploy + K8s Dashboard
+    │   │       └── verify.yml      # Pod health + registry catalog
+    │   ├── dask/                # Dask operator (Helm)
+    │   ├── jupyterhub/          # JupyterHub (Helm)
+    │   ├── cloudflare-tunnel/   # cloudflared connector
+    │   └── ngrok/               # ngrok operator (deprecated)
     ├── inventory/
     │   └── hosts                # Generated from tofu output
     └── group_vars/

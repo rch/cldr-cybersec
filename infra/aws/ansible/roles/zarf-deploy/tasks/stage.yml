@@ -65,6 +65,26 @@
     dest: "{{ zarf_remote_dir }}/{{ zarf_app_package }}"
   when: not app_package_remote.stat.exists
 
+- name: Check if dashboard package exists locally
+  delegate_to: localhost
+  become: false
+  stat:
+    path: "{{ zarf_local_dir }}/kubernetes-dashboard/{{ zarf_dashboard_package }}"
+  register: dashboard_local_check
+
+- name: Check if dashboard package exists on remote
+  stat:
+    path: "{{ zarf_remote_dir }}/{{ zarf_dashboard_package }}"
+  register: dashboard_package_remote
+
+- name: Copy K8s Dashboard package to control plane
+  copy:
+    src: "{{ zarf_local_dir }}/kubernetes-dashboard/{{ zarf_dashboard_package }}"
+    dest: "{{ zarf_remote_dir }}/{{ zarf_dashboard_package }}"
+  when:
+    - dashboard_local_check.stat.exists
+    - not dashboard_package_remote.stat.exists
+
 - name: Verify all artifacts staged
   stat:
     path: "{{ zarf_remote_dir }}/{{ item }}"

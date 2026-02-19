@@ -16,8 +16,13 @@ zarf_kubectl: "/var/lib/rancher/rke2/bin/kubectl"
 # Package artifacts
 zarf_init_package: "zarf-init-amd64-{{ zarf_version }}.tar.zst"
 zarf_app_package: "zarf-package-cybersec-dask-amd64-1.1.1.tar.zst"
+zarf_dashboard_package: "zarf-package-cybersec-k8s-dashboard-amd64-2.7.0.tar.zst"
 
-# Registry PV
+# Disk-light mode: skip PV creation, use emptyDir for registry and spill
+# Enable for disk-constrained nodes or when StorageClass is unavailable
+zarf_disk_light: false
+
+# Registry PV (skipped when zarf_disk_light=true)
 zarf_registry_path: "/var/lib/zarf-registry"
 zarf_registry_size: "20Gi"
 
@@ -30,7 +35,7 @@ zarf_jupyterhub_db_path: "/var/lib/jupyterhub-db"
 zarf_jupyterhub_db_size: "1Gi"
 
 # Deploy variables (passed to zarf package deploy --set)
-zarf_dask_worker_replicas: "32"
+zarf_dask_worker_replicas: "4"
 zarf_dask_spill_dir: "/tmp/dask-spill"
 zarf_s3_endpoint: ""
 zarf_s3_bucket: ""
