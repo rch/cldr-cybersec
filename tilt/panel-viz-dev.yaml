@@ -1,0 +1,123 @@
+# Tilt overlay for otel-navigator Deployment
+# Derived from zarf/manifests/panel-viz.yaml with:
+#   - --autoreload added to Panel serve command
+#   - Image ref uses Tilt-managed tag via Zarf registry
+#   - imagePullPolicy: Always
+#   - Zarf template variables removed (uses existing ConfigMap/Secret)
+#
+# NOTE: Namespace, ConfigMap, Secret, and Service are NOT included here.
+# They persist from the original Zarf deployment with correct values.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-navigator
+  namespace: panel-viz
+  labels:
+    app: otel-navigator
+    app.kubernetes.io/name: otel-navigator
+    app.kubernetes.io/component: visualization
+    app.kubernetes.io/managed-by: tilt
+    app.kubernetes.io/part-of: cybersec
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-navigator
+  template:
+    metadata:
+      labels:
+        app: otel-navigator
+        app.kubernetes.io/name: otel-navigator
+    spec:
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    dask.org/component: worker
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: otel-navigator
+          image: 127.0.0.1:31999/cybersec-dask
+          imagePullPolicy: Always
+          command:
+            - panel
+            - serve
+            - /app/otel-navigator.py
+            - --port=5006
+            - --address=0.0.0.0
+            - --allow-websocket-origin=*
+            - --static-dirs
+            - ghostty=/app/static/ghostty
+            - --autoreload
+          ports:
+            - containerPort: 5006
+              name: http
+              protocol: TCP
+          env:
+            - name: DASK_SCHEDULER
+              value: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
+            - name: PTY_PROXY_WS
+              value: ""
+          envFrom:
+            - configMapRef:
+                name: otel-navigator-config
+            - secretRef:
+                name: otel-navigator-credentials
+          resources:
+            requests:
+              cpu: 500m
+              memory: 4Gi
+            limits:
+              cpu: 2
+              memory: 8Gi
+          readinessProbe:
+            tcpSocket:
+              port: 5006
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 5006
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
+        # PTY proxy sidecar: bridges terminal WebSocket to gRPC engine
+        - name: pty-proxy
+          image: 127.0.0.1:31999/cybersec-dask
+          imagePullPolicy: Always
+          command:
+            - python
+            - -m
+            - cybersec.pty_proxy.server
+            - --ws-port=8765
+            - --engine-host=navigator-engine.panel-viz.svc.cluster.local
+            - --engine-port=50051
+          ports:
+            - containerPort: 8765
+              name: ws
+              protocol: TCP
+          env:
+            - name: PYTHONPATH
+              value: /app
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            tcpSocket:
+              port: 8765
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8765
+            initialDelaySeconds: 10
+            periodSeconds: 30
