@@ -18,6 +18,7 @@ Environment variables:
 - AWS_SECRET_ACCESS_KEY: S3 secret key
 - AWS_REGION: AWS region (default: us-east-1)
 """
+import json
 import logging
 import os
 import threading
@@ -37,7 +38,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 
 hv.extension('bokeh')
-pn.extension(loading_spinner='dots', loading_color='#0072B5')
+pn.extension(loading_spinner='dots', loading_color='#0072B5',
+             js_files={'ghostty-loader': '/ghostty/loader.js'})
 
 # -------------------------------------------------------------------------
 # Configuration
@@ -56,6 +58,10 @@ AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 CANVAS_WIDTH = 800
 CANVAS_HEIGHT = 500
 MIN_MAIN_HEIGHT = 600
+
+# Terminal / PTY proxy
+TERMINAL_WS_URL = os.environ.get('PTY_PROXY_WS', '')
+TERMINAL_HEIGHT = 280
 
 # -------------------------------------------------------------------------
 # Dask Client (lazy singleton)
@@ -276,6 +282,187 @@ def load_span_data(start_time: datetime, end_time: datetime, data_path: str = No
 
 
 # -------------------------------------------------------------------------
+# Terminal Pane (ghostty-web — PTY proxy WebSocket bridge to gRPC engine)
+# -------------------------------------------------------------------------
+
+class GhosttyTerminal(pn.reactive.ReactiveHTML):
+    """Embedded terminal connecting to NavigatorEngine via PTY proxy WebSocket.
+
+    Architecture: ghostty-web (browser WASM) → WebSocket → PTY proxy (restricted REPL)
+                  → gRPC → NavigatorEngine.
+    The engine emits ParamUpdate events that flow back through this bridge
+    to drive Panel param changes (cmap, time_preset, spread_enabled, etc).
+    """
+
+    ws_url = param.String(default=TERMINAL_WS_URL)
+    engine_update = param.String(default='')
+
+    _template = """\
+<div id="terminal_wrapper" style="width:100%;height:100%;min-height:200px;border-radius:6px;border:1px solid #30363d;background:#0d1117;display:flex;flex-direction:column;position:relative;">
+  <div style="flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:#161b22;border-bottom:1px solid #30363d;">
+    <span style="color:#c9d1d9;font-size:12px;font-weight:600;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">Navigator Engine</span>
+    <span id="ws_status" style="font-size:11px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:#8b949e;">...</span>
+  </div>
+  <div id="terminal_container" style="position:absolute;top:30px;left:0;right:0;bottom:0;overflow:hidden;"></div>
+</div>"""
+
+    __javascript__ = []
+    __css__ = []
+
+    _scripts = {
+        'render': """
+            function initTerminal() {
+                var wsUrl = data.ws_url;
+                if (!wsUrl) {
+                    var pagePort = parseInt(window.location.port) || 80;
+                    var wsPort = (pagePort === 5006) ? 8765 : 30765;
+                    wsUrl = 'ws://' + window.location.hostname + ':' + wsPort;
+                }
+
+                function setStatus(text, color) {
+                    ws_status.textContent = text;
+                    ws_status.style.color = color;
+                }
+
+                function onGhosttyReady() {
+                    if (window.__ghosttyError) {
+                        fetch('/ghostty/ghostty-web.js').then(function(r) {
+                            terminal_container.innerHTML = '<div style="padding:20px;color:#ff7b72;font-family:sans-serif;">' +
+                                'ghostty-web init failed: ' + window.__ghosttyError.message +
+                                '<br><small>/ghostty/ghostty-web.js returned HTTP ' + r.status +
+                                ' (' + r.headers.get('content-type') + ')</small></div>';
+                        }).catch(function() {
+                            terminal_container.innerHTML = '<div style="padding:20px;color:#ff7b72;font-family:sans-serif;">' +
+                                'ghostty-web init failed: ' + window.__ghosttyError.message + '</div>';
+                        });
+                        return;
+                    }
+
+                    var g = window.__ghostty;
+                    var term = new g.Terminal({
+                        ghostty: g.instance,
+                        cursorBlink: true,
+                        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                        fontSize: 13,
+                        theme: {
+                            background: '#0d1117',
+                            foreground: '#c9d1d9',
+                            cursor: '#58a6ff',
+                            selectionBackground: 'rgba(56,139,253,0.4)',
+                        },
+                        scrollback: 5000,
+                    });
+
+                    var fitAddon = new g.FitAddon();
+                    term.loadAddon(fitAddon);
+
+                    state._term = term;
+                    term.open(terminal_container);
+                    fitAddon.fit();
+
+                    var ws = null;
+                    var reconnectDelay = 1000;
+
+                    function connect() {
+                        try {
+                            ws = new WebSocket(wsUrl);
+                        } catch (e) {
+                            setStatus('error', '#ff7b72');
+                            setTimeout(connect, Math.min(reconnectDelay *= 2, 30000));
+                            return;
+                        }
+                        state._ws = ws;
+
+                        ws.onopen = function() {
+                            setStatus('connected ' + term.cols + 'x' + term.rows, '#3fb950');
+                            reconnectDelay = 1000;
+                        };
+
+                        ws.onmessage = function(evt) {
+                            try {
+                                var msg = JSON.parse(evt.data);
+                                if (msg.type === 'text') {
+                                    term.write(msg.data);
+                                } else if (msg.type === 'param_update') {
+                                    data.engine_update = JSON.stringify({
+                                        param: msg.param, value: msg.value,
+                                        source: msg.source, ts: Date.now(),
+                                    });
+                                }
+                            } catch (e) {
+                                term.write(String(evt.data));
+                            }
+                        };
+
+                        ws.onclose = function() {
+                            setStatus('reconnecting...', '#d29922');
+                            setTimeout(function() {
+                                if (term.reset) term.reset();
+                                reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+                                connect();
+                            }, reconnectDelay);
+                        };
+
+                        ws.onerror = function() {};
+                    }
+
+                    term.onData(function(input) {
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({type: 'input', data: input}));
+                        }
+                    });
+
+                    // Auto-fit on container resize (Panel layout settling, window resize)
+                    if (typeof ResizeObserver !== 'undefined') {
+                        var resizeTimer = null;
+                        var ro = new ResizeObserver(function() {
+                            clearTimeout(resizeTimer);
+                            resizeTimer = setTimeout(function() { fitAddon.fit(); }, 50);
+                        });
+                        ro.observe(terminal_container);
+                        state._resizeObserver = ro;
+                    }
+
+                    setStatus('connecting...', '#d29922');
+                    connect();
+                }
+
+                // loader.js (via __javascript__) may have already completed,
+                // or it may still be running. Handle both cases.
+                if (window.__ghostty || window.__ghosttyError) {
+                    onGhosttyReady();
+                } else {
+                    setStatus('loading terminal...', '#8b949e');
+                    var timeout = setTimeout(function() {
+                        fetch('/ghostty/ghostty-web.js').then(function(r) {
+                            terminal_container.innerHTML = '<div style="padding:20px;color:#ff7b72;font-family:sans-serif;">' +
+                                'ghostty-web init timeout (10s).' +
+                                '<br><small>/ghostty/ghostty-web.js returned HTTP ' + r.status +
+                                ' (' + r.headers.get('content-type') + ')</small>' +
+                                '<br><small>Check browser console for module errors.</small></div>';
+                        }).catch(function() {
+                            terminal_container.innerHTML = '<div style="padding:20px;color:#ff7b72;font-family:sans-serif;">' +
+                                'ghostty-web assets not found. Image may need rebuild.</div>';
+                        });
+                    }, 10000);
+                    window.addEventListener('ghostty-ready', function() {
+                        clearTimeout(timeout);
+                        onGhosttyReady();
+                    }, { once: true });
+                }
+            }
+
+            initTerminal();
+        """,
+        'remove': r"""
+            if (state._resizeObserver) { try { state._resizeObserver.disconnect(); } catch(e) {} }
+            if (state._ws) { try { state._ws.close(); } catch(e) {} }
+            if (state._term) { try { state._term.dispose(); } catch(e) {} }
+        """,
+    }
+
+
+# -------------------------------------------------------------------------
 # Main App
 # -------------------------------------------------------------------------
 
@@ -314,6 +501,50 @@ class SpanExplorer(param.Parameterized):
         self.current_dataset = ds_info['dataset']
         self.dataset_phase = ds_info['phase']
         self._current_data_path = ds_info['path']
+
+        # Terminal pane (WebSocket → PTY proxy → gRPC engine)
+        self._terminal_pane = GhosttyTerminal(
+            ws_url=TERMINAL_WS_URL,
+            sizing_mode='stretch_both',
+            min_height=250,
+        )
+        self._terminal_pane.param.watch(self._on_engine_update, ['engine_update'])
+
+    def _on_engine_update(self, event):
+        """Apply param changes from engine (via terminal WebSocket bridge).
+
+        Uses pn.state.execute() to schedule on the Bokeh event loop,
+        matching the _set_params() pattern in load_data().
+        """
+        if not event.new:
+            return
+        try:
+            update = json.loads(event.new)
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        param_name = update.get('param', '')
+        value = update.get('value', '')
+        source = update.get('source', '')
+
+        if source == 'user':
+            return  # Don't echo user-initiated widget changes
+
+        if not param_name or param_name not in self.param:
+            return
+
+        # Type coercion
+        p = self.param[param_name]
+        if isinstance(p, param.Boolean):
+            value = str(value).lower() in ('true', '1', 'yes')
+
+        def _apply():
+            setattr(self, param_name, value)
+
+        try:
+            pn.state.execute(_apply)
+        except Exception:
+            setattr(self, param_name, value)
 
     def _get_time_range(self):
         if self.time_preset == 'All Data':
@@ -564,13 +795,13 @@ class SpanExplorer(param.Parameterized):
         )
 
     def main_view(self):
-        """Main content with fixed-height heatmap."""
+        """Main content: heatmap + engine terminal."""
         return pn.Column(
             self.heatmap_view,
-            sizing_mode='stretch_width',
-            min_height=MIN_MAIN_HEIGHT,
+            pn.layout.Divider(),
+            self._terminal_pane,
+            sizing_mode='stretch_both',
             styles={
-                'min-height': f'{MIN_MAIN_HEIGHT}px',
                 'overflow': 'visible',
             },
         )
@@ -586,6 +817,17 @@ class SpanExplorer(param.Parameterized):
         }
         .pn-loading {
             min-height: 500px !important;
+        }
+        #terminal_wrapper {
+            overflow: hidden !important;
+        }
+        /* Let terminal wrapper fill its container without clipping */
+        .pn-wrapper, fast-card.pn-wrapper {
+            overflow: visible !important;
+        }
+        /* ghostty-web: let the WASM terminal control its own sizing */
+        #terminal_container canvas {
+            display: block;
         }
         """
         pn.config.raw_css.append(raw_css)

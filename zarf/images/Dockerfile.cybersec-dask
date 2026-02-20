@@ -3,18 +3,28 @@
 # This image includes:
 # - All Python dependencies pre-installed (no runtime pip install)
 # - OTEL Navigator application embedded
+# - NavigatorEngine gRPC server + PTY proxy (M2)
+# - ghostty-web WASM terminal for air-gap environments
 # - Numba JIT cache pre-compiled for fast startup
 #
-# Build:
-#   podman build -t cybersec-dask:2025.2.0 -f Dockerfile.cybersec-dask .
-#   docker build -t cybersec-dask:2025.2.0 -f Dockerfile.cybersec-dask .
+# Build (from project root):
+#   podman build -t cybersec-dask:2025.2.0 -f zarf/images/Dockerfile.cybersec-dask .
+#   docker build -t cybersec-dask:2025.2.0 -f zarf/images/Dockerfile.cybersec-dask .
 #
 # Usage as Dask worker:
 #   docker run cybersec-dask:2025.2.0 dask-worker tcp://scheduler:8786
 #
 # Usage as OTEL Navigator:
 #   docker run -e DASK_SCHEDULER=tcp://scheduler:8786 -p 5006:5006 \
-#     cybersec-dask:2025.2.0 panel serve /app/otel-navigator.py --port 5006
+#     cybersec-dask:2025.2.0 panel serve /app/otel-navigator.py --port 5006 --static-dirs ghostty=/app/static/ghostty
+#
+# Usage as NavigatorEngine (gRPC):
+#   docker run -e DASK_SCHEDULER=tcp://scheduler:8786 -p 50051:50051 \
+#     cybersec-dask:2025.2.0 python -m cybersec.engine.server --port=50051
+#
+# Usage as PTY proxy (WebSocket sidecar):
+#   docker run -p 8765:8765 cybersec-dask:2025.2.0 \
+#     python -m cybersec.pty_proxy.server --ws-port=8765 --engine-host=engine --engine-port=50051
 
 ARG BASE_IMAGE=ghcr.io/dask/dask:2025.2.0
 FROM ${BASE_IMAGE}
@@ -27,7 +37,7 @@ LABEL org.opencontainers.image.source="https://github.com/cloudera/cybersec"
 
 # Install Python dependencies
 # Using --no-cache-dir to minimize image size
-COPY requirements-airgap.txt /tmp/requirements-airgap.txt
+COPY zarf/images/requirements-airgap.txt /tmp/requirements-airgap.txt
 
 RUN pip install --no-cache-dir -r /tmp/requirements-airgap.txt && \
     rm /tmp/requirements-airgap.txt
@@ -37,19 +47,63 @@ RUN pip install --no-cache-dir -r /tmp/requirements-airgap.txt && \
 RUN python -c "import numba; numba.jit(nopython=True)(lambda x: x + 1)(1)" 2>/dev/null || true
 
 # Pre-import heavy libraries to verify installation and cache bytecode
-RUN python -c "import pandas; import numpy; import pyarrow; import holoviews; import datashader; import bokeh; import panel; import s3fs; import distributed; import colorcet; print('All dependencies imported successfully')"
+RUN python -c "import pandas; import numpy; import pyarrow; import holoviews; import datashader; import bokeh; import panel; import s3fs; import distributed; import colorcet; import grpc; import websockets; print('All dependencies imported successfully')"
 
 # Create app directory
-RUN mkdir -p /app
+RUN mkdir -p /app /app/static/ghostty
 
 # Copy OTEL Navigator application
-COPY otel-navigator.py /app/otel-navigator.py
+COPY zarf/images/otel-navigator.py /app/otel-navigator.py
 
 # Copy sample notebooks for JupyterHub users
-COPY sample-notebooks/ /app/sample-notebooks/
+COPY zarf/images/sample-notebooks/ /app/sample-notebooks/
+
+# Copy NavigatorEngine + PTY proxy packages (M2)
+COPY cybersec/__init__.py /app/cybersec/__init__.py
+COPY cybersec/engine/ /app/cybersec/engine/
+COPY cybersec/pty_proxy/ /app/cybersec/pty_proxy/
+
+# Download ghostty-web for air-gap terminal (baked into image)
+# Extracts all dist/ files: ghostty-web.js, ghostty-vt.wasm, and Vite shims
+ARG GHOSTTY_WEB_VERSION=0.4.0
+RUN mkdir -p /app/static/ghostty && \
+    python -c "import urllib.request, tarfile, io, glob, shutil, os; \
+    print(f'Downloading ghostty-web v${GHOSTTY_WEB_VERSION}...'); \
+    req = urllib.request.urlopen(f'https://registry.npmjs.org/ghostty-web/-/ghostty-web-${GHOSTTY_WEB_VERSION}.tgz'); \
+    tar = tarfile.open(fileobj=io.BytesIO(req.read()), mode='r:gz'); \
+    members = [m for m in tar.getmembers() if m.name.startswith('package/dist/') and not m.isdir()]; \
+    tar.extractall('/tmp/', members=members); \
+    [shutil.move(f, '/app/static/ghostty/' + os.path.basename(f)) for f in glob.glob('/tmp/package/dist/*')]; \
+    print('ghostty-web extracted:', os.listdir('/app/static/ghostty/'))"
+
+# Create loader.js shim: bridges ES module to Panel's script-tag context
+# Panel's __javascript__ loads this as a regular <script>. It injects a
+# <script type="module"> that properly imports the ES module, loads WASM,
+# and exposes everything on window.__ghostty for the render script.
+RUN cat > /app/static/ghostty/loader.js << 'LOADEREOF'
+(function() {
+    if (window.__ghostty || window.__ghosttyLoading) return;
+    window.__ghosttyLoading = true;
+    var s = document.createElement('script');
+    s.type = 'module';
+    s.textContent = [
+        "import { Ghostty, Terminal, FitAddon } from '/ghostty/ghostty-web.js';",
+        "try {",
+        "  const instance = await Ghostty.load('/ghostty/ghostty-vt.wasm');",
+        "  window.__ghostty = { Ghostty, Terminal, FitAddon, instance };",
+        "} catch(e) {",
+        "  console.error('ghostty-web init failed:', e);",
+        "  window.__ghosttyError = e;",
+        "}",
+        "window.dispatchEvent(new CustomEvent('ghostty-ready'));",
+    ].join('\n');
+    document.head.appendChild(s);
+})();
+LOADEREOF
 
 # Verify app can be imported (catches syntax errors at build time)
 RUN python -c "import ast; ast.parse(open('/app/otel-navigator.py').read()); print('App syntax OK')"
+RUN PYTHONPATH=/app python -c "from cybersec.engine.service import NavigatorEngineServicer; from cybersec.pty_proxy.repl import NavigatorREPL; print('Engine + PTY proxy imports OK')"
 
 # Set environment variables for Dask
 ENV DASK_DISTRIBUTED__WORKER__MEMORY__SPILL="0.85"
