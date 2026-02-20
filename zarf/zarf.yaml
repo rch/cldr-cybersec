@@ -2,7 +2,7 @@ kind: ZarfPackageConfig
 metadata:
   name: cybersec-dask
   description: Air-gap deployment package for Dask, JupyterHub, and Panel-Viz on RKE2
-  version: "1.1.1"
+  version: "1.2.0"
   architecture: amd64
   authors: Cybersec Toolkit Team
   url: https://github.com/cloudera/cybersec
@@ -35,8 +35,8 @@ variables:
     description: S3-compatible endpoint URL
     default: ""
   - name: S3_BUCKET
-    description: S3 bucket name containing OTEL data
-    default: ""
+    description: S3 bucket name for OTEL data (notebooks + Panel-Viz)
+    default: "cybersec-dask-data"
   - name: S3_REGION
     description: AWS region for S3 access
     default: "us-east-1"
@@ -88,9 +88,14 @@ components:
     required: true
     description: DaskCluster deployment for distributed computing
     manifests:
-      - name: dask-namespace-and-cluster
+      # Split into separate Helm releases to ensure namespace exists before
+      # DaskCluster CRD instance is created. Combining them into a single
+      # release can cause the DaskCluster to silently fail to be created.
+      - name: dask-namespaces
         files:
           - manifests/namespace.yaml
+      - name: dask-cluster-cr
+        files:
           - manifests/dask-cluster.yaml
     actions:
       onDeploy:
@@ -101,6 +106,36 @@ components:
                 name: dask.org/component=scheduler
                 namespace: dask
                 condition: Ready
+            maxTotalSeconds: 300
+            description: Wait for Dask scheduler to be ready
+          - cmd: |
+              BUCKET="${ZARF_VAR_S3_BUCKET}"
+              ENDPOINT="${ZARF_VAR_S3_ENDPOINT}"
+              if [ -z "$BUCKET" ] || [ -z "$ENDPOINT" ]; then
+                echo "S3 not fully configured (BUCKET=$BUCKET ENDPOINT=$ENDPOINT), skipping bucket creation"
+                exit 0
+              fi
+              SCHEDULER=$(kubectl get pod -n dask -l dask.org/component=scheduler -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+              if [ -z "$SCHEDULER" ]; then
+                echo "Warning: no Dask scheduler pod found, skipping bucket creation"
+                exit 0
+              fi
+              kubectl exec -n dask "$SCHEDULER" -- python -c "
+              import s3fs, os
+              fs = s3fs.S3FileSystem(
+                  key=os.environ.get('AWS_ACCESS_KEY_ID', ''),
+                  secret=os.environ.get('AWS_SECRET_ACCESS_KEY', ''),
+                  client_kwargs={'endpoint_url': os.environ['S3_ENDPOINT']}
+              )
+              bucket = '$BUCKET'
+              try:
+                  fs.ls(bucket)
+                  print(f'S3 bucket already exists: {bucket}')
+              except FileNotFoundError:
+                  fs.mkdir(bucket)
+                  print(f'Created S3 bucket: {bucket}')
+              " || echo "Warning: bucket creation failed (non-fatal, create manually)"
+            description: Create S3 data bucket (if S3 is configured)
 
   # ===========================================================================
   # JupyterHub - optional, on by default

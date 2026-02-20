@@ -59,7 +59,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip-init    Skip Zarf init (already initialized)"
             echo "  --skip-build   Skip image/package build (use pre-built packages)"
             echo "  --dry-run      Show what would be done without executing"
-            echo "  --disk-light   Disable registry PVC, use emptyDir for spill volumes"
+            echo "  --disk-light   Small registry PV (5Gi), emptyDir for spill volumes"
             echo "                 (auto-enabled when <10% disk free or DiskPressure taint)"
             exit 0
             ;;
@@ -127,9 +127,12 @@ print_disk_light_banner() {
     echo -e "${YELLOW}║            DISK-LIGHT MODE ACTIVE                ║${NC}"
     echo -e "${YELLOW}╠══════════════════════════════════════════════════╣${NC}"
     echo -e "${YELLOW}║${NC} Trigger:  $trigger"
-    echo -e "${YELLOW}║${NC} Registry: emptyDir (REGISTRY_PVC_ENABLED=false)"
-    echo -e "${YELLOW}║${NC} Storage:  setup_storage() skipped"
+    echo -e "${YELLOW}║${NC} Registry: hostPath PV (5 Gi label, ~2 GB actual)"
+    echo -e "${YELLOW}║${NC} Storage:  /var/lib/zarf-registry (local disk)"
     echo -e "${YELLOW}║${NC} Spill:    emptyDir 512Mi (post-deploy patch)"
+    echo -e "${YELLOW}║${NC}"
+    echo -e "${YELLOW}║${NC} NOTE: REGISTRY_PVC_ENABLED=false is NOT used —"
+    echo -e "${YELLOW}║${NC}       it crashes the registry with 'no storage'"
     echo -e "${YELLOW}║${NC} Workers:  ${DASK_WORKER_REPLICAS:-4}"
     echo -e "${YELLOW}╚══════════════════════════════════════════════════╝${NC}"
     echo ""
@@ -421,28 +424,56 @@ download_zarf_init() {
 setup_storage() {
     log_step "Step 5.5: Setting Up Storage for Zarf Registry"
 
-    if [[ "$DISK_LIGHT" == "true" ]]; then
-        log_info "Skipping storage setup (disk-light mode — registry will use emptyDir)"
-        return 0
-    fi
-
     local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
     local KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
     local STORAGE_PATH="/var/lib/zarf-registry"
 
+    # Registry ALWAYS needs a hostPath PV — even in disk-light mode.
+    # REGISTRY_PVC_ENABLED=false crashes the registry ("no storage configuration
+    # provided"), so we use a small PV instead. Actual registry usage is ~2 GB.
+    local PV_SIZE="20Gi"
+    if [[ "$DISK_LIGHT" == "true" ]]; then
+        PV_SIZE="5Gi"
+        log_info "Disk-light: using small registry PV ($PV_SIZE label, ~2 GB actual)"
+    fi
+
     # Create storage directory with proper permissions
     log_info "Creating storage directory: $STORAGE_PATH"
     sudo mkdir -p "$STORAGE_PATH"
+    sudo chown 1000:2000 "$STORAGE_PATH"
     sudo chmod 777 "$STORAGE_PATH"
+    # SELinux context (RHEL/Rocky — harmless no-op on other distros)
+    sudo chcon -R -t container_file_t "$STORAGE_PATH" 2>/dev/null || true
 
-    # Check if PV already exists
-    if sudo $KUBECTL --kubeconfig=$KUBECONFIG get pv zarf-registry-pv &>/dev/null; then
-        log_success "PV zarf-registry-pv already exists"
+    # Clean up stuck PVC/PV from previous failed init (Lost phase, stuck finalizers)
+    local pvc_phase
+    pvc_phase=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pvc zarf-docker-registry -n zarf \
+        -o jsonpath='{.status.phase}' 2>/dev/null) || true
+    if [[ "$pvc_phase" == "Lost" ]]; then
+        log_warn "Found PVC in Lost phase — cleaning up stuck state"
+        sudo $KUBECTL --kubeconfig=$KUBECONFIG patch pvc zarf-docker-registry -n zarf \
+            -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+        sudo $KUBECTL --kubeconfig=$KUBECONFIG delete pvc zarf-docker-registry -n zarf \
+            --force --grace-period=0 2>/dev/null || true
+        sudo $KUBECTL --kubeconfig=$KUBECONFIG patch pv zarf-registry-pv \
+            -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+        sudo $KUBECTL --kubeconfig=$KUBECONFIG delete pv zarf-registry-pv \
+            --force --grace-period=0 2>/dev/null || true
+        log_success "Cleaned up stuck PVC/PV"
+    fi
+
+    # Check if PV already exists and is healthy
+    local pv_phase
+    pv_phase=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pv zarf-registry-pv \
+        -o jsonpath='{.status.phase}' 2>/dev/null) || true
+    if [[ "$pv_phase" == "Available" || "$pv_phase" == "Bound" ]]; then
+        log_success "PV zarf-registry-pv already exists (phase: $pv_phase)"
         return 0
     fi
 
     # Create PV for Zarf registry (RKE2 doesn't have a default storage class)
-    log_info "Creating PersistentVolume for Zarf registry..."
+    # claimRef pre-binds to the PVC that zarf init will create
+    log_info "Creating PersistentVolume for Zarf registry ($PV_SIZE)..."
     cat <<EOF | sudo $KUBECTL --kubeconfig=$KUBECONFIG apply -f -
 apiVersion: v1
 kind: PersistentVolume
@@ -450,7 +481,7 @@ metadata:
   name: zarf-registry-pv
 spec:
   capacity:
-    storage: 20Gi
+    storage: $PV_SIZE
   accessModes:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
@@ -463,7 +494,7 @@ spec:
 EOF
 
     if [[ $? -eq 0 ]]; then
-        log_success "Created PV for Zarf registry"
+        log_success "Created PV for Zarf registry ($PV_SIZE)"
     else
         log_warn "Failed to create PV - may already exist or not needed"
     fi
@@ -509,8 +540,8 @@ initialize_zarf() {
 
     local ZARF_INIT_ARGS="--confirm"
     if [[ "$DISK_LIGHT" == "true" ]]; then
-        ZARF_INIT_ARGS="$ZARF_INIT_ARGS --set REGISTRY_PVC_ENABLED=false"
-        log_info "Disk-light: registry will use emptyDir (REGISTRY_PVC_ENABLED=false)"
+        ZARF_INIT_ARGS="$ZARF_INIT_ARGS --set REGISTRY_PVC_SIZE=5Gi"
+        log_info "Disk-light: registry PVC sized to 5Gi (pre-bound hostPath PV)"
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then

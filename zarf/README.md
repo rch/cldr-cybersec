@@ -122,41 +122,123 @@ sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
 
 ---
 
-## Disk-Constrained Deployment
+## Disk-Constrained Deployment (Disk-Light)
 
-For nodes with limited local disk (<10% free), use disk-light mode:
+For nodes with limited local disk but NFS or shared storage available.
+
+> **Do NOT use `--set REGISTRY_PVC_ENABLED=false`.**
+> This disables the registry's storage driver entirely, causing the pod to
+> crash with `"no storage configuration provided"`. The registry always needs
+> real storage — either a PVC backed by a PV or a StorageClass provisioner.
+
+**Key principle**: The Zarf registry requires **local disk** — it uses hard links
+and atomic renames that NFS does not support. However, the registry only needs
+~2 GB for this package, so a small hostPath PV (5 Gi) works even on heavily
+constrained nodes. Dask spill-to-disk and user data should go on NFS.
+
+### What goes where
+
+| Data | Storage | Why |
+|------|---------|-----|
+| Zarf registry | **Local hostPath** (5 Gi) | Hard links + atomic renames required |
+| RKE2 runtime | Local `/var/lib/rancher` | K8s requires local |
+| Dask spill-to-disk | **NFS mount** | Large, ephemeral, shared across workers |
+| JupyterHub notebooks | NFS mount (optional) | Persists across hub restarts |
+
+### Using the deployment script
 
 ```bash
 sudo ./scripts/verify-zarf-deployment.sh --skip-build --disk-light
 ```
 
 This mode:
-- Skips `setup_storage()` (no hostPath PV creation)
-- Passes `--set REGISTRY_PVC_ENABLED=false` to `zarf init` (emptyDir registry)
-- Post-deploy patches the Dask spill volume from hostPath to `emptyDir` (512Mi)
+- Creates a **5 Gi hostPath PV** on local disk at `/var/lib/zarf-registry`
+- Passes `--set REGISTRY_PVC_SIZE=5Gi` to `zarf init`
+- Auto-cleans stuck PVCs from previous failed init attempts
+- Post-deploy patches Dask spill volume to `emptyDir` (512Mi)
 - Defaults `DASK_WORKER_REPLICAS=4`
 
-Or manually:
+**Auto-detection**: The script automatically enables disk-light mode when
+`df /var/lib/rancher` shows <10% free or a `node.kubernetes.io/disk-pressure`
+taint is detected.
+
+### Manual disk-light deployment (with NFS spill)
 
 ```bash
-# Init without registry PVC
-sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
-  zarf init --confirm --set REGISTRY_PVC_ENABLED=false
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+export PATH=$PATH:/var/lib/rancher/rke2/bin
 
-# Deploy
+# 1. Create registry directory on LOCAL disk (not NFS!)
+sudo mkdir -p /var/lib/zarf-registry
+sudo chown 1000:2000 /var/lib/zarf-registry
+sudo chmod 777 /var/lib/zarf-registry
+sudo chcon -R -t container_file_t /var/lib/zarf-registry 2>/dev/null; true
+
+# 2. Pre-create a small PV (5 Gi label, ~2 GB actual usage)
+sudo kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zarf-registry-pv
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /var/lib/zarf-registry
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: zarf
+    name: zarf-docker-registry
+EOF
+
+# 3. Initialize Zarf with matching PVC size
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
+  zarf init --confirm --set REGISTRY_PVC_SIZE=5Gi
+
+# 4. Deploy with NFS spill path
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
+  zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
+  --set DASK_SPILL_DIR=/mnt/nfs/dask-spill \
+  --set DASK_WORKER_REPLICAS=4
+
+# 5. Verify NFS spill is mounted in workers
+sudo kubectl exec -n dask \
+  $(sudo kubectl get pod -n dask -l dask.org/component=worker -o name | head -1) \
+  -- df -h /dask-spill
+```
+
+### Manual disk-light deployment (no NFS)
+
+If no NFS is available, use emptyDir for spill:
+
+```bash
+# Steps 1–3: same as above
+
+# 4. Deploy without specifying DASK_SPILL_DIR
 sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
   zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
   --set DASK_WORKER_REPLICAS=4
 
-# Patch spill volume to emptyDir
+# 5. Patch spill volume to emptyDir (512Mi)
 sudo kubectl patch daskcluster cybersec-dask -n dask --type=json -p \
   '[{"op":"replace","path":"/spec/worker/spec/volumes/0","value":{"name":"dask-spill","emptyDir":{"sizeLimit":"512Mi"}}}]'
 sudo kubectl delete pods -n dask -l dask.org/component=worker
 ```
 
-**Auto-detection**: The script automatically enables disk-light mode when
-`df /var/lib/rancher` shows <10% free or a `node.kubernetes.io/disk-pressure`
-taint is detected.
+### Disk budget reference
+
+The Zarf registry, RKE2 runtime, and Kubernetes system together need local disk.
+Everything else can live on NFS.
+
+| Component | Local disk usage | Notes |
+|-----------|-----------------|-------|
+| RKE2 runtime | ~3-5 GB | `/var/lib/rancher` |
+| Zarf registry | ~2 GB | `/var/lib/zarf-registry` (5 Gi PV label) |
+| Zarf init package | ~300 MB | Temporary, consumed during init |
+| Cybersec package | ~1.3 GB | Temporary, consumed during deploy |
+| **Total local** | **~7–9 GB** | Minimum for deployment |
 
 ---
 
@@ -290,26 +372,61 @@ zarf package deploy ... --set DASK_WORKER_REPLICAS=8 --confirm
 
 ## Troubleshooting
 
+### Recovery from failed `zarf init`
+
+If a previous `zarf init` failed (timed out, lost PV, wrong flags), the
+leftover state will block re-initialization. Clean up before retrying:
+
+```bash
+KUBECTL="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
+
+# 1. Remove stuck PVC (clear finalizer first)
+$KUBECTL patch pvc zarf-docker-registry -n zarf -p '{"metadata":{"finalizers":null}}' 2>/dev/null
+$KUBECTL delete pvc zarf-docker-registry -n zarf --force --grace-period=0 2>/dev/null
+
+# 2. Remove orphaned PV
+$KUBECTL patch pv zarf-registry-pv -p '{"metadata":{"finalizers":null}}' 2>/dev/null
+$KUBECTL delete pv zarf-registry-pv --force --grace-period=0 2>/dev/null
+
+# 3. Remove failed Zarf namespace (Helm releases live here)
+$KUBECTL delete namespace zarf --wait=false 2>/dev/null
+$KUBECTL patch namespace zarf -p '{"metadata":{"finalizers":null}}' 2>/dev/null
+# Wait for cleanup
+sleep 10
+$KUBECTL get namespace zarf 2>&1 | grep -q "not found" && echo "Clean"
+
+# 4. Now re-run init from scratch (see Quickstart or Disk-Light sections)
+```
+
+**How to tell if cleanup is needed**: Run `kubectl get pvc -n zarf` — if the
+PVC shows `Lost`, `Terminating`, or has a `deletionTimestamp`, you need cleanup.
+A healthy PVC shows `Bound` with a valid PV name.
+
 ### Registry PVC won't bind (no StorageClass provisioner)
 
 Bare RKE2 without Rancher has no default StorageClass. The Zarf internal
 registry requests a 20 Gi PVC which will stay `Pending` indefinitely.
 
-**Option A — Disable PVC entirely (simplest, data in emptyDir):**
+**~~Option A — Disable PVC entirely~~** (DO NOT USE):
 
-Registry data is lost on pod restart, but `zarf package deploy` re-pushes
-images automatically. Best for resource-constrained nodes.
+> **`REGISTRY_PVC_ENABLED=false` crashes the registry** with
+> `"no storage configuration provided"`. There is no emptyDir fallback.
+> Use a small hostPath PV instead — see [Disk-Constrained Deployment](#disk-constrained-deployment-disk-light).
+
+<details>
+<summary>Legacy instructions (kept for reference — do not follow)</summary>
 
 ```bash
-# Clean any previous failed init
-sudo zarf package remove --confirm 2>/dev/null; true
-sudo kubectl delete pvc -n zarf zarf-docker-registry --force --grace-period=0 2>/dev/null; true
-sudo kubectl delete pv -l app=zarf-registry --force --grace-period=0 2>/dev/null; true
-
-# Init with PVC disabled
+# THIS WILL CRASH — DO NOT USE
 sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
   zarf init --confirm --set REGISTRY_PVC_ENABLED=false
 ```
+
+The registry Helm chart's `filesystem` storage driver requires a volume mount.
+When PVC is disabled, no volume is mounted, and the registry container exits
+immediately with a storage configuration error.
+
+</details>
 
 **Option B — Smaller PVC (disk-constrained nodes):**
 
@@ -370,7 +487,7 @@ sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf init --confirm
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REGISTRY_PVC_ENABLED` | `true` | Set `false` to use emptyDir instead of PVC |
+| `REGISTRY_PVC_ENABLED` | `true` | **Do not set `false`** — crashes the registry (see above) |
 | `REGISTRY_PVC_SIZE` | `20Gi` | PVC storage request size |
 | `REGISTRY_EXISTING_PVC` | _(empty)_ | Name of a pre-existing PVC to use |
 | `--storage-class` | _(flag)_ | StorageClass for registry and git server |

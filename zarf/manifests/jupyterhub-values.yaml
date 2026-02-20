@@ -147,6 +147,15 @@ singleuser:
       - name: jupyterhub-pkg
         mountPath: /srv/jupyterhub-pkg
         readOnly: true
+  # Network policy - allow singleuser pods full egress to reach:
+  #   - Dask scheduler (10.43.x.x ClusterIP or dask.svc.cluster.local)
+  #   - MinIO/S3 on host network (192.168.x.x)
+  #   - Any other cluster services
+  # Default JupyterHub NetworkPolicy blocks private IPs in egress,
+  # which prevents notebook access to Dask and S3.
+  networkPolicy:
+    egressAllowRules:
+      privateIPs: true
   # Environment variables for S3 access
   extraEnv:
     # Make the injected jupyterhub package importable
@@ -156,6 +165,7 @@ singleuser:
     S3_ENDPOINT: "###ZARF_VAR_S3_ENDPOINT###"
     AWS_ACCESS_KEY_ID: "###ZARF_VAR_S3_ACCESS_KEY###"
     AWS_SECRET_ACCESS_KEY: "###ZARF_VAR_S3_SECRET_KEY###"
+    S3_BUCKET: "###ZARF_VAR_S3_BUCKET###"
     # Dask scheduler address in same cluster
     DASK_SCHEDULER_ADDRESS: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
 

@@ -2425,16 +2425,15 @@ asyncio.run(main())
       fi
 
       log_info "Using $BUILDER to build image..."
-      cd zarf/images
 
       $BUILDER build \
-        -t cybersec-dask:2024.8.0 \
-        -f Dockerfile.cybersec-dask \
-        --build-arg BASE_IMAGE=ghcr.io/dask/dask:2024.8.0 \
+        -t cybersec-dask:2025.2.0 \
+        -f zarf/images/Dockerfile.cybersec-dask \
+        --build-arg BASE_IMAGE=ghcr.io/dask/dask:2025.2.0 \
         .
 
       if [ $? -eq 0 ]; then
-        log_success "Image built: cybersec-dask:2024.8.0"
+        log_success "Image built: cybersec-dask:2025.2.0"
         echo ""
         echo "Next: devenv tasks run zarf:package"
       else
@@ -2449,9 +2448,9 @@ asyncio.run(main())
 
       # Check if custom image exists
       if command -v podman &>/dev/null; then
-        IMG=$(podman images -q cybersec-dask:2024.8.0 2>/dev/null)
+        IMG=$(podman images -q cybersec-dask:2025.2.0 2>/dev/null)
       elif command -v docker &>/dev/null; then
-        IMG=$(docker images -q cybersec-dask:2024.8.0 2>/dev/null)
+        IMG=$(docker images -q cybersec-dask:2025.2.0 2>/dev/null)
       fi
 
       if [ -z "$IMG" ]; then
@@ -2818,7 +2817,7 @@ print('Config written to build/environment.json')
       S3_PORT="''${LOCAL_S3_PORT:-9010}"
 
       # --- Detect MinIO endpoint for K8s pods ---
-      NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+      NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' | awk '{print $1}')
       if [ -z "$NODE_IP" ]; then
         log_error "Cannot detect node InternalIP. Is the cluster running?"
         exit 1
@@ -3079,7 +3078,8 @@ print('Config written to build/environment.json')
       echo "MinIO:"
       if curl -sf --max-time 3 "http://localhost:''${S3_PORT}/minio/health/live" >/dev/null 2>&1; then
         log_success "  http://localhost:''${S3_PORT}/ (healthy)"
-        NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "unknown")
+        NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null | awk '{print $1}')
+        NODE_IP="''${NODE_IP:-unknown}"
         echo "  Pod endpoint: http://''${NODE_IP}:''${S3_PORT}"
         echo "  Bucket: cybersec  Credentials: minioadmin/minioadmin"
       else
@@ -3164,7 +3164,7 @@ print('Config written to build/environment.json')
       fi
 
       # MinIO (pod-reachable via node IP)
-      NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "")
+      NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null | awk '{print $1}')
       if [ -n "$NODE_IP" ]; then
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://''${NODE_IP}:''${S3_PORT}/minio/health/live" 2>/dev/null || echo "000")
         if echo "$HTTP_CODE" | grep -q "200"; then
