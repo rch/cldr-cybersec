@@ -23,8 +23,9 @@ data "aws_caller_identity" "current" {}
 # -----------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "security_logs" {
-  count  = var.enable_security_logs ? 1 : 0
-  bucket = "${var.project}-${var.developer_prefix}-security-logs"
+  count         = var.enable_security_logs ? 1 : 0
+  bucket        = "${var.project}-${var.developer_prefix}-security-logs"
+  force_destroy = true # Dev environment: allow tofu destroy to empty bucket automatically
 
   tags = merge(local.common_tags, {
     Name     = "${var.project}-${var.developer_prefix}-security-logs"

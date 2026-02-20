@@ -4,7 +4,8 @@
 # -----------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "cybersec" {
-  bucket = local.bucket_name
+  bucket        = local.bucket_name
+  force_destroy = true # Dev environment: allow tofu destroy to empty bucket automatically
 
   tags = merge(local.common_tags, {
     Name = local.bucket_name
