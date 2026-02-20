@@ -1,61 +1,12 @@
-# OTEL Navigator Deployment for air-gap RKE2 environment
-# Visualization dashboard for OTEL traces using HoloViews + Datashader + Dask
+# Tilt overlay for otel-navigator Deployment
+# Derived from zarf/manifests/panel-viz.yaml with:
+#   - --autoreload added to Panel serve command
+#   - Image ref uses Tilt-managed tag via Zarf registry
+#   - imagePullPolicy: Always
+#   - Zarf template variables removed (uses existing ConfigMap/Secret)
 #
-# Uses the pre-baked cybersec-dask image with:
-# - All Python dependencies pre-installed
-# - OTEL Navigator application at /app/otel-navigator.py
-# - NavigatorEngine + PTY proxy packages (M2)
-# - ghostty-web WASM terminal for air-gap terminal
-# - Numba JIT cache pre-compiled
-#
-# Startup time: ~10-15 seconds (no pip install required)
-#
-# Zarf template variables:
-#   ###ZARF_VAR_S3_ENDPOINT### - S3-compatible endpoint
-#   ###ZARF_VAR_S3_ACCESS_KEY### - S3 access key
-#   ###ZARF_VAR_S3_SECRET_KEY### - S3 secret key
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: panel-viz
-  labels:
-    app.kubernetes.io/managed-by: zarf
-    app.kubernetes.io/part-of: cybersec
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: otel-navigator-config
-  namespace: panel-viz
-  labels:
-    app: otel-navigator
-    app.kubernetes.io/managed-by: zarf
-data:
-  # S3 bucket containing OTEL data
-  S3_BUCKET: "###ZARF_VAR_S3_BUCKET###"
-  # Path to OTEL span data (Parquet files)
-  OTEL_DATA_PATH: "s3://###ZARF_VAR_S3_BUCKET###/otel-minimal/"
-  # AWS region for S3 access
-  AWS_REGION: "###ZARF_VAR_S3_REGION###"
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: otel-navigator-credentials
-  namespace: panel-viz
-  labels:
-    app: otel-navigator
-    app.kubernetes.io/managed-by: zarf
-type: Opaque
-stringData:
-  # S3/MinIO credentials - populated by Zarf variables
-  AWS_ACCESS_KEY_ID: "###ZARF_VAR_S3_ACCESS_KEY###"
-  AWS_SECRET_ACCESS_KEY: "###ZARF_VAR_S3_SECRET_KEY###"
-  # AWS STS session token (for IAM role / temporary credentials)
-  AWS_SESSION_TOKEN: "###ZARF_VAR_S3_SESSION_TOKEN###"
-  # Optional: S3 endpoint for MinIO (leave empty for AWS S3)
-  S3_ENDPOINT: "###ZARF_VAR_S3_ENDPOINT###"
+# NOTE: Namespace, ConfigMap, Secret, and Service are NOT included here.
+# They persist from the original Zarf deployment with correct values.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -66,7 +17,7 @@ metadata:
     app: otel-navigator
     app.kubernetes.io/name: otel-navigator
     app.kubernetes.io/component: visualization
-    app.kubernetes.io/managed-by: zarf
+    app.kubernetes.io/managed-by: tilt
     app.kubernetes.io/part-of: cybersec
 spec:
   replicas: 1
@@ -79,7 +30,6 @@ spec:
         app: otel-navigator
         app.kubernetes.io/name: otel-navigator
     spec:
-      # Prefer scheduling near Dask workers for data locality
       affinity:
         podAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -91,10 +41,8 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: otel-navigator
-          # Image will be rewritten by Zarf to use internal registry
-          image: localhost:5555/cybersec-dask:2025.2.0
-          imagePullPolicy: IfNotPresent
-          # Serve OTEL Navigator with ghostty-web WASM assets for terminal
+          image: 127.0.0.1:31999/cybersec-dask
+          imagePullPolicy: Always
           command:
             - panel
             - serve
@@ -104,15 +52,14 @@ spec:
             - --allow-websocket-origin=*
             - --static-dirs
             - ghostty=/app/static/ghostty
+            - --autoreload
           ports:
             - containerPort: 5006
               name: http
               protocol: TCP
           env:
-            # Dask scheduler address (deployed in same cluster)
             - name: DASK_SCHEDULER
               value: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
-            # PTY proxy WS URL: empty = auto-detect from browser hostname + port
             - name: PTY_PROXY_WS
               value: ""
           envFrom:
@@ -127,8 +74,6 @@ spec:
             limits:
               cpu: 2
               memory: 8Gi
-          # TCP probe: Panel app loads data from S3 on HTTP requests, which
-          # blocks in air-gap environments. Use TCP to verify Bokeh server is up.
           readinessProbe:
             tcpSocket:
               port: 5006
@@ -143,8 +88,8 @@ spec:
             failureThreshold: 5
         # PTY proxy sidecar: bridges terminal WebSocket to gRPC engine
         - name: pty-proxy
-          image: localhost:5555/cybersec-dask:2025.2.0
-          imagePullPolicy: IfNotPresent
+          image: 127.0.0.1:31999/cybersec-dask
+          imagePullPolicy: Always
           command:
             - python
             - -m
@@ -176,26 +121,3 @@ spec:
               port: 8765
             initialDelaySeconds: 10
             periodSeconds: 30
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: otel-navigator
-  namespace: panel-viz
-  labels:
-    app: otel-navigator
-    app.kubernetes.io/name: otel-navigator
-    app.kubernetes.io/managed-by: zarf
-spec:
-  type: NodePort
-  selector:
-    app: otel-navigator
-  ports:
-    - name: http
-      port: 5006
-      targetPort: 5006
-      nodePort: 30506
-    - name: ws
-      port: 8765
-      targetPort: 8765
-      nodePort: 30765

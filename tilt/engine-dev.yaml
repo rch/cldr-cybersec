@@ -1,0 +1,79 @@
+# Tilt overlay for navigator-engine Deployment
+# Derived from zarf/manifests/engine.yaml with:
+#   - Image ref uses Tilt-managed tag via Zarf registry
+#   - imagePullPolicy: Always
+#   - Zarf template variables removed (uses existing ConfigMap/Secret)
+#
+# NOTE: Service is NOT included here. It persists from the original Zarf deployment.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: navigator-engine
+  namespace: panel-viz
+  labels:
+    app: navigator-engine
+    app.kubernetes.io/name: navigator-engine
+    app.kubernetes.io/component: engine
+    app.kubernetes.io/managed-by: tilt
+    app.kubernetes.io/part-of: cybersec
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: navigator-engine
+  template:
+    metadata:
+      labels:
+        app: navigator-engine
+        app.kubernetes.io/name: navigator-engine
+    spec:
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    dask.org/component: worker
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: navigator-engine
+          image: 127.0.0.1:31999/cybersec-dask
+          imagePullPolicy: Always
+          command:
+            - python
+            - -m
+            - cybersec.engine.server
+            - --port=50051
+          ports:
+            - containerPort: 50051
+              name: grpc
+              protocol: TCP
+          env:
+            - name: PYTHONPATH
+              value: /app
+            - name: DASK_SCHEDULER
+              value: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
+          envFrom:
+            - configMapRef:
+                name: otel-navigator-config
+            - secretRef:
+                name: otel-navigator-credentials
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: 2
+              memory: 4Gi
+          readinessProbe:
+            tcpSocket:
+              port: 50051
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 50051
+            initialDelaySeconds: 10
+            periodSeconds: 30
