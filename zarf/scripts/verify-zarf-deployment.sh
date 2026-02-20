@@ -1,480 +1,488 @@
 #!/bin/bash
 # =============================================================================
-# Zarf Deployment Verification Script
+# Zarf Deployment & Verification Script — v1.2.0
 # =============================================================================
-# This script verifies and deploys the cybersec-dask Zarf package to a local
-# RKE2 cluster. It supports two modes of operation:
+# Unified deployment script that works identically on local dev (tinybox) and
+# air-gap (usfwdbig01). All environment differences are resolved through env
+# vars (sourced from .env/direnv or manually exported).
 #
 # BUILD MODE (connected environment):
 #   ./verify-zarf-deployment.sh
 #   - Builds custom images (requires network for base images)
-#   - Creates Zarf package
-#   - Deploys to cluster
+#   - Creates Zarf package, deploys to cluster
 #
 # DEPLOY MODE (air-gap environment):
 #   ./verify-zarf-deployment.sh --skip-build
 #   - Uses pre-built Zarf package and init package
 #   - Deploys to cluster without network access
-#   - Requires: zarf-init-amd64-*.tar.zst, zarf-package-cybersec-dask-*.tar.zst
+#
+# VERIFY MODE:
+#   ./verify-zarf-deployment.sh --verify-only
+#   - Runs verification checks against existing deployment
+#   - No cluster changes, safe to run anytime
 #
 # Requirements:
-#   - RKE2 installed and running (kube-system pods provide Zarf injector bootstrap)
+#   - Kubernetes cluster running (RKE2, k3d, etc.)
 #   - Zarf CLI available
+#   - kubectl available and KUBECONFIG resolvable
 #   - Podman for building custom images (BUILD MODE only)
-#   - Pre-built Zarf packages (DEPLOY MODE only)
 # =============================================================================
 
 set -euo pipefail
 
-# Configuration
+# =============================================================================
+# Paths & Constants
+# =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ZARF_DIR="$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT="$(dirname "$ZARF_DIR")"
 
-# Colors for output
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-# Flags
+# =============================================================================
+# CLI Flags
+# =============================================================================
 SKIP_INIT=false
 SKIP_BUILD=false
 DRY_RUN=false
 DISK_LIGHT=false
 DISK_LIGHT_AUTO=false
+VERIFY_ONLY=false
 
-# Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --skip-init) SKIP_INIT=true; shift ;;
-        --skip-build) SKIP_BUILD=true; shift ;;
-        --dry-run) DRY_RUN=true; shift ;;
-        --disk-light) DISK_LIGHT=true; shift ;;
+        --skip-init)   SKIP_INIT=true;   shift ;;
+        --skip-build)  SKIP_BUILD=true;  shift ;;
+        --dry-run)     DRY_RUN=true;     shift ;;
+        --disk-light)  DISK_LIGHT=true;  shift ;;
+        --verify-only) VERIFY_ONLY=true; shift ;;
         -h|--help)
-            echo "Usage: $0 [--skip-init] [--skip-build] [--dry-run] [--disk-light]"
-            echo ""
-            echo "Options:"
-            echo "  --skip-init    Skip Zarf init (already initialized)"
-            echo "  --skip-build   Skip image/package build (use pre-built packages)"
-            echo "  --dry-run      Show what would be done without executing"
-            echo "  --disk-light   Small registry PV (5Gi), emptyDir for spill volumes"
-            echo "                 (auto-enabled when <10% disk free or DiskPressure taint)"
+            cat <<'USAGE'
+Usage: verify-zarf-deployment.sh [OPTIONS]
+
+Options:
+  --skip-build     Skip image/package build (use pre-built packages)
+  --skip-init      Skip zarf init (already initialized)
+  --dry-run        Show what would be done without executing
+  --disk-light     Small registry PV (5Gi), emptyDir for spill volumes
+                   (auto-enabled when <10% disk free or DiskPressure)
+  --verify-only    Jump straight to verification (skip init/deploy)
+
+Environment Variables (override via .env or export):
+  KUBECONFIG              Path to kubeconfig (auto-detected if unset)
+  S3_ENDPOINT             S3-compatible endpoint URL
+  S3_ACCESS_KEY           S3 access key (default: minioadmin)
+  S3_SECRET_KEY           S3 secret key (default: minioadmin)
+  S3_BUCKET               S3 bucket name (default: cybersec-dask-data)
+  S3_REGION               S3 region (default: us-east-1)
+  DASK_SPILL_DIR          Host path for spill-to-disk (empty = emptyDir)
+  DASK_WORKER_REPLICAS    Number of Dask workers (default: 4)
+  LOCAL_S3_PORT           MinIO NodePort (default: 9010)
+  REGISTRY_STORAGE_PATH   Registry host path (default: /var/lib/zarf-registry)
+  REGISTRY_PVC_SIZE       Registry PV size (default: 5Gi)
+USAGE
             exit 0
             ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
-# Logging functions
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+# =============================================================================
+# Logging
+# =============================================================================
+log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-log_step() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
+log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
+log_step()    { echo -e "\n${CYAN}${BOLD}=== $1 ===${NC}"; }
 
 # =============================================================================
-# Disk-Light Mode: Auto-detection and banner
+# Source .env (if present)
+# =============================================================================
+if [[ -f "$PROJECT_ROOT/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$PROJECT_ROOT/.env"
+    set +a
+fi
+
+# =============================================================================
+# Kubeconfig Resolution (5-tier fallback, ported from devenv.nix:2574-2624)
+# =============================================================================
+_resolve_kubeconfig() {
+    # 1. Explicit KUBECONFIG env var
+    if [[ -n "${KUBECONFIG:-}" ]] && [[ -f "$KUBECONFIG" ]]; then
+        if [[ -r "$KUBECONFIG" ]]; then
+            log_info "Using KUBECONFIG=$KUBECONFIG"
+            return 0
+        else
+            log_warn "KUBECONFIG=$KUBECONFIG exists but is not readable"
+        fi
+    fi
+    # 2. User-readable copy at ~/.kube/rke2.yaml
+    if [[ -f "$HOME/.kube/rke2.yaml" ]] && [[ -r "$HOME/.kube/rke2.yaml" ]]; then
+        KUBECONFIG="$HOME/.kube/rke2.yaml"
+        export KUBECONFIG
+        log_info "Using user kubeconfig: $KUBECONFIG"
+        return 0
+    fi
+    # 3. k3d kubeconfig
+    if [[ "${CYBERSEC_K8S_TARGET:-}" == "k3d" ]]; then
+        KUBECONFIG="${DEVENV_STATE:-.devenv/state}/kubeconfig"
+        export KUBECONFIG
+        log_info "Using k3d kubeconfig: $KUBECONFIG"
+        return 0
+    fi
+    # 4. System RKE2 kubeconfig (may need permission fix)
+    if [[ -f "/etc/rancher/rke2/rke2.yaml" ]]; then
+        if [[ -r "/etc/rancher/rke2/rke2.yaml" ]]; then
+            KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
+            export KUBECONFIG
+            log_info "Using RKE2 kubeconfig: $KUBECONFIG"
+            return 0
+        else
+            log_error "RKE2 kubeconfig exists but is not readable: /etc/rancher/rke2/rke2.yaml"
+            echo ""
+            echo "Fix with:"
+            echo "  sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/rke2.yaml"
+            echo "  sudo chown \$(id -u):\$(id -g) ~/.kube/rke2.yaml"
+            echo "  export KUBECONFIG=~/.kube/rke2.yaml"
+            return 1
+        fi
+    fi
+    # 5. Default kubeconfig
+    if [[ -f "$HOME/.kube/config" ]] && [[ -r "$HOME/.kube/config" ]]; then
+        KUBECONFIG="$HOME/.kube/config"
+        export KUBECONFIG
+        log_info "Using default kubeconfig: $KUBECONFIG"
+        return 0
+    fi
+    log_error "No kubeconfig found. Set KUBECONFIG or install a local cluster."
+    return 1
+}
+
+# =============================================================================
+# Node IP Detection (IPv4 only — see MEMORY.md multi-IP gotcha)
+# =============================================================================
+detect_node_ip() {
+    NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null | awk '{print $1}')
+    if [[ -z "$NODE_IP" ]]; then
+        log_warn "Could not detect node IP from cluster, falling back to 127.0.0.1"
+        NODE_IP="127.0.0.1"
+    fi
+    export NODE_IP
+}
+
+# =============================================================================
+# Resolve Environment Variable Defaults
+# =============================================================================
+resolve_env_defaults() {
+    # S3 / MinIO
+    LOCAL_S3_PORT="${LOCAL_S3_PORT:-9010}"
+    S3_ENDPOINT="${S3_ENDPOINT:-http://${NODE_IP}:${LOCAL_S3_PORT}}"
+    S3_ACCESS_KEY="${S3_ACCESS_KEY:-${MINIO_ACCESS_KEY:-minioadmin}}"
+    S3_SECRET_KEY="${S3_SECRET_KEY:-${MINIO_SECRET_KEY:-minioadmin}}"
+    S3_BUCKET="${S3_BUCKET:-cybersec-dask-data}"
+    S3_REGION="${S3_REGION:-us-east-1}"
+
+    # Dask
+    DASK_WORKER_REPLICAS="${DASK_WORKER_REPLICAS:-4}"
+    DASK_SPILL_DIR="${DASK_SPILL_DIR:-}"
+
+    # Registry
+    REGISTRY_STORAGE_PATH="${REGISTRY_STORAGE_PATH:-/var/lib/zarf-registry}"
+    REGISTRY_PVC_SIZE="${REGISTRY_PVC_SIZE:-5Gi}"
+
+    export LOCAL_S3_PORT S3_ENDPOINT S3_ACCESS_KEY S3_SECRET_KEY S3_BUCKET S3_REGION
+    export DASK_WORKER_REPLICAS DASK_SPILL_DIR
+    export REGISTRY_STORAGE_PATH REGISTRY_PVC_SIZE
+}
+
+# =============================================================================
+# Disk Constraint Detection (auto-enables --disk-light)
 # =============================================================================
 detect_disk_constraints() {
-    # Auto-enable disk-light mode when disk is constrained
-
     if [[ "$DISK_LIGHT" == "true" ]]; then
-        return 0  # Already explicitly enabled
+        return 0
     fi
 
-    # Check free disk on /var/lib/rancher (where RKE2/Zarf store data)
+    # Check free disk on /var/lib/rancher or /
     local check_path="/var/lib/rancher"
     if [[ ! -d "$check_path" ]]; then
         check_path="/"
     fi
     local pct_free
-    pct_free=$(df "$check_path" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print 100-$5}')
+    pct_free=$(df "$check_path" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print 100-$5}') || true
     if [[ -n "$pct_free" ]] && [[ "$pct_free" -lt 10 ]]; then
         log_warn "Low disk: ${pct_free}% free on $check_path — enabling disk-light mode"
         DISK_LIGHT=true
         DISK_LIGHT_AUTO=true
     fi
 
-    # Check for DiskPressure taint on any node
-    local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
-    local KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
-    if [[ -x "$KUBECTL" ]]; then
-        local disk_pressure
-        disk_pressure=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get nodes -o json 2>/dev/null \
-            | grep -c '"node.kubernetes.io/disk-pressure"' || echo "0")
-        if [[ "$disk_pressure" -gt 0 ]]; then
-            log_warn "DiskPressure taint detected — enabling disk-light mode"
-            DISK_LIGHT=true
-            DISK_LIGHT_AUTO=true
-        fi
+    # Check for DiskPressure condition on any node
+    local disk_pressure=0
+    disk_pressure=$(kubectl get nodes -o json 2>/dev/null \
+        | grep -c '"node.kubernetes.io/disk-pressure"') || true
+    if [[ "$disk_pressure" -gt 0 ]]; then
+        log_warn "DiskPressure taint detected — enabling disk-light mode"
+        DISK_LIGHT=true
+        DISK_LIGHT_AUTO=true
     fi
-}
-
-print_disk_light_banner() {
-    if [[ "$DISK_LIGHT" != "true" ]]; then
-        return
-    fi
-
-    local trigger="--disk-light flag"
-    if [[ "$DISK_LIGHT_AUTO" == "true" ]]; then
-        trigger="auto-detected disk constraints"
-    fi
-
-    echo ""
-    echo -e "${YELLOW}╔══════════════════════════════════════════════════╗${NC}"
-    echo -e "${YELLOW}║            DISK-LIGHT MODE ACTIVE                ║${NC}"
-    echo -e "${YELLOW}╠══════════════════════════════════════════════════╣${NC}"
-    echo -e "${YELLOW}║${NC} Trigger:  $trigger"
-    echo -e "${YELLOW}║${NC} Registry: hostPath PV (5 Gi label, ~2 GB actual)"
-    echo -e "${YELLOW}║${NC} Storage:  /var/lib/zarf-registry (local disk)"
-    echo -e "${YELLOW}║${NC} Spill:    emptyDir 512Mi (post-deploy patch)"
-    echo -e "${YELLOW}║${NC}"
-    echo -e "${YELLOW}║${NC} NOTE: REGISTRY_PVC_ENABLED=false is NOT used —"
-    echo -e "${YELLOW}║${NC}       it crashes the registry with 'no storage'"
-    echo -e "${YELLOW}║${NC} Workers:  ${DASK_WORKER_REPLICAS:-4}"
-    echo -e "${YELLOW}╚══════════════════════════════════════════════════╝${NC}"
-    echo ""
-}
-
-apply_disk_light_patches() {
-    # Post-deploy: convert Dask spill volume from hostPath to emptyDir
-    log_step "Disk-Light: Patching spill volume to emptyDir"
-
-    local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
-    local KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY-RUN] Would patch daskcluster spill volume to emptyDir (512Mi)"
-        log_info "[DRY-RUN] Would restart dask workers"
-        return 0
-    fi
-
-    # Patch the DaskCluster spill volume from hostPath to emptyDir
-    if sudo $KUBECTL --kubeconfig=$KUBECONFIG patch daskcluster cybersec-dask -n dask --type=json \
-        -p '[{"op":"replace","path":"/spec/worker/spec/volumes/0","value":{"name":"dask-spill","emptyDir":{"sizeLimit":"512Mi"}}}]' 2>&1; then
-        log_success "Patched spill volume to emptyDir (512Mi)"
-    else
-        log_warn "Could not patch spill volume — DaskCluster may not be deployed yet"
-        return 0
-    fi
-
-    # Restart workers to pick up volume change
-    log_info "Restarting dask workers..."
-    sudo $KUBECTL --kubeconfig=$KUBECONFIG delete pods -n dask -l dask.org/component=worker 2>/dev/null || true
-    log_success "Dask workers restarted with emptyDir spill volume"
 }
 
 # =============================================================================
-# Step 1: Check Prerequisites
+# Config Summary
+# =============================================================================
+print_config_summary() {
+    echo ""
+    echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}║  Zarf Deployment — v1.2.0                                    ║${NC}"
+    echo -e "${BOLD}╠══════════════════════════════════════════════════════════════╣${NC}"
+    printf "${BOLD}║${NC} %-18s %s\n" "KUBECONFIG:" "$KUBECONFIG"
+    printf "${BOLD}║${NC} %-18s %s\n" "NODE_IP:" "$NODE_IP"
+    printf "${BOLD}║${NC} %-18s %s\n" "S3_ENDPOINT:" "$S3_ENDPOINT"
+    printf "${BOLD}║${NC} %-18s %s\n" "S3_BUCKET:" "$S3_BUCKET"
+    printf "${BOLD}║${NC} %-18s %s\n" "Workers:" "$DASK_WORKER_REPLICAS"
+    printf "${BOLD}║${NC} %-18s %s\n" "Spill Dir:" "${DASK_SPILL_DIR:-<emptyDir>}"
+    printf "${BOLD}║${NC} %-18s %s\n" "Registry PV:" "$REGISTRY_PVC_SIZE @ $REGISTRY_STORAGE_PATH"
+    printf "${BOLD}║${NC} %-18s %s\n" "Flags:" "skip-build=$SKIP_BUILD skip-init=$SKIP_INIT dry-run=$DRY_RUN disk-light=$DISK_LIGHT verify-only=$VERIFY_ONLY"
+    echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
+
+    if [[ "$DISK_LIGHT" == "true" ]]; then
+        local trigger="--disk-light flag"
+        if [[ "$DISK_LIGHT_AUTO" == "true" ]]; then
+            trigger="auto-detected disk constraints"
+        fi
+        echo ""
+        echo -e "${YELLOW}  DISK-LIGHT MODE ACTIVE (${trigger})${NC}"
+        echo -e "${YELLOW}  Registry: hostPath PV ($REGISTRY_PVC_SIZE label, ~2 GB actual)${NC}"
+        echo -e "${YELLOW}  Spill: emptyDir 512Mi (post-deploy patch)${NC}"
+    fi
+    echo ""
+}
+
+# =============================================================================
+# Step 0: Baseline Check
+# =============================================================================
+check_baseline() {
+    log_step "Step 0: Environment Baseline"
+
+    # Disk usage on key paths
+    log_info "Disk usage:"
+    df -h / 2>/dev/null | head -2
+    for path in /raid /var/lib/rancher; do
+        if [[ -d "$path" ]]; then
+            df -h "$path" 2>/dev/null | tail -1
+        fi
+    done
+
+    # Node status
+    log_info "Cluster nodes:"
+    kubectl get nodes -o wide 2>/dev/null || log_warn "Cannot reach cluster"
+
+    # DiskPressure per node
+    log_info "DiskPressure status:"
+    kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}: DiskPressure={range .status.conditions[?(@.type=="DiskPressure")]}{.status}{end}{"\n"}{end}' 2>/dev/null || true
+
+    # Existing non-system pods
+    local pod_count
+    pod_count=$(kubectl get pods -A --no-headers 2>/dev/null \
+        | grep -v -E '^kube-system\s' | wc -l) || pod_count=0
+    log_info "Non-system pods: $pod_count"
+}
+
+# =============================================================================
+# Step 1: Eviction Config Check
+# =============================================================================
+check_eviction_config() {
+    log_step "Step 1: Kubelet Eviction Config"
+
+    # Only relevant if disk is above 85% used
+    local check_path="/var/lib/rancher"
+    if [[ ! -d "$check_path" ]]; then
+        check_path="/"
+    fi
+    local pct_used
+    pct_used=$(df "$check_path" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}') || true
+
+    if [[ -z "$pct_used" ]] || [[ "$pct_used" -lt 85 ]]; then
+        log_success "Disk usage ${pct_used:-unknown}% — default eviction thresholds OK"
+        return 0
+    fi
+
+    log_warn "Disk usage ${pct_used}% — checking custom eviction thresholds"
+
+    local config="/etc/rancher/rke2/config.yaml"
+    if [[ -f "$config" ]] && grep -q "eviction-hard" "$config" 2>/dev/null; then
+        log_success "Custom eviction thresholds found in $config"
+        grep -E "eviction|image-gc" "$config" 2>/dev/null | head -10
+        return 0
+    fi
+
+    echo ""
+    echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║  WARNING: Disk ${pct_used}% used with default eviction thresholds    ${NC}"
+    echo -e "${YELLOW}║  Kubelet may evict pods at 95% (default hard=5% free).      ${NC}"
+    echo -e "${YELLOW}║                                                              ${NC}"
+    echo -e "${YELLOW}║  Recommended: add to /etc/rancher/rke2/config.yaml:          ${NC}"
+    echo -e "${YELLOW}║                                                              ${NC}"
+    echo -e "${YELLOW}║  kubelet-arg:                                                ${NC}"
+    echo -e "${YELLOW}║    - eviction-hard=nodefs.available<2%,imagefs.available<2%  ${NC}"
+    echo -e "${YELLOW}║    - eviction-soft=nodefs.available<5%,imagefs.available<5%  ${NC}"
+    echo -e "${YELLOW}║    - image-gc-high-threshold=99                              ${NC}"
+    echo -e "${YELLOW}║                                                              ${NC}"
+    echo -e "${YELLOW}║  Then: sudo systemctl restart rke2-server                    ${NC}"
+    echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    return 0  # Non-fatal: warn only
+}
+
+# =============================================================================
+# Step 2: Check Prerequisites
 # =============================================================================
 check_prerequisites() {
-    log_step "Step 1: Checking Prerequisites"
+    log_step "Step 2: Checking Prerequisites"
 
     local errors=0
 
-    # Check RKE2 service
-    if systemctl is-active --quiet rke2-server 2>/dev/null; then
-        log_success "RKE2 server is running"
+    # Check kubectl connectivity
+    if kubectl get nodes &>/dev/null; then
+        log_success "kubectl connected to cluster"
     else
-        log_error "RKE2 server is not running"
-        log_info "Start with: sudo systemctl start rke2-server"
-        ((errors++))
-    fi
-
-    # Check for kubeconfig
-    if [[ -f /etc/rancher/rke2/rke2.yaml ]]; then
-        log_success "RKE2 kubeconfig exists"
-        export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-    else
-        log_error "RKE2 kubeconfig not found at /etc/rancher/rke2/rke2.yaml"
-        ((errors++))
-    fi
-
-    # Check kubectl access (using RKE2's kubectl)
-    local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
-    if [[ -x "$KUBECTL" ]]; then
-        if sudo $KUBECTL --kubeconfig=/etc/rancher/rke2/rke2.yaml get nodes &>/dev/null; then
-            log_success "kubectl can connect to cluster"
-            # Show node status
-            sudo $KUBECTL --kubeconfig=/etc/rancher/rke2/rke2.yaml get nodes -o wide
-        else
-            log_error "kubectl cannot connect to cluster"
-            ((errors++))
-        fi
-    else
-        log_error "RKE2 kubectl not found"
+        log_error "kubectl cannot connect to cluster (KUBECONFIG=$KUBECONFIG)"
         ((errors++))
     fi
 
     # Check Zarf CLI
     if command -v zarf &>/dev/null; then
-        log_success "Zarf CLI found: $(zarf version 2>/dev/null || echo 'unknown version')"
+        log_success "Zarf CLI: $(zarf version 2>/dev/null || echo 'unknown')"
     else
-        log_error "Zarf CLI not found"
+        log_error "Zarf CLI not found in PATH"
         ((errors++))
     fi
 
-    # Check Podman (for building images)
-    if command -v podman &>/dev/null; then
-        log_success "Podman found: $(podman --version)"
-    else
-        log_warn "Podman not found - custom image builds will fail"
+    # Check Podman (only required for build mode)
+    if [[ "$SKIP_BUILD" == "false" ]]; then
+        if command -v podman &>/dev/null; then
+            log_success "Podman: $(podman --version 2>/dev/null)"
+        else
+            log_warn "Podman not found — image builds will fail"
+        fi
     fi
 
-    # Check if zarf.yaml exists
+    # Check zarf.yaml exists
     if [[ -f "$ZARF_DIR/zarf.yaml" ]]; then
-        log_success "zarf.yaml found at $ZARF_DIR/zarf.yaml"
+        log_success "zarf.yaml found"
     else
-        log_error "zarf.yaml not found"
+        log_error "zarf.yaml not found at $ZARF_DIR/zarf.yaml"
         ((errors++))
     fi
 
     if [[ $errors -gt 0 ]]; then
-        log_error "Prerequisites check failed with $errors error(s)"
+        log_error "Prerequisites check failed ($errors error(s))"
         return 1
     fi
 
     log_success "All prerequisites passed"
-    return 0
 }
 
 # =============================================================================
-# Step 2: Verify Injector Prerequisites (kube-system pods)
+# Step 3: Verify Injector Prerequisites (kube-system pods for Zarf bootstrap)
 # =============================================================================
 verify_injector_prerequisites() {
-    log_step "Step 2: Verifying Injector Prerequisites"
+    log_step "Step 3: Verifying Injector Prerequisites"
 
-    # Zarf's injector needs a RUNNING POD with a suitable image to bootstrap.
-    # In a true air-gap environment, we CANNOT pull from docker.io.
-    # RKE2's kube-system pods (coredns, metrics-server) already satisfy this requirement.
+    log_info "Checking for running kube-system pods (required for Zarf injector)..."
 
-    local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
-    local KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
-
-    log_info "Checking for running kube-system pods (required for Zarf injector bootstrap)..."
-
-    # Wait for kube-system pods to be ready
     local max_wait=120
     local waited=0
     local running_pods=0
 
     while [[ $waited -lt $max_wait ]]; do
-        running_pods=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n kube-system --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+        running_pods=$(kubectl get pods -n kube-system --no-headers 2>/dev/null \
+            | grep -c "Running" || echo "0")
         if [[ "$running_pods" -ge 2 ]]; then
             log_success "Found $running_pods running pods in kube-system"
             break
         fi
-        log_info "Waiting for kube-system pods... ($waited/$max_wait seconds)"
+        log_info "Waiting for kube-system pods... ($waited/${max_wait}s)"
         sleep 5
         ((waited+=5))
     done
 
     if [[ "$running_pods" -lt 2 ]]; then
         log_error "Insufficient running pods in kube-system (found: $running_pods, need: 2+)"
-        log_error "Zarf injector requires running pods to bootstrap"
-        sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n kube-system
+        kubectl get pods -n kube-system 2>/dev/null || true
         return 1
     fi
 
-    # Show kube-system pods that Zarf can use for injection
-    log_info "kube-system pods available for Zarf injector:"
-    sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n kube-system
-
-    # Verify specific pods Zarf typically uses
-    local coredns_running=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n kube-system -l k8s-app=kube-dns --no-headers 2>/dev/null | grep -c "Running" || echo "0")
-    if [[ "$coredns_running" -ge 1 ]]; then
-        log_success "CoreDNS pod(s) running - suitable for Zarf injector"
+    # Check for common injector targets
+    local coredns_count
+    coredns_count=$(kubectl get pods -n kube-system -l k8s-app=kube-dns --no-headers 2>/dev/null \
+        | grep -c "Running" || echo "0")
+    if [[ "$coredns_count" -ge 1 ]]; then
+        log_success "CoreDNS running — suitable for Zarf injector"
     fi
-
-    local metrics_running
-    metrics_running=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n kube-system -l k8s-app=metrics-server --no-headers 2>/dev/null | grep -c "Running") || metrics_running=0
-    if [[ "$metrics_running" -ge 1 ]]; then
-        log_success "Metrics-server pod(s) running - suitable for Zarf injector"
-    fi
-
-    return 0
 }
 
 # =============================================================================
-# Step 3: Start Local Registry (BUILD PHASE ONLY - requires network)
-# =============================================================================
-start_local_registry() {
-    log_step "Step 3: Starting Local Registry (for image builds)"
-
-    # NOTE: This step is for the BUILD phase only.
-    # In a true air-gap deployment, images are already packaged in the Zarf archive.
-    # Use --skip-build to skip this step when deploying pre-built packages.
-
-    if [[ "$SKIP_BUILD" == "true" ]]; then
-        log_info "Skipping local registry (--skip-build mode)"
-        return 0
-    fi
-
-    if ! command -v podman &>/dev/null; then
-        log_warn "Podman not available, skipping local registry"
-        return 0
-    fi
-
-    # Check if registry is already running
-    if podman ps --format '{{.Names}}' | grep -q '^registry$'; then
-        log_success "Local registry already running"
-        return 0
-    fi
-
-    # Check if registry container exists but is stopped
-    if podman ps -a --format '{{.Names}}' | grep -q '^registry$'; then
-        log_info "Starting existing registry container..."
-        podman start registry
-    else
-        log_info "Creating new registry container..."
-        # NOTE: This requires network access - for BUILD phase only
-        podman run -d --name registry -p 5555:5000 registry:2
-    fi
-
-    # Wait for registry to be ready
-    sleep 2
-    if curl -s http://localhost:5555/v2/ &>/dev/null; then
-        log_success "Local registry is running on port 5555"
-    else
-        log_error "Local registry failed to start"
-        return 1
-    fi
-
-    return 0
-}
-
-# =============================================================================
-# Step 4: Build Custom Dask Image
-# =============================================================================
-build_custom_image() {
-    log_step "Step 4: Building Custom Dask Image"
-
-    if [[ "$SKIP_BUILD" == "true" ]]; then
-        log_info "Skipping image build (--skip-build)"
-        return 0
-    fi
-
-    if ! command -v podman &>/dev/null; then
-        log_error "Podman required for building custom images"
-        return 1
-    fi
-
-    local DOCKERFILE="$ZARF_DIR/images/Dockerfile.cybersec-dask"
-    local IMAGE_TAG="localhost:5555/cybersec-dask:2025.2.0"
-
-    if [[ ! -f "$DOCKERFILE" ]]; then
-        log_error "Dockerfile not found: $DOCKERFILE"
-        return 1
-    fi
-
-    log_info "Building image: $IMAGE_TAG"
-    cd "$ZARF_DIR/images"
-
-    if podman build -t "$IMAGE_TAG" -f Dockerfile.cybersec-dask . 2>&1 | tail -10; then
-        log_success "Image built: $IMAGE_TAG"
-    else
-        log_error "Image build failed"
-        return 1
-    fi
-
-    log_info "Pushing image to local registry..."
-    if podman push --tls-verify=false "$IMAGE_TAG" 2>&1 | tail -5; then
-        log_success "Image pushed to registry"
-    else
-        log_error "Image push failed"
-        return 1
-    fi
-
-    cd "$ZARF_DIR"
-    return 0
-}
-
-# =============================================================================
-# Step 5: Download Zarf Init Package
-# =============================================================================
-download_zarf_init() {
-    log_step "Step 5: Downloading Zarf Init Package"
-
-    local INIT_PACKAGE="$ZARF_DIR/zarf-init-amd64-v$(zarf version 2>/dev/null | tr -d 'v').tar.zst"
-
-    # Check for any init package
-    if ls "$ZARF_DIR"/zarf-init-amd64-*.tar.zst &>/dev/null; then
-        log_success "Zarf init package already exists"
-        ls -la "$ZARF_DIR"/zarf-init-amd64-*.tar.zst
-        return 0
-    fi
-
-    log_info "Downloading Zarf init package..."
-    cd "$ZARF_DIR"
-    if zarf tools download-init 2>&1 | tail -10; then
-        log_success "Zarf init package downloaded"
-    else
-        log_error "Failed to download Zarf init package"
-        return 1
-    fi
-
-    return 0
-}
-
-# =============================================================================
-# Step 5.5: Setup Storage for Zarf Registry
+# Step 4: Setup Storage for Zarf Registry
 # =============================================================================
 setup_storage() {
-    log_step "Step 5.5: Setting Up Storage for Zarf Registry"
+    log_step "Step 4: Setting Up Registry Storage"
 
-    local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
-    local KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
-    local STORAGE_PATH="/var/lib/zarf-registry"
+    local PV_SIZE="$REGISTRY_PVC_SIZE"
+    local STORAGE_PATH="$REGISTRY_STORAGE_PATH"
 
-    # Registry ALWAYS needs a hostPath PV — even in disk-light mode.
-    # REGISTRY_PVC_ENABLED=false crashes the registry ("no storage configuration
-    # provided"), so we use a small PV instead. Actual registry usage is ~2 GB.
-    local PV_SIZE="20Gi"
-    if [[ "$DISK_LIGHT" == "true" ]]; then
-        PV_SIZE="5Gi"
-        log_info "Disk-light: using small registry PV ($PV_SIZE label, ~2 GB actual)"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would create $STORAGE_PATH and ${PV_SIZE} PV"
+        return 0
     fi
 
-    # Create storage directory with proper permissions
+    # Create storage directory (sudo only for mkdir/chown on host path)
     log_info "Creating storage directory: $STORAGE_PATH"
     sudo mkdir -p "$STORAGE_PATH"
     sudo chown 1000:2000 "$STORAGE_PATH"
     sudo chmod 777 "$STORAGE_PATH"
-    # SELinux context (RHEL/Rocky — harmless no-op on other distros)
+    # SELinux context (RHEL/Rocky — harmless no-op elsewhere)
     sudo chcon -R -t container_file_t "$STORAGE_PATH" 2>/dev/null || true
 
     # Clean up stuck PVC/PV from previous failed init (Lost phase, stuck finalizers)
     local pvc_phase
-    pvc_phase=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pvc zarf-docker-registry -n zarf \
+    pvc_phase=$(kubectl get pvc zarf-docker-registry -n zarf \
         -o jsonpath='{.status.phase}' 2>/dev/null) || true
     if [[ "$pvc_phase" == "Lost" ]]; then
         log_warn "Found PVC in Lost phase — cleaning up stuck state"
-        sudo $KUBECTL --kubeconfig=$KUBECONFIG patch pvc zarf-docker-registry -n zarf \
+        kubectl patch pvc zarf-docker-registry -n zarf \
             -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-        sudo $KUBECTL --kubeconfig=$KUBECONFIG delete pvc zarf-docker-registry -n zarf \
+        kubectl delete pvc zarf-docker-registry -n zarf \
             --force --grace-period=0 2>/dev/null || true
-        sudo $KUBECTL --kubeconfig=$KUBECONFIG patch pv zarf-registry-pv \
+        kubectl patch pv zarf-registry-pv \
             -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-        sudo $KUBECTL --kubeconfig=$KUBECONFIG delete pv zarf-registry-pv \
+        kubectl delete pv zarf-registry-pv \
             --force --grace-period=0 2>/dev/null || true
         log_success "Cleaned up stuck PVC/PV"
     fi
 
     # Check if PV already exists and is healthy
     local pv_phase
-    pv_phase=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pv zarf-registry-pv \
+    pv_phase=$(kubectl get pv zarf-registry-pv \
         -o jsonpath='{.status.phase}' 2>/dev/null) || true
     if [[ "$pv_phase" == "Available" || "$pv_phase" == "Bound" ]]; then
         log_success "PV zarf-registry-pv already exists (phase: $pv_phase)"
         return 0
     fi
 
-    # Create PV for Zarf registry (RKE2 doesn't have a default storage class)
-    # claimRef pre-binds to the PVC that zarf init will create
-    log_info "Creating PersistentVolume for Zarf registry ($PV_SIZE)..."
-    cat <<EOF | sudo $KUBECTL --kubeconfig=$KUBECONFIG apply -f -
+    # Create PV with claimRef pre-binding to zarf-docker-registry PVC
+    log_info "Creating PersistentVolume ($PV_SIZE)..."
+    cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -492,73 +500,72 @@ spec:
     namespace: zarf
     name: zarf-docker-registry
 EOF
-
-    if [[ $? -eq 0 ]]; then
-        log_success "Created PV for Zarf registry ($PV_SIZE)"
-    else
-        log_warn "Failed to create PV - may already exist or not needed"
-    fi
-
-    return 0
+    log_success "Created PV for Zarf registry ($PV_SIZE)"
 }
 
 # =============================================================================
-# Step 6: Initialize Zarf on Cluster
+# Step 5: Initialize Zarf
 # =============================================================================
 initialize_zarf() {
-    log_step "Step 6: Initializing Zarf on Cluster"
+    log_step "Step 5: Initializing Zarf"
 
     if [[ "$SKIP_INIT" == "true" ]]; then
         log_info "Skipping Zarf init (--skip-init)"
         return 0
     fi
 
-    # Create accessible kubeconfig
-    local KUBECONFIG_TMP="/tmp/kubeconfig-zarf.yaml"
-    sudo cp /etc/rancher/rke2/rke2.yaml "$KUBECONFIG_TMP"
-    sudo chmod 644 "$KUBECONFIG_TMP"
-    export KUBECONFIG="$KUBECONFIG_TMP"
-
-    # Check if Zarf is already fully initialized (registry service exists and running)
+    # Check if already initialized
     if kubectl get svc zarf-docker-registry -n zarf &>/dev/null; then
-        local registry_pods=$(kubectl get pods -n zarf -l app=docker-registry -o jsonpath='{.items[*].status.phase}' 2>/dev/null)
-        if [[ "$registry_pods" == *"Running"* ]]; then
-            log_success "Zarf already initialized - registry is running"
-            kubectl get pods -n zarf
+        local registry_phase
+        registry_phase=$(kubectl get pods -n zarf -l app=docker-registry \
+            -o jsonpath='{.items[*].status.phase}' 2>/dev/null) || true
+        if [[ "$registry_phase" == *"Running"* ]]; then
+            log_success "Zarf already initialized — registry is running"
             return 0
         fi
     fi
 
-    # Delete any partial initialization
-    if kubectl get ns zarf &>/dev/null; then
-        log_warn "Zarf namespace exists but registry not running - will re-initialize"
-    fi
-
     cd "$ZARF_DIR"
 
-    log_info "Running Zarf init..."
+    # Find or download init package
+    local init_pkg
+    init_pkg=$(ls -t "$ZARF_DIR"/zarf-init-amd64-*.tar.zst 2>/dev/null | head -1) || true
 
-    local ZARF_INIT_ARGS="--confirm"
-    if [[ "$DISK_LIGHT" == "true" ]]; then
-        ZARF_INIT_ARGS="$ZARF_INIT_ARGS --set REGISTRY_PVC_SIZE=5Gi"
-        log_info "Disk-light: registry PVC sized to 5Gi (pre-bound hostPath PV)"
+    if [[ -z "$init_pkg" ]]; then
+        if [[ "$SKIP_BUILD" == "true" ]]; then
+            log_error "No zarf-init package found and --skip-build set"
+            return 1
+        fi
+        log_info "Downloading Zarf init package..."
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY-RUN] Would run: zarf tools download-init"
+            return 0
+        fi
+        zarf tools download-init
+        init_pkg=$(ls -t "$ZARF_DIR"/zarf-init-amd64-*.tar.zst 2>/dev/null | head -1) || true
+        if [[ -z "$init_pkg" ]]; then
+            log_error "Failed to download init package"
+            return 1
+        fi
     fi
+    log_success "Init package: $(basename "$init_pkg")"
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY-RUN] Would run: zarf init $ZARF_INIT_ARGS"
+        log_info "[DRY-RUN] Would run: zarf init --confirm --set REGISTRY_PVC_SIZE=$REGISTRY_PVC_SIZE"
         return 0
     fi
 
-    # Run Zarf init with detailed output
-    if zarf init $ZARF_INIT_ARGS 2>&1 | tee /tmp/zarf-init.log | tail -30; then
+    log_info "Running zarf init..."
+    if zarf init --confirm --set REGISTRY_PVC_SIZE="$REGISTRY_PVC_SIZE" 2>&1 \
+        | tee /tmp/zarf-init.log | tail -30; then
         log_success "Zarf initialized successfully"
     else
-        log_error "Zarf init failed - check /tmp/zarf-init.log for details"
+        log_error "Zarf init failed — see /tmp/zarf-init.log"
         tail -50 /tmp/zarf-init.log
         return 1
     fi
 
-    # Verify Zarf namespace
+    # Verify
     if kubectl get ns zarf &>/dev/null; then
         log_success "Zarf namespace created"
         kubectl get pods -n zarf
@@ -566,349 +573,561 @@ initialize_zarf() {
         log_error "Zarf namespace not found after init"
         return 1
     fi
-
-    return 0
 }
 
 # =============================================================================
-# Step 7: Build Zarf Package
+# Auto-detect Package Version (glob instead of hardcoded)
 # =============================================================================
-build_zarf_package() {
-    log_step "Step 7: Building Zarf Package"
+detect_package_file() {
+    PKG_FILE=$(ls -t "$ZARF_DIR"/zarf-package-cybersec-dask-amd64-*.tar.zst 2>/dev/null | head -1) || true
+    if [[ -z "$PKG_FILE" ]]; then
+        log_error "No cybersec-dask package found in $ZARF_DIR"
+        log_info "Expected: zarf-package-cybersec-dask-amd64-*.tar.zst"
+        return 1
+    fi
+    export PKG_FILE
+    log_success "Package: $(basename "$PKG_FILE")"
+}
 
-    if [[ "$SKIP_BUILD" == "true" ]]; then
-        log_info "Skipping package build (--skip-build)"
+# =============================================================================
+# Step 6: Deploy Zarf Package (with S3/Dask env vars)
+# =============================================================================
+deploy_package() {
+    log_step "Step 6: Deploying Cybersec Dask Package"
+
+    log_info "Workers: $DASK_WORKER_REPLICAS"
+    log_info "Spill dir: ${DASK_SPILL_DIR:-<emptyDir post-patch>}"
+    log_info "S3 endpoint: $S3_ENDPOINT"
+    log_info "S3 bucket: $S3_BUCKET"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would run:"
+        echo "  zarf package deploy $(basename "$PKG_FILE") --confirm \\"
+        echo "    --set DASK_WORKER_REPLICAS=$DASK_WORKER_REPLICAS \\"
+        echo "    --set S3_ENDPOINT=$S3_ENDPOINT \\"
+        echo "    --set S3_BUCKET=$S3_BUCKET \\"
+        echo "    --set S3_REGION=$S3_REGION \\"
+        echo "    --set S3_ACCESS_KEY=*** \\"
+        echo "    --set S3_SECRET_KEY=*** \\"
+        if [[ -n "$DASK_SPILL_DIR" ]]; then
+            echo "    --set DASK_SPILL_DIR=$DASK_SPILL_DIR"
+        else
+            echo "    (DASK_SPILL_DIR unset — will patch to emptyDir post-deploy)"
+        fi
         return 0
     fi
 
-    local PACKAGE_FILE="$ZARF_DIR/zarf-package-cybersec-dask-amd64-1.0.0.tar.zst"
+    cd "$ZARF_DIR"
 
-    if [[ -f "$PACKAGE_FILE" ]]; then
-        log_success "Zarf package already exists"
-        ls -lh "$PACKAGE_FILE"
+    # Build the deploy command with conditional DASK_SPILL_DIR
+    if zarf package deploy "$PKG_FILE" --confirm \
+        --set DASK_WORKER_REPLICAS="$DASK_WORKER_REPLICAS" \
+        --set S3_ENDPOINT="$S3_ENDPOINT" \
+        --set S3_BUCKET="$S3_BUCKET" \
+        --set S3_REGION="$S3_REGION" \
+        --set S3_ACCESS_KEY="$S3_ACCESS_KEY" \
+        --set S3_SECRET_KEY="$S3_SECRET_KEY" \
+        ${DASK_SPILL_DIR:+--set DASK_SPILL_DIR="$DASK_SPILL_DIR"} \
+        2>&1 | tee /tmp/zarf-deploy.log | tail -30; then
+        log_success "Package deployed"
+    else
+        log_error "Deploy failed — see /tmp/zarf-deploy.log"
+        tail -50 /tmp/zarf-deploy.log
+        return 1
+    fi
+}
+
+# =============================================================================
+# Post-Deploy: Spill Volume Patch (emptyDir fallback)
+# Ported from devenv.nix:2861-2880
+# =============================================================================
+post_deploy_spill_patch() {
+    # If DASK_SPILL_DIR is empty or the path doesn't exist on the node,
+    # patch DaskCluster to use emptyDir instead of hostPath
+    if [[ -n "$DASK_SPILL_DIR" ]]; then
+        log_info "Spill dir set ($DASK_SPILL_DIR) — keeping hostPath volume"
+        return 0
+    fi
+
+    log_step "Post-Deploy: Patching spill volume to emptyDir"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would patch daskcluster spill volume to emptyDir (512Mi)"
+        return 0
+    fi
+
+    if kubectl get daskcluster cybersec-dask -n dask &>/dev/null; then
+        if kubectl patch daskcluster cybersec-dask -n dask --type=json \
+            -p '[{"op":"replace","path":"/spec/worker/spec/volumes/0","value":{"name":"dask-spill","emptyDir":{"sizeLimit":"512Mi"}}}]' \
+            2>/dev/null; then
+            log_success "Patched spill volume to emptyDir (512Mi)"
+        else
+            log_warn "Could not patch spill volume (may not have volume at index 0)"
+            return 0
+        fi
+
+        # Restart workers to pick up volume change
+        log_info "Restarting dask workers..."
+        kubectl rollout restart deployment -n dask -l dask.org/component=worker 2>/dev/null \
+            || kubectl delete pods -n dask -l dask.org/component=worker 2>/dev/null \
+            || true
+        log_success "Workers restarting with emptyDir spill"
+    else
+        log_warn "DaskCluster not found — skipping spill patch"
+    fi
+}
+
+# =============================================================================
+# Step 7: Deploy Kubernetes Dashboard (optional, non-fatal)
+# =============================================================================
+deploy_dashboard() {
+    log_step "Step 7: Kubernetes Dashboard (optional)"
+
+    local dashboard_dir="$ZARF_DIR/kubernetes-dashboard"
+    local dashboard_pkg
+    dashboard_pkg=$(ls -t "$dashboard_dir"/zarf-package-cybersec-k8s-dashboard-*.tar.zst 2>/dev/null | head -1) || true
+
+    if [[ -z "$dashboard_pkg" ]]; then
+        log_info "No dashboard package found — skipping"
+        return 0
+    fi
+
+    # Check if already deployed
+    if kubectl get ns kubernetes-dashboard &>/dev/null; then
+        log_success "Kubernetes Dashboard already deployed"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would deploy: $(basename "$dashboard_pkg")"
+        return 0
+    fi
+
+    log_info "Deploying Kubernetes Dashboard..."
+    if zarf package deploy "$dashboard_pkg" --confirm 2>&1 | tail -10; then
+        log_success "Kubernetes Dashboard deployed"
+    else
+        log_warn "Dashboard deploy failed (non-fatal)"
+    fi
+}
+
+# =============================================================================
+# Step 8: Comprehensive Verification
+# =============================================================================
+verify_deployment() {
+    log_step "Step 8: Verifying Deployment"
+
+    local errors=0
+    local warnings=0
+
+    # --- Namespaces ---
+    log_info "Checking namespaces..."
+    local expected_ns="zarf dask-operator dask jupyterhub panel-viz"
+    for ns in $expected_ns; do
+        if kubectl get ns "$ns" &>/dev/null; then
+            log_success "Namespace: $ns"
+        else
+            log_warn "Namespace missing: $ns"
+            ((warnings++))
+        fi
+    done
+
+    # --- Pod Status Checks ---
+    log_info "Checking pod status..."
+
+    # Helper: check pod phase by label
+    _check_pod() {
+        local ns="$1" label="$2" name="$3" required="${4:-true}"
+        local phase
+        phase=$(kubectl get pods -n "$ns" -l "$label" \
+            -o jsonpath='{.items[0].status.phase}' 2>/dev/null) || true
+        if [[ "$phase" == "Running" ]]; then
+            log_success "$name: Running"
+            return 0
+        elif [[ "$required" == "true" ]]; then
+            log_error "$name: ${phase:-NotFound}"
+            ((errors++))
+            return 1
+        else
+            log_warn "$name: ${phase:-NotFound}"
+            ((warnings++))
+            return 1
+        fi
+    }
+
+    _check_pod "zarf"          "app=docker-registry"                               "Zarf Registry"
+    _check_pod "dask-operator" "app.kubernetes.io/name=dask-kubernetes-operator"    "Dask Operator"
+    _check_pod "dask"          "dask.org/component=scheduler"                       "Dask Scheduler"
+    _check_pod "jupyterhub"    "component=hub"                                      "JupyterHub"        "false"
+    _check_pod "jupyterhub"    "component=proxy"                                    "JupyterHub Proxy"  "false"
+    _check_pod "panel-viz"     "app=otel-navigator"                                 "OTEL Navigator"    "false"
+    _check_pod "panel-viz"     "app=navigator-engine"                               "Navigator Engine"  "false"
+
+    # Worker count
+    log_info "Checking Dask workers..."
+    local actual_workers
+    actual_workers=$(kubectl get pods -n dask -l dask.org/component=worker \
+        --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+    if [[ "$actual_workers" -ge "$DASK_WORKER_REPLICAS" ]]; then
+        log_success "Dask Workers: $actual_workers/$DASK_WORKER_REPLICAS running"
+    else
+        log_warn "Dask Workers: $actual_workers/$DASK_WORKER_REPLICAS running"
+        ((warnings++))
+    fi
+
+    # --- HTTP Endpoint Checks ---
+    log_info "Checking HTTP endpoints (via NODE_IP=$NODE_IP)..."
+
+    _check_http() {
+        local url="$1" name="$2"
+        local code
+        code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$url" 2>/dev/null || echo "000")
+        if echo "$code" | grep -qE "^(200|301|302)$"; then
+            log_success "$name: HTTP $code ($url)"
+        else
+            log_warn "$name: HTTP $code ($url)"
+            ((warnings++))
+        fi
+    }
+
+    _check_http "http://${NODE_IP}:30087/" "Dask Dashboard"
+    _check_http "http://${NODE_IP}:30506/" "OTEL Navigator"
+    _check_http "http://${NODE_IP}:30080/" "JupyterHub"
+
+    # --- S3 Bucket Check ---
+    log_info "Checking S3 bucket ($S3_BUCKET)..."
+    local scheduler_pod
+    scheduler_pod=$(kubectl get pod -n dask -l dask.org/component=scheduler \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+    if [[ -n "$scheduler_pod" ]]; then
+        if kubectl exec -n dask "$scheduler_pod" -- python -c "
+import s3fs, os
+fs = s3fs.S3FileSystem(
+    key=os.environ.get('AWS_ACCESS_KEY_ID', ''),
+    secret=os.environ.get('AWS_SECRET_ACCESS_KEY', ''),
+    client_kwargs={'endpoint_url': os.environ.get('S3_ENDPOINT', '')}
+)
+try:
+    fs.ls('$S3_BUCKET')
+    print('exists')
+except Exception:
+    print('missing')
+" 2>/dev/null | grep -q "exists"; then
+            log_success "S3 bucket '$S3_BUCKET' exists"
+        else
+            log_warn "S3 bucket '$S3_BUCKET' not found or not accessible"
+            log_info "Create manually: kubectl exec -n dask $scheduler_pod -- python -c \"import s3fs, os; fs = s3fs.S3FileSystem(key=os.environ['AWS_ACCESS_KEY_ID'], secret=os.environ['AWS_SECRET_ACCESS_KEY'], client_kwargs={'endpoint_url': os.environ['S3_ENDPOINT']}); fs.mkdir('$S3_BUCKET')\""
+            ((warnings++))
+        fi
+    else
+        log_warn "No scheduler pod — skipping S3 check"
+        ((warnings++))
+    fi
+
+    # --- Dask Connectivity Check ---
+    log_info "Checking Dask cluster connectivity..."
+    local engine_pod
+    engine_pod=$(kubectl get pod -n panel-viz -l app=navigator-engine \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+    if [[ -n "$engine_pod" ]]; then
+        local worker_count
+        worker_count=$(kubectl exec -n panel-viz "$engine_pod" -- python -c "
+from dask.distributed import Client
+c = Client('tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786', timeout='10s')
+print(len(c.scheduler_info()['workers']))
+c.close()
+" 2>/dev/null) || true
+        if [[ -n "$worker_count" ]] && [[ "$worker_count" -gt 0 ]]; then
+            log_success "Dask cluster: $worker_count workers connected"
+        else
+            log_warn "Dask cluster connectivity check failed"
+            ((warnings++))
+        fi
+    else
+        log_warn "No navigator-engine pod — skipping Dask connectivity check"
+        ((warnings++))
+    fi
+
+    # --- DiskPressure Check ---
+    log_info "Checking DiskPressure..."
+    local dp_nodes
+    dp_nodes=$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}={range .status.conditions[?(@.type=="DiskPressure")]}{.status}{end}{" "}{end}' 2>/dev/null) || true
+    local dp_found=false
+    for entry in $dp_nodes; do
+        local node_name="${entry%%=*}"
+        local dp_status="${entry##*=}"
+        if [[ "$dp_status" == "True" ]]; then
+            log_warn "DiskPressure=True on $node_name"
+            dp_found=true
+            ((warnings++))
+        fi
+    done
+    if [[ "$dp_found" == "false" ]]; then
+        log_success "No DiskPressure on any node"
+    fi
+
+    # --- DaskCluster Status ---
+    log_info "DaskCluster status:"
+    kubectl get daskcluster -n dask 2>/dev/null || log_warn "No DaskCluster found"
+
+    # --- Summary Table ---
+    echo ""
+    echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}║  Deployment Summary                                          ║${NC}"
+    echo -e "${BOLD}╠══════════════════════════════════════════════════════════════╣${NC}"
+
+    _summary_line() {
+        local label="$1" ns="$2" selector="$3"
+        local phase
+        phase=$(kubectl get pods -n "$ns" -l "$selector" \
+            -o jsonpath='{.items[0].status.phase}' 2>/dev/null) || phase="N/A"
+        printf "${BOLD}║${NC}  %-22s %s\n" "$label:" "$phase"
+    }
+
+    _summary_line "Zarf Registry"     "zarf"          "app=docker-registry"
+    _summary_line "Dask Operator"     "dask-operator"  "app.kubernetes.io/name=dask-kubernetes-operator"
+    _summary_line "Dask Scheduler"    "dask"           "dask.org/component=scheduler"
+    printf "${BOLD}║${NC}  %-22s %s\n" "Dask Workers:" "$actual_workers/$DASK_WORKER_REPLICAS"
+    _summary_line "JupyterHub"        "jupyterhub"     "component=hub"
+    _summary_line "OTEL Navigator"    "panel-viz"      "app=otel-navigator"
+    _summary_line "Navigator Engine"  "panel-viz"      "app=navigator-engine"
+
+    echo -e "${BOLD}╠══════════════════════════════════════════════════════════════╣${NC}"
+    printf "${BOLD}║${NC}  %-22s %s\n" "Dask Dashboard:" "http://${NODE_IP}:30087"
+    printf "${BOLD}║${NC}  %-22s %s\n" "OTEL Navigator:" "http://${NODE_IP}:30506"
+    printf "${BOLD}║${NC}  %-22s %s\n" "JupyterHub:" "http://${NODE_IP}:30080"
+    echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    if [[ $errors -gt 0 ]]; then
+        log_error "Verification: $errors error(s), $warnings warning(s)"
+        return 1
+    elif [[ $warnings -gt 0 ]]; then
+        log_warn "Verification: $warnings warning(s), 0 errors"
+        return 0
+    else
+        log_success "Verification: all checks passed"
+        return 0
+    fi
+}
+
+# =============================================================================
+# Build-Mode Steps (gated behind --skip-build)
+# =============================================================================
+start_local_registry() {
+    log_step "Build: Starting Local Registry"
+
+    if [[ "$SKIP_BUILD" == "true" ]]; then
+        log_info "Skipping (--skip-build)"
+        return 0
+    fi
+
+    if ! command -v podman &>/dev/null; then
+        log_warn "Podman not available — skipping local registry"
+        return 0
+    fi
+
+    if podman ps --format '{{.Names}}' | grep -q '^registry$'; then
+        log_success "Local registry already running"
+        return 0
+    fi
+
+    if podman ps -a --format '{{.Names}}' | grep -q '^registry$'; then
+        log_info "Starting existing registry container..."
+        podman start registry
+    else
+        log_info "Creating new registry container..."
+        podman run -d --name registry -p 5555:5000 registry:2
+    fi
+
+    sleep 2
+    if curl -s http://localhost:5555/v2/ &>/dev/null; then
+        log_success "Local registry running on port 5555"
+    else
+        log_error "Local registry failed to start"
+        return 1
+    fi
+}
+
+build_custom_image() {
+    log_step "Build: Custom Dask Image"
+
+    if [[ "$SKIP_BUILD" == "true" ]]; then
+        log_info "Skipping (--skip-build)"
+        return 0
+    fi
+
+    if ! command -v podman &>/dev/null; then
+        log_error "Podman required for building images"
+        return 1
+    fi
+
+    local DOCKERFILE="$ZARF_DIR/images/Dockerfile.cybersec-dask"
+    local IMAGE_TAG="localhost:5555/cybersec-dask:2025.2.0"
+
+    if [[ ! -f "$DOCKERFILE" ]]; then
+        log_error "Dockerfile not found: $DOCKERFILE"
+        return 1
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would build: $IMAGE_TAG"
+        return 0
+    fi
+
+    log_info "Building: $IMAGE_TAG"
+    cd "$ZARF_DIR/images"
+
+    if podman build -t "$IMAGE_TAG" -f Dockerfile.cybersec-dask . 2>&1 | tail -10; then
+        log_success "Image built: $IMAGE_TAG"
+    else
+        log_error "Image build failed"
+        return 1
+    fi
+
+    log_info "Pushing to local registry..."
+    if podman push --tls-verify=false "$IMAGE_TAG" 2>&1 | tail -5; then
+        log_success "Image pushed"
+    else
+        log_error "Image push failed"
+        return 1
+    fi
+
+    cd "$ZARF_DIR"
+}
+
+build_zarf_package() {
+    log_step "Build: Zarf Package"
+
+    if [[ "$SKIP_BUILD" == "true" ]]; then
+        log_info "Skipping (--skip-build)"
+        return 0
+    fi
+
+    # Check if package already exists
+    if ls "$ZARF_DIR"/zarf-package-cybersec-dask-amd64-*.tar.zst &>/dev/null; then
+        log_success "Package already exists"
+        ls -lh "$ZARF_DIR"/zarf-package-cybersec-dask-amd64-*.tar.zst
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would run: zarf package create . --confirm"
         return 0
     fi
 
     cd "$ZARF_DIR"
 
     log_info "Building Zarf package..."
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY-RUN] Would run: zarf package create . --confirm"
-        return 0
-    fi
-
-    if zarf package create . --confirm --insecure-skip-tls-verify 2>&1 | tee /tmp/zarf-build.log | tail -20; then
-        log_success "Zarf package built"
+    if zarf package create . --confirm --insecure-skip-tls-verify 2>&1 \
+        | tee /tmp/zarf-build.log | tail -20; then
+        log_success "Package built"
         ls -lh "$ZARF_DIR"/*.tar.zst
     else
-        log_error "Zarf package build failed - check /tmp/zarf-build.log"
+        log_error "Package build failed — see /tmp/zarf-build.log"
         tail -30 /tmp/zarf-build.log
         return 1
     fi
-
-    return 0
 }
 
 # =============================================================================
-# Step 8: Deploy Zarf Package
+# Final Banner
 # =============================================================================
-deploy_zarf_package() {
-    log_step "Step 8: Deploying Zarf Package"
-
-    local KUBECONFIG_TMP="/tmp/kubeconfig-zarf.yaml"
-    export KUBECONFIG="$KUBECONFIG_TMP"
-
-    local PACKAGE_FILE="$ZARF_DIR/zarf-package-cybersec-dask-amd64-1.0.0.tar.zst"
-
-    if [[ ! -f "$PACKAGE_FILE" ]]; then
-        log_error "Zarf package not found: $PACKAGE_FILE"
-        return 1
-    fi
-
-    cd "$ZARF_DIR"
-
-    log_info "Deploying Zarf package..."
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY-RUN] Would run: zarf package deploy $PACKAGE_FILE --confirm"
-        return 0
-    fi
-
-    if zarf package deploy "$PACKAGE_FILE" --confirm 2>&1 | tee /tmp/zarf-deploy.log | tail -30; then
-        log_success "Zarf package deployed"
-    else
-        log_error "Zarf deployment failed - check /tmp/zarf-deploy.log"
-        tail -50 /tmp/zarf-deploy.log
-        return 1
-    fi
-
-    return 0
-}
-
-# =============================================================================
-# Step 8.5: Fix Image Tag Mismatch (Zarf suffix issue)
-# =============================================================================
-fix_image_tags() {
-    log_step "Step 8.5: Fixing Image Tag Mismatch"
-
-    # When Zarf init was done at a different time than package creation,
-    # the agent mutations may use a different suffix than what was pushed.
-    # This function detects and fixes this mismatch.
-
-    local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
-    local KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
-
-    # Check if dask pods are in ImagePullBackOff
-    local dask_pods_status=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n dask 2>/dev/null | grep -E "ImagePullBackOff|ErrImagePull" | wc -l)
-
-    if [[ "$dask_pods_status" -eq 0 ]]; then
-        log_success "No image pull issues detected"
-        return 0
-    fi
-
-    log_warn "Detected ImagePullBackOff - checking for Zarf suffix mismatch..."
-
-    # Get registry credentials
-    local REG_INFO=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get secret -n zarf zarf-state -o jsonpath='{.data.state}' | base64 -d)
-    local PUSH_USER=$(echo "$REG_INFO" | jq -r '.registryInfo.pushUsername')
-    local PUSH_PASS=$(echo "$REG_INFO" | jq -r '.registryInfo.pushPassword')
-    local PULL_USER=$(echo "$REG_INFO" | jq -r '.registryInfo.pullUsername')
-    local PULL_PASS=$(echo "$REG_INFO" | jq -r '.registryInfo.pullPassword')
-    local REG_ADDR=$(echo "$REG_INFO" | jq -r '.registryInfo.address')
-
-    # Get what image the pods are trying to pull
-    local EXPECTED_IMAGE=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get events -n dask --sort-by='.lastTimestamp' 2>/dev/null | grep "pulling image" | tail -1 | grep -oE '127\.0\.0\.1:[0-9]+/[^"]+' | head -1)
-
-    if [[ -z "$EXPECTED_IMAGE" ]]; then
-        log_warn "Could not determine expected image from events"
-        return 1
-    fi
-
-    log_info "Pods expect: $EXPECTED_IMAGE"
-
-    # Check what's actually in the registry
-    local REPOS=$(curl -s -u "$PULL_USER:$PULL_PASS" "http://$REG_ADDR/v2/_catalog" | jq -r '.repositories[]' 2>/dev/null)
-
-    for repo in cybersec-dask; do
-        local ACTUAL_TAGS=$(curl -s -u "$PULL_USER:$PULL_PASS" "http://$REG_ADDR/v2/$repo/tags/list" | jq -r '.tags[]' 2>/dev/null | head -5)
-        log_info "Registry has $repo tags: $ACTUAL_TAGS"
-
-        # If expected image is library/cybersec-dask but registry has cybersec-dask
-        if [[ "$EXPECTED_IMAGE" == *"library/cybersec-dask"* ]]; then
-            # Extract expected tag (e.g., 2024.8.0-zarf-1346278550)
-            local EXPECTED_TAG=$(echo "$EXPECTED_IMAGE" | grep -oE '[^:]+$')
-            local BASE_TAG=$(echo "$EXPECTED_TAG" | sed 's/-zarf-[0-9]*//')
-
-            log_info "Need to create library/cybersec-dask:$EXPECTED_TAG from cybersec-dask:$BASE_TAG"
-
-            # Use podman to copy the image
-            if command -v podman &>/dev/null; then
-                podman login "$REG_ADDR" --username "$PUSH_USER" --password "$PUSH_PASS" --tls-verify=false 2>/dev/null
-
-                log_info "Pulling cybersec-dask:$BASE_TAG..."
-                podman pull "$REG_ADDR/cybersec-dask:$BASE_TAG" --tls-verify=false 2>&1 | tail -2
-
-                log_info "Tagging and pushing to library/cybersec-dask:$EXPECTED_TAG..."
-                podman tag "$REG_ADDR/cybersec-dask:$BASE_TAG" "$REG_ADDR/library/cybersec-dask:$EXPECTED_TAG"
-                podman push "$REG_ADDR/library/cybersec-dask:$EXPECTED_TAG" --tls-verify=false 2>&1 | tail -2
-
-                log_success "Created library/cybersec-dask:$EXPECTED_TAG"
-
-                # Delete the stuck pods so they get recreated
-                log_info "Restarting dask pods..."
-                sudo $KUBECTL --kubeconfig=$KUBECONFIG delete pods -n dask --all 2>/dev/null
-
-                # Wait for pods to come up
-                sleep 15
-                local new_status=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n dask 2>/dev/null)
-                log_info "New pod status:\n$new_status"
-            else
-                log_error "Podman not available to fix image tags"
-                return 1
-            fi
-        fi
-    done
-
-    return 0
-}
-
-# =============================================================================
-# Step 9: Verify Deployment
-# =============================================================================
-verify_deployment() {
-    log_step "Step 9: Verifying Deployment"
-
-    local KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
-    local KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
-    local verification_errors=0
-
-    log_info "Checking namespaces..."
-    sudo $KUBECTL --kubeconfig=$KUBECONFIG get ns
-
-    # Check Zarf registry
-    log_info "Checking Zarf registry..."
-    local zarf_registry=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n zarf -l app=docker-registry -o jsonpath='{.items[*].status.phase}' 2>/dev/null)
-    if [[ "$zarf_registry" == *"Running"* ]]; then
-        log_success "Zarf registry is running"
-        sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n zarf
-    else
-        log_error "Zarf registry not running"
-        ((verification_errors++))
-    fi
-
-    # Check Dask operator
-    log_info "Checking Dask operator..."
-    local dask_operator=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n dask-operator -l app.kubernetes.io/name=dask-kubernetes-operator -o jsonpath='{.items[*].status.phase}' 2>/dev/null)
-    if [[ "$dask_operator" == *"Running"* ]]; then
-        log_success "Dask operator is running"
-        sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n dask-operator
-    else
-        log_warn "Dask operator not running or not deployed"
-    fi
-
-    # Check DaskCluster
-    log_info "Checking DaskCluster..."
-    local dask_cluster=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get daskcluster -n dask -o jsonpath='{.items[*].status.phase}' 2>/dev/null)
-    if [[ "$dask_cluster" == "Running" ]]; then
-        log_success "DaskCluster is running"
-        sudo $KUBECTL --kubeconfig=$KUBECONFIG get daskcluster -n dask
-    else
-        log_warn "DaskCluster not running (status: $dask_cluster)"
-    fi
-
-    # Check Dask pods
-    log_info "Checking Dask pods..."
-    local dask_scheduler=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n dask -l app.kubernetes.io/name=dask-scheduler -o jsonpath='{.items[*].status.phase}' 2>/dev/null)
-    if [[ "$dask_scheduler" == "Running" ]]; then
-        log_success "Dask scheduler is running"
-    else
-        log_warn "Dask scheduler not running (status: $dask_scheduler)"
-    fi
-    sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n dask 2>/dev/null || true
-
-    # Check Dask services
-    log_info "Checking Dask services..."
-    local dask_svc=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get svc -n dask -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
-    if [[ -n "$dask_svc" ]]; then
-        log_success "Dask services exist: $dask_svc"
-        sudo $KUBECTL --kubeconfig=$KUBECONFIG get svc -n dask
-    else
-        log_warn "No Dask services found"
-    fi
-
-    # Check Dask dashboard connectivity
-    log_info "Checking Dask dashboard connectivity..."
-    local dashboard_port=$(sudo $KUBECTL --kubeconfig=$KUBECONFIG get svc -n dask -l app.kubernetes.io/name=cybersec-dask -o jsonpath='{.items[0].spec.ports[?(@.name=="tcp-dashboard")].nodePort}' 2>/dev/null)
-    if [[ -n "$dashboard_port" ]]; then
-        local dashboard_status=$(curl -sL -o /dev/null -w "%{http_code}" "http://127.0.0.1:$dashboard_port/status" 2>/dev/null || echo "000")
-        if [[ "$dashboard_status" == "200" ]]; then
-            log_success "Dask dashboard accessible at http://127.0.0.1:$dashboard_port"
-        else
-            log_warn "Dask dashboard returned HTTP $dashboard_status"
-        fi
-    else
-        log_warn "Could not determine Dask dashboard port"
-    fi
-
-    # Check JupyterHub (optional)
-    log_info "Checking JupyterHub..."
-    if sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n jupyterhub 2>/dev/null | grep -q "Running"; then
-        log_success "JupyterHub pods are running"
-        sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n jupyterhub
-    else
-        log_info "JupyterHub not deployed (optional component)"
-    fi
-
-    # Summary
+print_final_banner() {
     echo ""
-    echo "=============================================="
-    log_info "Deployment Summary"
-    echo "=============================================="
-    echo "Zarf Registry:    $(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n zarf -l app=docker-registry -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo 'N/A')"
-    echo "Dask Operator:    $(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n dask-operator -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo 'N/A')"
-    echo "Dask Scheduler:   $(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n dask -l dask.org/component=scheduler -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo 'N/A')"
-    echo "Dask Workers:     $(sudo $KUBECTL --kubeconfig=$KUBECONFIG get pods -n dask -l dask.org/component=worker --no-headers 2>/dev/null | wc -l) running"
-    if [[ -n "$dashboard_port" ]]; then
-        echo "Dashboard URL:    http://127.0.0.1:$dashboard_port"
+    echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}${BOLD}║  Deployment Complete                                         ║${NC}"
+    echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  Dask Dashboard:  http://${NODE_IP}:30087"
+    echo -e "${GREEN}${BOLD}║${NC}  OTEL Navigator:  http://${NODE_IP}:30506"
+    echo -e "${GREEN}${BOLD}║${NC}  JupyterHub:      http://${NODE_IP}:30080"
+    if kubectl get ns kubernetes-dashboard &>/dev/null; then
+        echo -e "${GREEN}${BOLD}║${NC}  K8s Dashboard:   https://${NODE_IP}:10443"
     fi
-    echo "=============================================="
-
-    return $verification_errors
+    echo -e "${GREEN}${BOLD}║${NC}"
+    echo -e "${GREEN}${BOLD}║${NC}  Run verification:  $0 --verify-only"
+    echo -e "${GREEN}${BOLD}║${NC}"
+    echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
 }
 
 # =============================================================================
-# Main Execution
+# Main
 # =============================================================================
 main() {
-    echo "=============================================="
-    echo "Zarf Deployment Verification Script"
-    echo "=============================================="
-    echo "ZARF_DIR: $ZARF_DIR"
-    echo "PROJECT_ROOT: $PROJECT_ROOT"
-    echo "SKIP_INIT: $SKIP_INIT"
-    echo "SKIP_BUILD: $SKIP_BUILD"
-    echo "DRY_RUN: $DRY_RUN"
-    echo "DISK_LIGHT: $DISK_LIGHT"
-    echo "=============================================="
-
-    # Auto-detect disk constraints (may enable DISK_LIGHT)
-    detect_disk_constraints
-    print_disk_light_banner
-
-    local failed=0
-
-    check_prerequisites || ((failed++))
-
-    if [[ $failed -eq 0 ]]; then
-        verify_injector_prerequisites || ((failed++))
-    fi
-
-    if [[ $failed -eq 0 ]]; then
-        start_local_registry || ((failed++))
-    fi
-
-    if [[ $failed -eq 0 ]]; then
-        build_custom_image || ((failed++))
-    fi
-
-    if [[ $failed -eq 0 ]]; then
-        download_zarf_init || ((failed++))
-    fi
-
-    if [[ $failed -eq 0 ]]; then
-        setup_storage || ((failed++))
-    fi
-
-    if [[ $failed -eq 0 ]]; then
-        initialize_zarf || ((failed++))
-    fi
-
-    if [[ $failed -eq 0 ]]; then
-        build_zarf_package || ((failed++))
-    fi
-
-    if [[ $failed -eq 0 ]]; then
-        deploy_zarf_package || ((failed++))
-    fi
-
-    if [[ $failed -eq 0 ]] && [[ "$DISK_LIGHT" == "true" ]]; then
-        apply_disk_light_patches || log_warn "Disk-light patches may have failed, but continuing..."
-    fi
-
-    if [[ $failed -eq 0 ]]; then
-        fix_image_tags || log_warn "Image tag fix may have failed, but continuing..."
-    fi
-
-    verify_deployment
-
-    echo ""
-    echo "=============================================="
-    if [[ $failed -eq 0 ]]; then
-        log_success "All steps completed successfully!"
-    else
-        log_error "Script failed at step $failed"
+    # --- Environment setup ---
+    if ! _resolve_kubeconfig; then
         exit 1
     fi
-    echo "=============================================="
+    detect_node_ip
+    resolve_env_defaults
+    detect_disk_constraints
+    print_config_summary
+
+    # --- Verify-only mode: jump to verification ---
+    if [[ "$VERIFY_ONLY" == "true" ]]; then
+        verify_deployment
+        exit $?
+    fi
+
+    # --- Full deployment flow ---
+    local failed=0
+
+    check_baseline
+
+    check_eviction_config
+
+    if ! check_prerequisites; then
+        exit 1
+    fi
+
+    if ! verify_injector_prerequisites; then
+        exit 1
+    fi
+
+    # Build-mode steps (skipped with --skip-build)
+    if [[ "$SKIP_BUILD" == "false" ]]; then
+        if ! start_local_registry; then ((failed++)); fi
+        if [[ $failed -eq 0 ]]; then
+            if ! build_custom_image; then ((failed++)); fi
+        fi
+        if [[ $failed -eq 0 ]]; then
+            if ! build_zarf_package; then ((failed++)); fi
+        fi
+    fi
+
+    if [[ $failed -gt 0 ]]; then
+        log_error "Build phase failed"
+        exit 1
+    fi
+
+    # Storage & Init
+    if ! setup_storage; then
+        exit 1
+    fi
+
+    if ! initialize_zarf; then
+        exit 1
+    fi
+
+    # Deploy
+    if ! detect_package_file; then
+        exit 1
+    fi
+
+    if ! deploy_package; then
+        exit 1
+    fi
+
+    post_deploy_spill_patch
+
+    # Dashboard (non-fatal)
+    deploy_dashboard || true
+
+    # Verification
+    verify_deployment
+
+    print_final_banner
 }
 
 main "$@"
