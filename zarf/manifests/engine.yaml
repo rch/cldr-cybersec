@@ -1,0 +1,101 @@
+# NavigatorEngine gRPC server deployment
+# Provides command execution for the OTEL Navigator terminal (M2)
+#
+# Architecture:
+#   Browser → ghostty-web → WebSocket → PTY proxy (sidecar in panel-viz pod)
+#          → gRPC → NavigatorEngine (this deployment) → Dask cluster
+#
+# The engine runs in the same namespace as panel-viz and uses the same
+# Dask scheduler and S3 credentials. It's a separate deployment to allow
+# independent scaling and restart without affecting the visualization.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: navigator-engine
+  namespace: panel-viz
+  labels:
+    app: navigator-engine
+    app.kubernetes.io/name: navigator-engine
+    app.kubernetes.io/component: engine
+    app.kubernetes.io/managed-by: zarf
+    app.kubernetes.io/part-of: cybersec
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: navigator-engine
+  template:
+    metadata:
+      labels:
+        app: navigator-engine
+        app.kubernetes.io/name: navigator-engine
+    spec:
+      # Prefer scheduling near Dask workers for data locality
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    dask.org/component: worker
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: navigator-engine
+          image: localhost:5555/cybersec-dask:2025.2.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - cybersec.engine.server
+            - --port=50051
+          ports:
+            - containerPort: 50051
+              name: grpc
+              protocol: TCP
+          env:
+            - name: PYTHONPATH
+              value: /app
+            - name: DASK_SCHEDULER
+              value: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
+          envFrom:
+            - configMapRef:
+                name: otel-navigator-config
+            - secretRef:
+                name: otel-navigator-credentials
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: 2
+              memory: 4Gi
+          readinessProbe:
+            tcpSocket:
+              port: 50051
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 50051
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: navigator-engine
+  namespace: panel-viz
+  labels:
+    app: navigator-engine
+    app.kubernetes.io/name: navigator-engine
+    app.kubernetes.io/managed-by: zarf
+spec:
+  type: ClusterIP
+  selector:
+    app: navigator-engine
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
