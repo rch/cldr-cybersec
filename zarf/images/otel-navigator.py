@@ -11,7 +11,7 @@ Key architecture:
 
 Environment variables:
 - DASK_SCHEDULER: Dask scheduler address (required)
-- S3_BUCKET: S3 bucket name (default: cybersec-dask-data)
+- S3_BUCKET: S3 bucket name (default: cybersec-data)
 - OTEL_DATA_PATH: Path to OTEL data (default: s3://{S3_BUCKET}/otel-minimal/)
 - S3_ENDPOINT: S3 endpoint for MinIO (optional)
 - AWS_ACCESS_KEY_ID: S3 access key
@@ -44,7 +44,7 @@ pn.extension(loading_spinner='dots', loading_color='#0072B5')
 # -------------------------------------------------------------------------
 
 DASK_SCHEDULER = os.environ.get('DASK_SCHEDULER', '')
-S3_BUCKET = os.environ.get('S3_BUCKET', 'cybersec-dask-data')
+S3_BUCKET = os.environ.get('S3_BUCKET', 'cybersec-data')
 OTEL_DATA_PATH = os.environ.get('OTEL_DATA_PATH', f's3://{S3_BUCKET}/otel-minimal/')
 S3_ENDPOINT = os.environ.get('S3_ENDPOINT', '')
 AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')

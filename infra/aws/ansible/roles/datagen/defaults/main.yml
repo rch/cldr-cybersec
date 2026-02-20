@@ -5,7 +5,7 @@
 datagen_namespace: datagen
 
 # S3 bucket for data storage (uses s3_bucket_name from aws:deploy task, falls back to env/default)
-datagen_s3_bucket: "{{ s3_bucket_name | default(lookup('env', 'OTEL_S3_BUCKET') | default('cybersec-dask-data', true), true) }}"
+datagen_s3_bucket: "{{ s3_bucket_name | default(lookup('env', 'OTEL_S3_BUCKET') | default('cybersec-data', true), true) }}"
 
 # -------------------------------------------------------------------------
 # Minimal Dataset (Phase 1) - runs quickly, provides immediate data

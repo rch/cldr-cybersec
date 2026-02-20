@@ -306,12 +306,17 @@ async def cmd_aws_preflight(cmd: ParsedCommand) -> CommandResult:
             formatted="\n".join(lines),
         )
 
-    # Run quota checks
+    # Check if security logs are enabled (from env or default true)
+    import os
+    check_security_logs = os.environ.get("TF_VAR_enable_security_logs", "true").lower() == "true"
+
+    # Run quota checks (includes IAM permission probes when security logs enabled)
     result = await check_deployment_quotas(
         region=region,
         required_eips=1,  # NAT gateway
         required_vpcs=1,  # VPC
         profile=config.aws_profile,
+        check_security_logs=check_security_logs,
     )
 
     # Check for existing resources owned by this developer

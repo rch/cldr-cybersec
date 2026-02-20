@@ -33,8 +33,8 @@ get_cluster_info() {
 
 run_remote() {
     local cmd="$1"
-    ssh -i ~/.ssh/cybersec-dask.pem \
-        -o ProxyCommand="ssh -i ~/.ssh/cybersec-dask.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP" \
+    ssh -i ~/.ssh/cybersec.pem \
+        -o ProxyCommand="ssh -i ~/.ssh/cybersec.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP" \
         -o StrictHostKeyChecking=no \
         -o ConnectTimeout=5 \
         ec2-user@"$CONTROL_IP" "$cmd" 2>/dev/null
@@ -205,7 +205,7 @@ show_diagnostics() {
     # SSH connectivity issues
     if [ "$bastion_ok" -eq 0 ]; then
         echo -e "  ${YELLOW}Bastion unreachable:${NC}"
-        echo "    ssh -i ~/.ssh/cybersec-dask.pem ec2-user@$BASTION_IP"
+        echo "    ssh -i ~/.ssh/cybersec.pem ec2-user@$BASTION_IP"
         echo "    # Check: security group, instance state, key permissions"
         return
     fi
@@ -213,7 +213,7 @@ show_diagnostics() {
     if [ "$control_ok" -eq 0 ]; then
         echo -e "  ${YELLOW}Control plane unreachable via bastion:${NC}"
         echo "    # SSH to bastion first:"
-        echo "    ssh -i ~/.ssh/cybersec-dask.pem ec2-user@$BASTION_IP"
+        echo "    ssh -i ~/.ssh/cybersec.pem ec2-user@$BASTION_IP"
         echo "    # Then from bastion:"
         echo "    ssh ec2-user@$CONTROL_IP"
         return
@@ -231,7 +231,7 @@ show_diagnostics() {
     fi
 
     # Build SSH command for copy-paste
-    local ssh_cmd="ssh -i ~/.ssh/cybersec-dask.pem -o ProxyCommand=\"ssh -i ~/.ssh/cybersec-dask.pem -W %h:%p ec2-user@$BASTION_IP\" ec2-user@$CONTROL_IP"
+    local ssh_cmd="ssh -i ~/.ssh/cybersec.pem -o ProxyCommand=\"ssh -i ~/.ssh/cybersec.pem -W %h:%p ec2-user@$BASTION_IP\" ec2-user@$CONTROL_IP"
 
     # RKE2 issues
     local rke2_status=$(run_remote "systemctl is-active rke2-server 2>/dev/null" || echo "unknown")

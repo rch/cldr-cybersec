@@ -17,7 +17,7 @@ Usage:
         --spans 1000000 \
         --services 10 \
         --duration-hours 168 \
-        --bucket cybersec-dask-data \
+        --bucket cybersec-data \
         --prefix otel-custom
 
 Environment Variables:
@@ -286,8 +286,8 @@ def main():
     )
     parser.add_argument(
         "--bucket",
-        default=os.environ.get("OTEL_S3_BUCKET", "cybersec-dask-data"),
-        help="S3 bucket name (default: $OTEL_S3_BUCKET or cybersec-dask-data)",
+        default=os.environ.get("OTEL_S3_BUCKET", "cybersec-data"),
+        help="S3 bucket name (default: $OTEL_S3_BUCKET or cybersec-data)",
     )
     parser.add_argument(
         "--prefix",

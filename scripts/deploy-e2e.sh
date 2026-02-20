@@ -9,7 +9,7 @@
 # Prerequisites:
 #   - AWS credentials configured (aws configure or AWS_PROFILE)
 #   - Cloudflare API token with required permissions
-#   - SSH key at ~/.ssh/cybersec-dask.pem
+#   - SSH key at ~/.ssh/cybersec.pem
 #   - devenv installed and active
 #
 # Usage:
@@ -93,7 +93,7 @@ if [ "$SKIP_INFRA" = false ] && [ "$VERIFY_ONLY" = false ] && [ "$DATAGEN_ONLY" 
 fi
 
 # Check SSH key
-SSH_KEY="$HOME/.ssh/cybersec-dask.pem"
+SSH_KEY="$HOME/.ssh/cybersec.pem"
 if [ ! -f "$SSH_KEY" ]; then
     log_warn "SSH key not found at $SSH_KEY"
     log_info "The aws:provision task will create it automatically."

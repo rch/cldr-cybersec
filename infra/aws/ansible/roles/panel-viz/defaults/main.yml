@@ -28,7 +28,7 @@ panel_dask_scheduler: "simple-scheduler.dask.svc.cluster.local:8786"
 # Empty endpoint = use real AWS S3 (not MinIO)
 panel_s3_endpoint: ""
 # S3 bucket for OTEL data - uses s3_bucket_name from aws:deploy, OTEL_S3_BUCKET env var, or defaults
-panel_s3_bucket: "{{ s3_bucket_name | default(lookup('env', 'OTEL_S3_BUCKET') | default('cybersec-dask-data', true), true) }}"
+panel_s3_bucket: "{{ s3_bucket_name | default(lookup('env', 'OTEL_S3_BUCKET') | default('cybersec-data', true), true) }}"
 panel_otel_data_path: "s3://{{ panel_s3_bucket }}/otel-minimal/"
 
 # AWS credentials (from environment, AWS CLI config, or vault)

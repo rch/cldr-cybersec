@@ -437,8 +437,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--bucket",
-        default="cybersec-dask-data",
-        help="S3 bucket name (default: cybersec-dask-data)",
+        default="cybersec-data",
+        help="S3 bucket name (default: cybersec-data)",
     )
     parser.add_argument(
         "--prefix",

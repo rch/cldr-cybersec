@@ -204,7 +204,7 @@ deny contains msg if {
 # SSH key is required for AWS instance access
 deny contains msg if {
     not tools.ssh_key_exists
-    msg := "No SSH key found. Required for AWS instance access. Create: ssh-keygen -t ed25519 -f ~/.ssh/cybersec-dask.pem"
+    msg := "No SSH key found. Required for AWS instance access. Create: ssh-keygen -t ed25519 -f ~/.ssh/cybersec.pem"
 }
 
 # =============================================================================

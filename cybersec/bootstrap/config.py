@@ -103,7 +103,7 @@ class BootstrapConfig:
     # AWS configuration
     aws_profile: str = "default"
     aws_region: str = "us-east-1"
-    aws_project: str = "cybersec-dask"
+    aws_project: str = "cybersec"
     developer_prefix: str = ""  # Empty = auto-generate from git email
     developer_email: str = ""  # Empty = auto-detect from git config
 
@@ -343,7 +343,7 @@ class SettingsManager:
         if "aws" in data:
             flat["aws_profile"] = data["aws"].get("profile", "default")
             flat["aws_region"] = data["aws"].get("region", "us-east-1")
-            flat["aws_project"] = data["aws"].get("project", "cybersec-dask")
+            flat["aws_project"] = data["aws"].get("project", "cybersec")
             flat["developer_prefix"] = data["aws"].get("developer_prefix", "")
             flat["developer_email"] = data["aws"].get("developer_email", "")
 

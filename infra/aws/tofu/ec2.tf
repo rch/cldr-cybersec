@@ -86,6 +86,33 @@ resource "aws_iam_role_policy" "s3_access" {
   })
 }
 
+# S3 read access for security logs bucket (CloudTrail + VPC Flow Logs)
+# Flink FileSource on RKE2 workers monitors and reads raw log files.
+# All access goes through the free S3 Gateway VPC endpoint.
+resource "aws_iam_role_policy" "security_logs_read" {
+  count = var.enable_security_logs ? 1 : 0
+  name  = "${var.project}-security-logs-read"
+  role  = aws_iam_role.rke2_node.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "S3ReadSecurityLogs"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.security_logs[0].arn,
+          "${aws_s3_bucket.security_logs[0].arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "rke2_node" {
   name = "${var.project}-rke2-node"
   role = aws_iam_role.rke2_node.name
@@ -141,8 +168,9 @@ resource "aws_instance" "control_plane" {
   }
 
   tags = merge(local.common_tags, {
-    Name                     = "${var.project}-control-plane-${count.index + 1}"
-    Role                     = "control-plane"
+    Name                                   = "${var.project}-dask-control-plane-${count.index + 1}"
+    Role                                   = "control-plane"
+    Cluster                                = "dask"
     "kubernetes.io/cluster/${var.project}" = "owned"
   })
 }
@@ -175,8 +203,9 @@ resource "aws_instance" "worker" {
   }
 
   tags = merge(local.common_tags, {
-    Name                     = "${var.project}-worker-${count.index + 1}"
-    Role                     = "worker"
+    Name                                   = "${var.project}-dask-worker-${count.index + 1}"
+    Role                                   = "worker"
+    Cluster                                = "dask"
     "kubernetes.io/cluster/${var.project}" = "owned"
   })
 }
@@ -186,18 +215,19 @@ resource "aws_instance" "worker" {
 # -----------------------------------------------------------------------------
 
 resource "aws_lb" "k8s_api" {
-  name               = "${var.project}-k8s-api"
+  name               = "${var.project}-dask-k8s-api"
   internal           = true
   load_balancer_type = "network"
   subnets            = aws_subnet.private[*].id
 
   tags = merge(local.common_tags, {
-    Name = "${var.project}-k8s-api-nlb"
+    Name    = "${var.project}-dask-k8s-api-nlb"
+    Cluster = "dask"
   })
 }
 
 resource "aws_lb_target_group" "k8s_api" {
-  name     = "${var.project}-k8s-api"
+  name     = "${var.project}-dask-k8s-api"
   port     = 6443
   protocol = "TCP"
   vpc_id   = aws_vpc.main.id
@@ -234,7 +264,7 @@ resource "aws_lb_target_group_attachment" "k8s_api" {
 
 # RKE2 supervisor API target group (for agent registration)
 resource "aws_lb_target_group" "rke2_supervisor" {
-  name     = "${var.project}-rke2-supervisor"
+  name     = "${var.project}-dask-rke2-sup"
   port     = 9345
   protocol = "TCP"
   vpc_id   = aws_vpc.main.id

@@ -217,7 +217,7 @@ def verify_developer_bucket(
     from ..bootstrap.identity import get_aws_bucket_name, get_developer_email
 
     if bucket_name is None:
-        project = getattr(config, "aws_project", "cybersec-dask")
+        project = getattr(config, "aws_project", "cybersec")
         bucket_name = get_aws_bucket_name(project, config)
 
     # Ensure bucket_name is a string

@@ -401,7 +401,7 @@ print('Environment config written to build/environment.json')
     # AWS Deployment Tasks
     # ============================================================================
     # These tasks manage the AWS infrastructure and Kubernetes deployments.
-    # Prerequisites: AWS credentials configured, SSH key at ~/.ssh/cybersec-dask.pem
+    # Prerequisites: AWS credentials configured, SSH key at ~/.ssh/cybersec.pem
 
     "aws:provision".exec = ''
       echo "🚀 Provisioning AWS infrastructure with OpenTofu..."
@@ -417,7 +417,7 @@ print('Environment config written to build/environment.json')
       PREFIX=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_prefix; settings = SettingsManager(); config = settings.load(); print(get_developer_prefix(config))")
       EMAIL=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_email; settings = SettingsManager(); config = settings.load(); print(get_developer_email(config))")
       ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "unknown")
-      KEY_NAME="cybersec-dask-$PREFIX"
+      KEY_NAME="cybersec-$PREFIX"
 
       export TF_VAR_developer_prefix="$PREFIX"
       export TF_VAR_developer_email="$EMAIL"
@@ -450,12 +450,19 @@ print('Environment config written to build/environment.json')
       # Pre-flight quota check - fail fast before creating any infrastructure
       echo ""
       echo "🔍 Running pre-flight quota validation..."
+      # Detect if security logs are enabled (from .env or default true)
+      export CHECK_SECURITY_LOGS="''${TF_VAR_enable_security_logs:-true}"
+
       PREFLIGHT_OUTPUT=$(uv run python -c "
-import asyncio
+import asyncio, os
 from cybersec.aws.quota import check_deployment_quotas
 
 async def main():
-    result = await check_deployment_quotas('$REGION', required_eips=1, required_vpcs=1)
+    check_sec = os.environ.get('CHECK_SECURITY_LOGS', 'true').lower() == 'true'
+    result = await check_deployment_quotas(
+        '$REGION', required_eips=1, required_vpcs=1,
+        check_security_logs=check_sec,
+    )
     print(result.format_report())
     return 0 if result.success else 1
 
@@ -477,6 +484,41 @@ exit(asyncio.run(main()))
       fi
 
       echo "✅ Pre-flight quota check PASSED"
+      echo ""
+
+      # Ensure SSH key pair exists (local + AWS) before plan/apply
+      KEY_PATH="$HOME/.ssh/cybersec.pem"
+      echo "🔐 Ensuring EC2 key pair ($KEY_NAME in $REGION)..."
+      LOCAL_KEY_EXISTS="false"
+      AWS_KEY_EXISTS="false"
+      [ -f "$KEY_PATH" ] && LOCAL_KEY_EXISTS="true"
+      aws ec2 describe-key-pairs --region "$REGION" --key-names "$KEY_NAME" >/dev/null 2>&1 && AWS_KEY_EXISTS="true"
+
+      if [ "$LOCAL_KEY_EXISTS" = "true" ] && [ "$AWS_KEY_EXISTS" = "true" ]; then
+        echo "   ✅ Key pair exists locally and in AWS"
+      elif [ "$LOCAL_KEY_EXISTS" = "true" ] && [ "$AWS_KEY_EXISTS" = "false" ]; then
+        echo "   Importing local key to AWS ($REGION)..."
+        aws ec2 import-key-pair \
+          --region "$REGION" \
+          --key-name "$KEY_NAME" \
+          --public-key-material fileb://<(ssh-keygen -y -f "$KEY_PATH")
+        echo "   ✅ Key pair imported to AWS"
+      elif [ "$LOCAL_KEY_EXISTS" = "false" ] && [ "$AWS_KEY_EXISTS" = "true" ]; then
+        echo "   ❌ Key '$KEY_NAME' exists in AWS but no local file at $KEY_PATH"
+        echo "   Either copy the PEM file or delete the AWS key:"
+        echo "     aws ec2 delete-key-pair --key-name $KEY_NAME --region $REGION"
+        exit 1
+      else
+        echo "   Creating new key pair..."
+        mkdir -p "$(dirname "$KEY_PATH")"
+        aws ec2 create-key-pair \
+          --region "$REGION" \
+          --key-name "$KEY_NAME" \
+          --query 'KeyMaterial' \
+          --output text > "$KEY_PATH"
+        chmod 600 "$KEY_PATH"
+        echo "   ✅ Key pair created and saved to $KEY_PATH"
+      fi
       echo ""
 
       # Clear stale state locks (no running tofu/terraform)
@@ -544,7 +586,7 @@ PY
       tofu show -json tfplan > tfplan.json
 
       # Check for existing S3 bucket and get its region (for cross-region detection)
-      BUCKET_NAME="cybersec-dask-$PREFIX-data"
+      BUCKET_NAME="cybersec-$PREFIX-data"
       S3_BUCKET_REGION=$(aws s3api get-bucket-location --bucket "$BUCKET_NAME" --query 'LocationConstraint' --output text 2>/dev/null || echo "")
       # AWS returns "None" for us-east-1 buckets (legacy behavior)
       if [ "$S3_BUCKET_REGION" = "None" ] || [ "$S3_BUCKET_REGION" = "null" ]; then
@@ -654,7 +696,7 @@ PY
       PREFIX=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_prefix; settings = SettingsManager(); config = settings.load(); print(get_developer_prefix(config))")
       EMAIL=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_email; settings = SettingsManager(); config = settings.load(); print(get_developer_email(config))")
       ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "unknown")
-      KEY_NAME="cybersec-dask-$PREFIX"
+      KEY_NAME="cybersec-$PREFIX"
 
       # Export TF variables
       export TF_VAR_developer_prefix="$PREFIX"
@@ -795,7 +837,7 @@ PY
 
       # Get region from environment or AWS config
       REGION="''${AWS_REGION:-$(aws configure get region 2>/dev/null || echo "us-east-1")}"
-      KEY_NAME="cybersec-dask-$PREFIX"
+      KEY_NAME="cybersec-$PREFIX"
 
       # Export TF variables required for plan
       export TF_VAR_developer_prefix="$PREFIX"
@@ -1036,7 +1078,7 @@ PY
       PROFILE="''${AWS_PROFILE:-default}"
       REGION="''${AWS_REGION:-$(aws configure get region --profile "$PROFILE" 2>/dev/null || echo "us-east-1")}"
 
-      KEY_PATH="$HOME/.ssh/cybersec-dask.pem"
+      KEY_PATH="$HOME/.ssh/cybersec.pem"
 
       # Derive a stable key name from developer prefix (matches bucket isolation)
       PREFIX=$(uv run python - <<'PY'
@@ -1048,7 +1090,7 @@ config = settings.load()
 print(get_developer_prefix(config))
 PY
 )
-      KEY_NAME="''${1:-cybersec-dask-$PREFIX}"
+      KEY_NAME="''${1:-cybersec-$PREFIX}"
 
       echo "🔐 Ensuring EC2 key pair"
       echo "  Profile:  $PROFILE"
@@ -1233,7 +1275,7 @@ PY
       INVENTORY_FILE="../ansible/inventory/hosts"
       cat > "$INVENTORY_FILE" << EOF
 # Ansible inventory generated by OpenTofu
-# SSH to bastion: ssh -i ~/.ssh/cybersec-dask.pem ec2-user@$BASTION_IP
+# SSH to bastion: ssh -i ~/.ssh/cybersec.pem ec2-user@$BASTION_IP
 # SSH to internal: ssh -J ec2-user@$BASTION_IP ec2-user@<private_ip>
 
 [bastion]
@@ -1264,12 +1306,12 @@ control_plane
 workers
 
 [rke2:vars]
-ansible_ssh_private_key_file=~/.ssh/cybersec-dask.pem
-ansible_ssh_common_args='-o ProxyCommand="ssh -i ~/.ssh/cybersec-dask.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP" -o StrictHostKeyChecking=no'
+ansible_ssh_private_key_file=~/.ssh/cybersec.pem
+ansible_ssh_common_args='-o ProxyCommand="ssh -i ~/.ssh/cybersec.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP" -o StrictHostKeyChecking=no'
 k8s_api_endpoint=$K8S_API
 
 [bastion:vars]
-ansible_ssh_private_key_file=~/.ssh/cybersec-dask.pem
+ansible_ssh_private_key_file=~/.ssh/cybersec.pem
 ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 aws_region=$REGION
 EOF
@@ -1304,7 +1346,7 @@ EOF
       BASTION_IP=$(cd infra/aws/tofu && tofu output -raw bastion_public_ip 2>/dev/null || echo "")
       if [ -n "$BASTION_IP" ]; then
         echo "Connectivity:"
-        if timeout 10 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/cybersec-dask.pem ec2-user@$BASTION_IP "echo OK" 2>/dev/null; then
+        if timeout 10 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/cybersec.pem ec2-user@$BASTION_IP "echo OK" 2>/dev/null; then
           echo "  Bastion SSH:   ✅ OK"
         else
           echo "  Bastion SSH:   ❌ Failed"
@@ -1591,7 +1633,7 @@ EOF
       echo "Control:     $CONTROL_IP"
       echo ""
 
-      SSH_KEY="$HOME/.ssh/cybersec-dask.pem"
+      SSH_KEY="$HOME/.ssh/cybersec.pem"
       SSH_CMD="ssh -i $SSH_KEY -o ProxyCommand=\"ssh -i $SSH_KEY -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP\" -o StrictHostKeyChecking=no"
       SCP_CMD="scp -i $SSH_KEY -o ProxyCommand=\"ssh -i $SSH_KEY -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP\" -o StrictHostKeyChecking=no"
       KUBECTL="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
@@ -1797,7 +1839,7 @@ EOF
       export AWS_REGION=$(tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
       BASTION_IP=$(tofu output -raw bastion_public_ip 2>/dev/null || echo "")
       CP_IP=$(tofu output -json control_plane_private_ips 2>/dev/null | jq -r '.[0] // ""')
-      SSH_KEY="$HOME/.ssh/cybersec-dask.pem"
+      SSH_KEY="$HOME/.ssh/cybersec.pem"
 
       if [ -z "$CP_IP" ] || [ -z "$BASTION_IP" ]; then
         echo "Error: Could not get cluster IPs from tofu output"
@@ -1887,7 +1929,7 @@ EOF
         exit 1
       fi
 
-      SSH_CMD="ssh -i ~/.ssh/cybersec-dask.pem -o ProxyCommand=\"ssh -i ~/.ssh/cybersec-dask.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP\" -o StrictHostKeyChecking=no ec2-user@$CONTROL_IP"
+      SSH_CMD="ssh -i ~/.ssh/cybersec.pem -o ProxyCommand=\"ssh -i ~/.ssh/cybersec.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP\" -o StrictHostKeyChecking=no ec2-user@$CONTROL_IP"
       KUBECTL="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
 
       echo "Kubernetes Nodes:"
@@ -1933,14 +1975,14 @@ EOF
       case "$TARGET" in
         bastion)
           echo "Connecting to bastion ($BASTION_IP)..."
-          exec ssh -i ~/.ssh/cybersec-dask.pem \
+          exec ssh -i ~/.ssh/cybersec.pem \
             -o StrictHostKeyChecking=no ec2-user@$BASTION_IP
           ;;
         control|cp)
           CONTROL_IP=$(cd infra/aws/tofu && tofu output -json control_plane_private_ips 2>/dev/null | jq -r '.[0] // empty')
           echo "Connecting to control plane ($CONTROL_IP) via bastion..."
-          exec ssh -i ~/.ssh/cybersec-dask.pem \
-            -o ProxyCommand="ssh -i ~/.ssh/cybersec-dask.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP" \
+          exec ssh -i ~/.ssh/cybersec.pem \
+            -o ProxyCommand="ssh -i ~/.ssh/cybersec.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP" \
             -o StrictHostKeyChecking=no ec2-user@$CONTROL_IP
           ;;
         *)
@@ -1964,7 +2006,7 @@ EOF
         exit 1
       fi
 
-      SSH_CMD="ssh -i ~/.ssh/cybersec-dask.pem -o ProxyCommand=\"ssh -i ~/.ssh/cybersec-dask.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP\" -o StrictHostKeyChecking=no ec2-user@$CONTROL_IP"
+      SSH_CMD="ssh -i ~/.ssh/cybersec.pem -o ProxyCommand=\"ssh -i ~/.ssh/cybersec.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@$BASTION_IP\" -o StrictHostKeyChecking=no ec2-user@$CONTROL_IP"
       KUBECTL="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
 
       LINES="''${1:-50}"
@@ -2540,7 +2582,7 @@ asyncio.run(main())
 
       MODE="''${1:-minimal}"
       S3_BUCKET="''${S3_BUCKET:-$OTEL_S3_BUCKET}"
-      S3_BUCKET="''${S3_BUCKET:-cybersec-dask-data}"
+      S3_BUCKET="''${S3_BUCKET:-cybersec-data}"
 
       if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
         log_error "AWS credentials not set"

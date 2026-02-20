@@ -165,7 +165,7 @@ import os
 import s3fs
 
 endpoint = os.environ.get('S3_ENDPOINT', '')
-bucket = os.environ.get('S3_BUCKET', 'cybersec-dask-data')
+bucket = os.environ.get('S3_BUCKET', 'cybersec-data')
 key = os.environ.get('AWS_ACCESS_KEY_ID', '')
 secret = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
 

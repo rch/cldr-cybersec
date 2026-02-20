@@ -172,6 +172,12 @@ class QuotaCheckResult:
                     purpose = eip.purpose_info
                     lines.append(f"    {eip.public_ip:<16} {eip.allocation_id}  [{purpose}] ({owner})")
 
+        # Include IAM permission report if present
+        iam_result = self.raw_data.get("iam_permissions")
+        if iam_result is not None:
+            lines.append("")
+            lines.append(iam_result.format_report())
+
         if self.errors:
             lines.append("")
             lines.append("ERRORS:")
@@ -473,6 +479,7 @@ async def check_deployment_quotas(
     required_eips: int = 1,
     required_vpcs: int = 1,
     profile: str | None = None,
+    check_security_logs: bool = False,
 ) -> QuotaCheckResult:
     """Check all quotas required for deployment.
 
@@ -483,6 +490,7 @@ async def check_deployment_quotas(
         required_eips: Number of Elastic IPs needed (default: 1 for NAT GW)
         required_vpcs: Number of VPCs needed (default: 1)
         profile: Optional AWS profile
+        check_security_logs: Check IAM permissions for CloudTrail/FlowLogs
 
     Returns:
         QuotaCheckResult with all quota information
@@ -546,6 +554,20 @@ async def check_deployment_quotas(
             f"have {vpc_quota.available} available "
             f"({vpc_quota.current_usage}/{vpc_quota.limit} in use)"
         )
+
+    # Check IAM permissions for security log pipeline
+    if check_security_logs:
+        iam_result = await check_iam_permissions(
+            region=region,
+            check_security_logs=True,
+            profile=profile,
+        )
+        if not iam_result.success:
+            result.success = False
+            result.errors.extend(iam_result.errors)
+            result.warnings.extend(iam_result.warnings)
+        # Store the detailed IAM result for the report
+        result.raw_data["iam_permissions"] = iam_result
 
     return result
 
@@ -687,10 +709,182 @@ def _run_aws_cmd(cmd: list[str], timeout: int = 30) -> dict[str, Any] | None:
         return None
 
 
+@dataclass
+class PermissionProbe:
+    """Result of probing a single IAM permission."""
+
+    service: str
+    action: str
+    allowed: bool
+    error: str = ""
+
+
+@dataclass
+class PermissionCheckResult:
+    """Result from IAM permission validation."""
+
+    success: bool
+    region: str
+    probes: list[PermissionProbe] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def denied(self) -> list[PermissionProbe]:
+        return [p for p in self.probes if not p.allowed]
+
+    def format_report(self) -> str:
+        lines = [
+            "IAM Permission Check",
+            "-" * 50,
+        ]
+        for p in self.probes:
+            status = "OK" if p.allowed else "DENIED"
+            lines.append(f"  {p.service + ':' + p.action:<45} {status}")
+        if self.denied:
+            # Collect full action lists for denied services
+            denied_services = set(p.service for p in self.denied)
+            all_actions: list[str] = []
+            for _svc_label, svc_actions in SECURITY_LOG_IAM_ACTIONS.items():
+                for action in svc_actions:
+                    svc = action.split(":")[0]
+                    if svc in denied_services:
+                        all_actions.append(action)
+            all_actions = sorted(set(all_actions))
+
+            lines.append("")
+            lines.append("Missing IAM actions (add to your IAM policy):")
+            lines.append("")
+            lines.append("  {")
+            lines.append('    "Effect": "Allow",')
+            lines.append('    "Action": [')
+            for i, action in enumerate(all_actions):
+                comma = "," if i < len(all_actions) - 1 else ""
+                lines.append(f'      "{action}"{comma}')
+            lines.append("    ],")
+            lines.append('    "Resource": "*"')
+            lines.append("  }")
+        if self.errors:
+            lines.append("")
+            for e in self.errors:
+                lines.append(f"  ! {e}")
+        return "\n".join(lines)
+
+
+# IAM actions required for security log pipeline (enable_security_logs=true)
+SECURITY_LOG_IAM_ACTIONS = {
+    "CloudTrail": [
+        "cloudtrail:CreateTrail",
+        "cloudtrail:StartLogging",
+        "cloudtrail:PutEventSelectors",
+        "cloudtrail:PutInsightSelectors",
+        "cloudtrail:AddTags",
+        "cloudtrail:DescribeTrails",
+        "cloudtrail:GetTrailStatus",
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:StopLogging",
+    ],
+    "VPC Flow Logs": [
+        "ec2:CreateFlowLogs",
+        "ec2:DeleteFlowLogs",
+        "ec2:DescribeFlowLogs",
+        "logs:CreateLogDelivery",
+        "logs:DeleteLogDelivery",
+        "logs:GetLogDelivery",
+        "logs:ListLogDeliveries",
+    ],
+    "CloudWatch Alarms": [
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:DescribeAlarms",
+    ],
+}
+
+
+async def check_iam_permissions(
+    region: str,
+    check_security_logs: bool = True,
+    profile: str | None = None,
+) -> PermissionCheckResult:
+    """Probe IAM permissions needed for infrastructure deployment.
+
+    Uses lightweight read-only API calls to detect service access.
+    When a describe operation fails with AccessDenied, the corresponding
+    create/write operations will definitely fail too.
+
+    Args:
+        region: AWS region
+        check_security_logs: Whether to check CloudTrail/FlowLog permissions
+        profile: Optional AWS profile
+
+    Returns:
+        PermissionCheckResult with pass/fail per service
+    """
+    result = PermissionCheckResult(success=True, region=region)
+
+    def _build_cmd(base: list[str]) -> list[str]:
+        cmd = ["aws", *base, "--region", region, "--output", "json"]
+        if profile:
+            cmd.extend(["--profile", profile])
+        return cmd
+
+    def _probe(service: str, action: str, cmd: list[str]) -> PermissionProbe:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if proc.returncode == 0:
+                return PermissionProbe(service=service, action=action, allowed=True)
+            stderr = proc.stderr.strip()
+            if "AccessDenied" in stderr or "UnauthorizedAccess" in stderr or "AuthorizationError" in stderr:
+                return PermissionProbe(service=service, action=action, allowed=False, error=stderr)
+            # Non-auth error (e.g. resource not found) means permission exists
+            return PermissionProbe(service=service, action=action, allowed=True)
+        except Exception as e:
+            return PermissionProbe(service=service, action=action, allowed=False, error=str(e))
+
+    if check_security_logs:
+        # Probe CloudTrail access
+        result.probes.append(_probe(
+            "cloudtrail", "DescribeTrails",
+            _build_cmd(["cloudtrail", "describe-trails"]),
+        ))
+
+        # Probe VPC Flow Logs access (ec2:DescribeFlowLogs)
+        result.probes.append(_probe(
+            "ec2", "DescribeFlowLogs",
+            _build_cmd(["ec2", "describe-flow-logs", "--max-results", "1"]),
+        ))
+
+        # Probe CloudWatch access
+        result.probes.append(_probe(
+            "cloudwatch", "DescribeAlarms",
+            _build_cmd(["cloudwatch", "describe-alarms", "--max-items", "1"]),
+        ))
+
+        # Probe logs service access (for VPC Flow Log delivery)
+        result.probes.append(_probe(
+            "logs", "DescribeLogGroups",
+            _build_cmd(["logs", "describe-log-groups", "--limit", "1"]),
+        ))
+
+    denied = result.denied
+    if denied:
+        result.success = False
+        services = ", ".join(sorted(set(p.service for p in denied)))
+        result.errors.append(
+            f"IAM permissions denied for: {services}"
+        )
+        result.warnings.append(
+            "Note: Probes test read access. Write actions (Create*/Put*) "
+            "also required — see full action list below."
+        )
+
+    return result
+
+
 async def find_owned_resources(
     region: str,
     owner_email: str,
-    project: str = "cybersec-dask",
+    project: str = "cybersec",
     profile: str | None = None,
 ) -> OwnedResourcesResult:
     """Find AWS resources owned by the developer.
@@ -849,7 +1043,7 @@ async def find_owned_resources(
             ))
 
     # 6. Find S3 buckets (global, but check tags)
-    # S3 bucket names follow pattern: cybersec-dask-{prefix}-data
+    # S3 bucket names follow pattern: cybersec-{prefix}-data
     cmd = ["aws", "--output", "json"]
     if profile:
         cmd.extend(["--profile", profile])

@@ -2,7 +2,7 @@
 # Group variables for all hosts
 
 # Project identification (must match Tofu var.project)
-project: "cybersec-dask"
+project: "cybersec"
 
 # AWS region - this is a fallback default. The actual region is set by:
 # 1. aws:inventory task writes it to the inventory [all:vars] section

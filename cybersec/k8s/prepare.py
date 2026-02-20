@@ -301,7 +301,7 @@ def _generate_aws_config(runtime_config: dict[str, Any]) -> dict[str, Any]:
         },
         "infrastructure": {
             "iac_tool": runtime_config.get("tools", {}).get("iac_tool", "tofu"),
-            "ssh_key": "~/.ssh/cybersec-dask.pem",
+            "ssh_key": "~/.ssh/cybersec.pem",
         },
     }
 

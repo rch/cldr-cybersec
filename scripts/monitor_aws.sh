@@ -158,21 +158,21 @@ check_aws_resources() {
     check_ssh_key "$region"
 
     # VPC
-    local vpcs=$(aws ec2 describe-vpcs --filters "Name=tag:Project,Values=cybersec-dask" --region "$region" --query 'length(Vpcs)' --output text 2>/dev/null || echo 0)
+    local vpcs=$(aws ec2 describe-vpcs --filters "Name=tag:Project,Values=cybersec" --region "$region" --query 'length(Vpcs)' --output text 2>/dev/null || echo 0)
     [ "$vpcs" -gt 0 ] && echo -e "  ${GREEN}✓${NC} VPC ($vpcs)" || echo -e "  ${YELLOW}○${NC} VPC"
 
     # Subnets
-    local subnets=$(aws ec2 describe-subnets --filters "Name=tag:Project,Values=cybersec-dask" --region "$region" --query 'length(Subnets)' --output text 2>/dev/null || echo 0)
+    local subnets=$(aws ec2 describe-subnets --filters "Name=tag:Project,Values=cybersec" --region "$region" --query 'length(Subnets)' --output text 2>/dev/null || echo 0)
     [ "$subnets" -gt 0 ] && echo -e "  ${GREEN}✓${NC} Subnets ($subnets)" || echo -e "  ${YELLOW}○${NC} Subnets"
 
     # Security Groups
-    local sgs=$(aws ec2 describe-security-groups --filters "Name=tag:Project,Values=cybersec-dask" --region "$region" --query 'length(SecurityGroups)' --output text 2>/dev/null || echo 0)
+    local sgs=$(aws ec2 describe-security-groups --filters "Name=tag:Project,Values=cybersec" --region "$region" --query 'length(SecurityGroups)' --output text 2>/dev/null || echo 0)
     [ "$sgs" -gt 0 ] && echo -e "  ${GREEN}✓${NC} Security Groups ($sgs)" || echo -e "  ${YELLOW}○${NC} Security Groups"
 
     # EC2 Instances (running/pending)
-    local running=$(aws ec2 describe-instances --filters "Name=tag:Project,Values=cybersec-dask" "Name=instance-state-name,Values=running,pending" --region "$region" --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo 0)
+    local running=$(aws ec2 describe-instances --filters "Name=tag:Project,Values=cybersec" "Name=instance-state-name,Values=running,pending" --region "$region" --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo 0)
     # EC2 Instances (shutting-down/stopping - shown during destroy)
-    local stopping=$(aws ec2 describe-instances --filters "Name=tag:Project,Values=cybersec-dask" "Name=instance-state-name,Values=shutting-down,stopping" --region "$region" --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo 0)
+    local stopping=$(aws ec2 describe-instances --filters "Name=tag:Project,Values=cybersec" "Name=instance-state-name,Values=shutting-down,stopping" --region "$region" --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo 0)
     if [ "$running" -gt 0 ] && [ "$stopping" -gt 0 ]; then
         echo -e "  ${YELLOW}⟳${NC} EC2 Instances ($running running, $stopping terminating)"
     elif [ "$running" -gt 0 ]; then
@@ -184,7 +184,7 @@ check_aws_resources() {
     fi
 
     # S3 Bucket
-    local bucket="cybersec-dask-${prefix}-data"
+    local bucket="cybersec-${prefix}-data"
     if aws s3api head-bucket --bucket "$bucket" --region "$region" >/dev/null 2>&1; then
         echo -e "  ${GREEN}✓${NC} S3 Bucket ($bucket)"
     else
@@ -192,8 +192,8 @@ check_aws_resources() {
     fi
 
     # NAT Gateway
-    local nats=$(aws ec2 describe-nat-gateways --filter "Name=tag:Project,Values=cybersec-dask" "Name=state,Values=available,pending" --region "$region" --query 'length(NatGateways)' --output text 2>/dev/null || echo 0)
-    local nats_deleting=$(aws ec2 describe-nat-gateways --filter "Name=tag:Project,Values=cybersec-dask" "Name=state,Values=deleting" --region "$region" --query 'length(NatGateways)' --output text 2>/dev/null || echo 0)
+    local nats=$(aws ec2 describe-nat-gateways --filter "Name=tag:Project,Values=cybersec" "Name=state,Values=available,pending" --region "$region" --query 'length(NatGateways)' --output text 2>/dev/null || echo 0)
+    local nats_deleting=$(aws ec2 describe-nat-gateways --filter "Name=tag:Project,Values=cybersec" "Name=state,Values=deleting" --region "$region" --query 'length(NatGateways)' --output text 2>/dev/null || echo 0)
     if [ "$nats" -gt 0 ] && [ "$nats_deleting" -gt 0 ]; then
         echo -e "  ${YELLOW}⟳${NC} NAT Gateway ($nats active, $nats_deleting deleting)"
     elif [ "$nats" -gt 0 ]; then
@@ -213,7 +213,7 @@ show_status() {
     local policy_result=$(get_policy_result)
 
     # Get developer prefix
-    local prefix=$(cd "$TOFU_DIR" && tofu output -raw s3_bucket_name 2>/dev/null | sed 's/cybersec-dask-\(.*\)-data/\1/' || echo "00631868")
+    local prefix=$(cd "$TOFU_DIR" && tofu output -raw s3_bucket_name 2>/dev/null | sed 's/cybersec-\(.*\)-data/\1/' || echo "00631868")
 
     echo "╔════════════════════════════════════════════════════════════╗"
     echo "║              AWS Infrastructure Monitor                    ║"

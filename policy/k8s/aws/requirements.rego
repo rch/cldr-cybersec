@@ -102,7 +102,7 @@ warn contains msg if {
 # Deny if SSH key doesn't exist
 deny contains msg if {
     not tools.ssh_key_exists
-    msg := "SSH key not found at ~/.ssh/cybersec-dask.pem. Run: devenv tasks run aws:keypair:ensure"
+    msg := "SSH key not found at ~/.ssh/cybersec.pem. Run: devenv tasks run aws:keypair:ensure"
 }
 
 # ==========================================================================
@@ -136,7 +136,7 @@ info contains msg if {
 # Info: SSH key exists
 info contains msg if {
     tools.ssh_key_exists
-    msg := "SSH key found at ~/.ssh/cybersec-dask.pem (auto-imported to AWS as cybersec-dask-<prefix>)"
+    msg := "SSH key found at ~/.ssh/cybersec.pem (auto-imported to AWS as cybersec-<prefix>)"
 }
 
 # ==========================================================================

@@ -5,27 +5,74 @@
 [bastion]
 ${bastion_ip} ansible_user=ec2-user ansible_host=${bastion_ip}
 
-[control_plane]
+# =============================================================================
+# Dask/JupyterHub RKE2 Cluster
+# =============================================================================
+
+[dask_control_plane]
 %{ for i, ip in control_plane_ips ~}
-${ip} ansible_user=ec2-user rke2_type=server node_name=control-plane-${i + 1}
+${ip} ansible_user=ec2-user rke2_type=server node_name=dask-control-plane-${i + 1}
 %{ endfor ~}
 
-[workers]
+[dask_workers]
 %{ for i, ip in worker_ips ~}
-${ip} ansible_user=ec2-user rke2_type=agent node_name=worker-${i + 1}
+${ip} ansible_user=ec2-user rke2_type=agent node_name=dask-worker-${i + 1}
 %{ endfor ~}
 
+[dask_cluster:children]
+dask_control_plane
+dask_workers
+
+[dask_cluster:vars]
+k8s_api_endpoint=${k8s_api_endpoint}
+cluster_name=dask
+
+# =============================================================================
+# Flink/NiFi RKE2 Cluster (when enable_flink_cluster = true)
+# =============================================================================
+%{ if enable_flink_cluster }
+
+[flink_control_plane]
+%{ for i, ip in flink_control_plane_ips ~}
+${ip} ansible_user=ec2-user rke2_type=server node_name=flink-control-plane-${i + 1}
+%{ endfor ~}
+
+[flink_workers]
+%{ for i, ip in flink_worker_ips ~}
+${ip} ansible_user=ec2-user rke2_type=agent node_name=flink-worker-${i + 1}
+%{ endfor ~}
+
+[flink_cluster:children]
+flink_control_plane
+flink_workers
+
+[flink_cluster:vars]
+k8s_api_endpoint=${flink_k8s_api_endpoint}
+cluster_name=flink
+%{ endif }
+
+# =============================================================================
+# Convenience groups
+# =============================================================================
+
+# All RKE2 nodes (both clusters) — for shared provisioning (RKE2 install, etc.)
 [rke2:children]
-control_plane
-workers
+dask_control_plane
+dask_workers
+%{ if enable_flink_cluster ~}
+flink_control_plane
+flink_workers
+%{ endif ~}
 
 [rke2:vars]
 ansible_ssh_private_key_file=~/.ssh/${ssh_key_name}.pem
 ansible_ssh_common_args='-o ProxyCommand="ssh -i ~/.ssh/${ssh_key_name}.pem -W %h:%p -o StrictHostKeyChecking=no ec2-user@${bastion_ip}" -o StrictHostKeyChecking=no'
-k8s_api_endpoint=${k8s_api_endpoint}
 
 [all:vars]
 s3_bucket_name=${s3_bucket_name}
+%{ if security_logs_bucket != "" ~}
+security_logs_bucket=${security_logs_bucket}
+%{ endif ~}
 aws_region=${aws_region}
 
 [bastion:vars]

@@ -45,15 +45,15 @@ deny contains msg if {
 	msg := sprintf("Resource '%s' has Owner tag '%s' but you are '%s'", [rc.address, owner, base.context.developer_email])
 }
 
-# Deny if creating cybersec-dask resources without developer prefix in name
+# Deny if creating cybersec resources without developer prefix in name
 deny contains msg if {
 	some rc in resources_to_create
-	contains(rc.address, "cybersec-dask-")
+	contains(rc.address, "cybersec-")
 	not contains(rc.address, base.context.developer_prefix)
 	# Also check the resource name if available
 	name := object.get(rc.change.after, "name", "")
 	name != ""
-	contains(name, "cybersec-dask-")
+	contains(name, "cybersec-")
 	not contains(name, base.context.developer_prefix)
 	msg := sprintf("Resource '%s' name doesn't contain your prefix (%s)", [rc.address, base.context.developer_prefix])
 }

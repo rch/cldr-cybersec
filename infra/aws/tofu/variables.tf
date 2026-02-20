@@ -17,7 +17,7 @@ variable "environment" {
 variable "project" {
   description = "Project name for resource tagging"
   type        = string
-  default     = "cybersec-dask"
+  default     = "cybersec"
 }
 
 # -----------------------------------------------------------------------------
@@ -57,7 +57,7 @@ variable "public_subnet_cidrs" {
 variable "rke2_version" {
   description = "RKE2 version to install"
   type        = string
-  default     = "v1.34.3+rke2r1"  # Keep in sync with ansible/group_vars/all.yml
+  default     = "v1.34.3+rke2r1" # Keep in sync with ansible/group_vars/all.yml
 }
 
 variable "control_plane_count" {
@@ -94,6 +94,55 @@ variable "data_volume_size" {
   description = "Data volume size in GB for workers"
   type        = number
   default     = 500
+}
+
+# -----------------------------------------------------------------------------
+# Flink/NiFi RKE2 Cluster (separate from Dask cluster)
+# Shares VPC, bastion, S3 buckets, and Cloudflare tunnel.
+# Gated on enable_flink_cluster — off by default so existing Dask-only
+# deployments are unaffected.
+# -----------------------------------------------------------------------------
+
+variable "enable_flink_cluster" {
+  description = "Deploy a separate RKE2 cluster for Flink/NiFi workloads"
+  type        = bool
+  default     = false
+}
+
+variable "flink_control_plane_count" {
+  description = "Number of Flink cluster control plane nodes"
+  type        = number
+  default     = 1
+}
+
+variable "flink_control_plane_instance_type" {
+  description = "Instance type for Flink control plane nodes"
+  type        = string
+  default     = "m6i.xlarge"
+}
+
+variable "flink_worker_count" {
+  description = "Number of Flink cluster worker nodes"
+  type        = number
+  default     = 2
+}
+
+variable "flink_worker_instance_type" {
+  description = "Instance type for Flink worker nodes (c6i = compute-optimized, 4 vCPU / 8 GiB)"
+  type        = string
+  default     = "c6i.xlarge"
+}
+
+variable "flink_root_volume_size" {
+  description = "Root volume size in GB for Flink nodes"
+  type        = number
+  default     = 100
+}
+
+variable "flink_data_volume_size" {
+  description = "Data volume size in GB for Flink workers (RocksDB state + checkpoints)"
+  type        = number
+  default     = 200
 }
 
 # -----------------------------------------------------------------------------
@@ -153,6 +202,34 @@ variable "airgap_mode" {
 }
 
 # -----------------------------------------------------------------------------
+# Security Log Ingestion (CloudTrail + VPC Flow Logs → Flink FileSource)
+# -----------------------------------------------------------------------------
+
+variable "enable_security_logs" {
+  description = "Enable CloudTrail trail and VPC Flow Logs writing to S3 for Flink ingestion"
+  type        = bool
+  default     = true
+}
+
+variable "cloudtrail_enable_data_events" {
+  description = "Enable S3 data events in CloudTrail (high volume — off by default)"
+  type        = bool
+  default     = false
+}
+
+variable "cloudtrail_insight_types" {
+  description = "CloudTrail Insight types to enable"
+  type        = list(string)
+  default     = ["ApiCallRateInsight", "ApiErrorRateInsight"]
+}
+
+variable "security_logs_retention_days" {
+  description = "Days to retain raw security logs in S3 (Iceberg has the processed copy)"
+  type        = number
+  default     = 90
+}
+
+# -----------------------------------------------------------------------------
 # Cloudflare Configuration (for Cloudflare Tunnel ingress)
 # -----------------------------------------------------------------------------
 
@@ -183,7 +260,7 @@ variable "cloudflare_warp_posture_rule_id" {
 variable "ingress_provider" {
   description = "Ingress provider: 'ngrok' or 'cloudflare'"
   type        = string
-  default     = "cloudflare"  # Cloudflare recommended for WARP device posture security
+  default     = "cloudflare" # Cloudflare recommended for WARP device posture security
 
   validation {
     condition     = contains(["ngrok", "cloudflare"], var.ingress_provider)
@@ -216,6 +293,8 @@ variable "ingress_subdomains" {
     jupyterhub = string
     k8s        = string
     viz        = string
+    flink      = string
+    nifi       = string
   })
   default = {
     bastion    = "bastion"
@@ -223,6 +302,8 @@ variable "ingress_subdomains" {
     jupyterhub = "jupyter"
     k8s        = "k8s"
     viz        = "viz"
+    flink      = "flink"
+    nifi       = "nifi"
   }
 }
 
@@ -238,7 +319,7 @@ locals {
   })
 
   # S3 bucket name includes developer prefix for data isolation
-  # Each developer gets their own bucket: cybersec-dask-<prefix>-data
+  # Each developer gets their own bucket: cybersec-<prefix>-data
   bucket_name = "${var.project}-${var.developer_prefix}-data"
 
   # Compute subnet CIDRs dynamically based on AZ count
@@ -262,5 +343,7 @@ locals {
     jupyterhub = "${var.ingress_subdomains.jupyterhub}.${local.ingress_base_domain}"
     k8s        = "${var.ingress_subdomains.k8s}.${local.ingress_base_domain}"
     viz        = "${var.ingress_subdomains.viz}.${local.ingress_base_domain}"
+    flink      = "${var.ingress_subdomains.flink}.${local.ingress_base_domain}"
+    nifi       = "${var.ingress_subdomains.nifi}.${local.ingress_base_domain}"
   }
 }

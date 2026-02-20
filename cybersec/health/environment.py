@@ -499,7 +499,7 @@ def _check_deployment_tools() -> dict[str, Any]:
 
     # Check for SSH key (required for AWS deployments)
     ssh_key_paths = [
-        Path.home() / ".ssh" / "cybersec-dask.pem",
+        Path.home() / ".ssh" / "cybersec.pem",
         Path.home() / ".ssh" / "id_rsa",
         Path.home() / ".ssh" / "id_ed25519",
     ]

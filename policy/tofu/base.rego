@@ -53,8 +53,8 @@ resource_has_developer_prefix(rc) if {
 }
 
 resource_has_developer_prefix(rc) if {
-	# Resource doesn't have cybersec-dask prefix pattern - skip check
-	not contains(rc.address, "cybersec-dask-")
+	# Resource doesn't have cybersec- prefix pattern - skip check
+	not contains(rc.address, "cybersec-")
 }
 
 # =============================================================================

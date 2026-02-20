@@ -83,8 +83,8 @@ class TestGetAwsBucketName:
         """Bucket name should follow {project}-{prefix}-data format."""
         with patch("cybersec.bootstrap.identity.get_developer_prefix") as mock:
             mock.return_value = "abc12345"
-            bucket = get_aws_bucket_name("cybersec-dask", None)
-            assert bucket == "cybersec-dask-abc12345-data"
+            bucket = get_aws_bucket_name("cybersec", None)
+            assert bucket == "cybersec-abc12345-data"
 
     def test_bucket_name_uses_project(self):
         """Bucket name should incorporate project name."""

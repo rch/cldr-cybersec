@@ -47,7 +47,7 @@ resource "random_id" "tunnel_secret" {
 resource "cloudflare_zero_trust_tunnel_cloudflared" "cybersec" {
   count      = var.ingress_provider == "cloudflare" ? 1 : 0
   account_id = var.cloudflare_account_id
-  name       = "cybersec-dask-${var.developer_prefix}"
+  name       = "cybersec-${var.developer_prefix}"
   secret     = random_id.tunnel_secret[0].b64_std
 
   lifecycle {
@@ -101,6 +101,26 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "cybersec" {
     ingress_rule {
       hostname = local.ingress_domains.viz
       service  = var.airgap_mode ? "http://${aws_instance.control_plane[0].private_ip}:30506" : "http://panel-viz.panel-viz.svc.cluster.local:80"
+    }
+
+    # --- Flink cluster services (when enabled) ---
+
+    # Flink Web UI — routes to the Flink cluster's control plane
+    dynamic "ingress_rule" {
+      for_each = var.enable_flink_cluster ? [1] : []
+      content {
+        hostname = local.ingress_domains.flink
+        service  = var.airgap_mode ? "http://${aws_instance.flink_control_plane[0].private_ip}:30081" : "http://flink-jobmanager.flink.svc.cluster.local:8081"
+      }
+    }
+
+    # NiFi Web UI — routes to the Flink cluster's control plane
+    dynamic "ingress_rule" {
+      for_each = var.enable_flink_cluster ? [1] : []
+      content {
+        hostname = local.ingress_domains.nifi
+        service  = var.airgap_mode ? "http://${aws_instance.flink_control_plane[0].private_ip}:30450" : "http://nifi.nifi.svc.cluster.local:8450"
+      }
     }
 
     # Catch-all (required)
@@ -185,6 +205,30 @@ resource "cloudflare_record" "viz" {
   comment = "Cloudflare Tunnel: Panel Visualization (${var.developer_prefix})"
 }
 
+resource "cloudflare_record" "flink" {
+  count = var.ingress_provider == "cloudflare" && var.enable_flink_cluster ? 1 : 0
+
+  zone_id = var.cloudflare_zone_id
+  name    = local.ingress_domains.flink
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.cybersec[0].id}.cfargotunnel.com"
+  type    = "CNAME"
+  proxied = true
+  ttl     = 1
+  comment = "Cloudflare Tunnel: Flink Web UI (${var.developer_prefix})"
+}
+
+resource "cloudflare_record" "nifi" {
+  count = var.ingress_provider == "cloudflare" && var.enable_flink_cluster ? 1 : 0
+
+  zone_id = var.cloudflare_zone_id
+  name    = local.ingress_domains.nifi
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.cybersec[0].id}.cfargotunnel.com"
+  type    = "CNAME"
+  proxied = true
+  ttl     = 1
+  comment = "Cloudflare Tunnel: NiFi Web UI (${var.developer_prefix})"
+}
+
 # -----------------------------------------------------------------------------
 # Zero Trust Access Application
 # -----------------------------------------------------------------------------
@@ -193,7 +237,7 @@ resource "cloudflare_zero_trust_access_application" "cybersec" {
   count = var.ingress_provider == "cloudflare" ? 1 : 0
 
   account_id       = var.cloudflare_account_id
-  name             = "cybersec-dask-${var.developer_prefix}"
+  name             = "cybersec-${var.developer_prefix}"
   domain           = local.ingress_domains.dask
   type             = "self_hosted"
   session_duration = "24h"
@@ -374,12 +418,18 @@ output "cloudflare_tunnel_name" {
 
 output "ingress_urls" {
   description = "External URLs for services"
-  value = var.ingress_provider == "cloudflare" ? {
-    dask       = "https://${local.ingress_domains.dask}"
-    jupyterhub = "https://${local.ingress_domains.jupyterhub}"
-    k8s        = "https://${local.ingress_domains.k8s}"
-    viz        = "https://${local.ingress_domains.viz}"
-  } : {}
+  value = var.ingress_provider == "cloudflare" ? merge(
+    {
+      dask       = "https://${local.ingress_domains.dask}"
+      jupyterhub = "https://${local.ingress_domains.jupyterhub}"
+      k8s        = "https://${local.ingress_domains.k8s}"
+      viz        = "https://${local.ingress_domains.viz}"
+    },
+    var.enable_flink_cluster ? {
+      flink = "https://${local.ingress_domains.flink}"
+      nifi  = "https://${local.ingress_domains.nifi}"
+    } : {}
+  ) : {}
 }
 
 output "ingress_info" {

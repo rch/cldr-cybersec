@@ -358,7 +358,7 @@ def _check_tools() -> dict[str, Any]:
         "podman_machine_running": False,
         "ansible_playbook": shutil.which("ansible-playbook") is not None,
         "iac_tool": None,  # tofu or terraform
-        "ssh_key_exists": Path("~/.ssh/cybersec-dask.pem").expanduser().exists(),
+        "ssh_key_exists": Path("~/.ssh/cybersec.pem").expanduser().exists(),
         "zarf": shutil.which("zarf") is not None,
         "zarf_version": "",
     }

@@ -31,7 +31,7 @@ spec:
 
           # Configuration
           SCHEDULER = "tcp://simple-scheduler:8786"
-          S3_BUCKET = "cybersec-dask-data"
+          S3_BUCKET = "cybersec-data"
           S3_PREFIX = "otel/validation-30gb"
           WORKER_COUNTS = [2]  # Fixed for current cluster size
           ZOOM_LEVELS = [("full", 1.0), ("10pct", 0.1)]

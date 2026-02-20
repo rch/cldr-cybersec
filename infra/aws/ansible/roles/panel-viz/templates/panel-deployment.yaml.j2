@@ -78,7 +78,7 @@ spec:
               # -------------------------------------------------------------------------
 
               DASK_SCHEDULER = os.environ.get('DASK_SCHEDULER', '')
-              S3_BUCKET = os.environ.get('S3_BUCKET', 'cybersec-dask-data')
+              S3_BUCKET = os.environ.get('S3_BUCKET', 'cybersec-data')
               OTEL_DATA_PATH = os.environ.get('OTEL_DATA_PATH', f's3://{S3_BUCKET}/otel-minimal/')
               S3_ENDPOINT = os.environ.get('S3_ENDPOINT', '')
               AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')

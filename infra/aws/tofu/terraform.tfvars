@@ -5,13 +5,13 @@
 #   AWS_REGION=us-east-1 devenv tasks run aws:provision
 #
 environment = "dev"
-project     = "cybersec-dask"
+project     = "cybersec"
 
 # Developer identity - set via TF_VAR_* environment variables
 # These are auto-detected by devenv tasks from git config:
 #   developer_prefix = "00631868"     # 8-char hash from git email
 #   developer_email  = "user@example.com"
-#   ssh_key_name     = "cybersec-dask-00631868"
+#   ssh_key_name     = "cybersec-00631868"
 #   aws_region       = "us-east-1"    # project default
 #
 # Do NOT set ssh_key_name, developer_prefix, developer_email, or aws_region here.
@@ -24,7 +24,7 @@ vpc_cidr = "10.100.0.0/16"
 control_plane_count         = 1
 control_plane_instance_type = "m6i.xlarge"
 worker_count                = 8
-worker_instance_type        = "r6i.xlarge"  # 4 vCPU, 32 GiB memory-optimized
+worker_instance_type        = "r6i.xlarge" # 4 vCPU, 32 GiB memory-optimized
 
 # Storage
 root_volume_size = 50

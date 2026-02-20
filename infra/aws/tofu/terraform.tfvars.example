@@ -1,14 +1,14 @@
-# Example tfvars for cybersec-dask cluster
+# Example tfvars for cybersec cluster
 # Copy to terraform.tfvars and customize
 #
 # IMPORTANT: These variables are auto-detected by devenv tasks. Do NOT set them here:
 #   - aws_region       (default: us-east-1, override with AWS_REGION env var)
-#   - ssh_key_name     (auto: cybersec-dask-<prefix>)
+#   - ssh_key_name     (auto: cybersec-<prefix>)
 #   - developer_prefix (auto: 8-char hash from git email)
 #   - developer_email  (auto: from git config user.email)
 
 environment = "dev"
-project     = "cybersec-dask"
+project     = "cybersec"
 
 # Network
 vpc_cidr = "10.100.0.0/16"

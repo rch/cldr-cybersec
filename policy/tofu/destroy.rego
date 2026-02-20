@@ -20,10 +20,10 @@ deny contains msg if {
 	msg := sprintf("Cannot destroy '%s' owned by %s (you are %s)", [rc.address, owner, base.context.developer_email])
 }
 
-# Deny if resource name contains cybersec-dask pattern but doesn't match developer prefix
+# Deny if resource name contains cybersec- pattern but doesn't match developer prefix
 deny contains msg if {
 	some rc in base.resources_to_delete
-	contains(rc.address, "cybersec-dask-")
+	contains(rc.address, "cybersec-")
 	not contains(rc.address, base.context.developer_prefix)
 	msg := sprintf("Resource '%s' does not match your prefix (%s)", [rc.address, base.context.developer_prefix])
 }

@@ -51,3 +51,9 @@ resource "aws_s3_object" "otel_validation_prefix" {
   key     = "otel-validation/"
   content = ""
 }
+
+resource "aws_s3_object" "iceberg_prefix" {
+  bucket  = aws_s3_bucket.cybersec.id
+  key     = "iceberg/warehouse/"
+  content = ""
+}

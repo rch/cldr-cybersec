@@ -117,7 +117,7 @@ def get_aws_bucket_name(project: str, config: Optional[BootstrapConfig] = None) 
     Format: {project}-{developer_prefix}-data
 
     Args:
-        project: Project name (e.g., "cybersec-dask")
+        project: Project name (e.g., "cybersec")
         config: Optional BootstrapConfig for prefix lookup.
 
     Returns:

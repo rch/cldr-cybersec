@@ -28,10 +28,10 @@ resource "aws_security_group" "bastion" {
   })
 }
 
-# RKE2 control plane security group
+# Dask RKE2 control plane security group
 resource "aws_security_group" "control_plane" {
-  name        = "${var.project}-control-plane"
-  description = "Security group for RKE2 control plane nodes"
+  name        = "${var.project}-dask-control-plane"
+  description = "Security group for Dask RKE2 control plane nodes"
   vpc_id      = aws_vpc.main.id
 
   # SSH from bastion
@@ -142,14 +142,15 @@ resource "aws_security_group" "control_plane" {
   }
 
   tags = merge(local.common_tags, {
-    Name = "${var.project}-control-plane-sg"
+    Name    = "${var.project}-dask-control-plane-sg"
+    Cluster = "dask"
   })
 }
 
-# RKE2 worker security group
+# Dask RKE2 worker security group
 resource "aws_security_group" "worker" {
-  name        = "${var.project}-worker"
-  description = "Security group for RKE2 worker nodes"
+  name        = "${var.project}-dask-worker"
+  description = "Security group for Dask RKE2 worker nodes"
   vpc_id      = aws_vpc.main.id
 
   # SSH from bastion
@@ -242,6 +243,7 @@ resource "aws_security_group" "worker" {
   }
 
   tags = merge(local.common_tags, {
-    Name = "${var.project}-worker-sg"
+    Name    = "${var.project}-dask-worker-sg"
+    Cluster = "dask"
   })
 }
