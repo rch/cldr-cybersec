@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Zarf Deployment & Verification Script — v1.2.0
+# Zarf Deployment & Verification Script — v1.2.1
 # =============================================================================
 # Unified deployment script that works identically on local dev (tinybox) and
 # air-gap (usfwdbig01). All environment differences are resolved through env
@@ -243,7 +243,7 @@ detect_disk_constraints() {
 print_config_summary() {
     echo ""
     echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║  Zarf Deployment — v1.2.0                                    ║${NC}"
+    echo -e "${BOLD}║  Zarf Deployment — v1.2.1                                    ║${NC}"
     echo -e "${BOLD}╠══════════════════════════════════════════════════════════════╣${NC}"
     printf "${BOLD}║${NC} %-18s %s\n" "KUBECONFIG:" "$KUBECONFIG"
     printf "${BOLD}║${NC} %-18s %s\n" "NODE_IP:" "$NODE_IP"

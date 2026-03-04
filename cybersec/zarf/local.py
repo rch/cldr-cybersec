@@ -32,6 +32,13 @@ async def gather_local_zarf_config() -> dict[str, Any]:
     runtime["node_resources"] = await _gather_node_resources(runtime)
     runtime["zarf_local"] = _gather_zarf_local_config(runtime)
 
+    # Gather registry state (only when connected to cluster)
+    k8s = runtime.get("kubernetes", {})
+    if k8s.get("kubectl_connected", False):
+        runtime["zarf_local"]["zarf_registry"] = _gather_zarf_registry_state()
+    else:
+        runtime["zarf_local"]["zarf_registry"] = _empty_registry_state()
+
     # Return flat dict for policy consumption
     return {
         "platform": runtime.get("platform", {}),
@@ -179,6 +186,88 @@ def _gather_zarf_local_config(_runtime: dict[str, Any]) -> dict[str, Any]:
         ),
         "minio_bucket": "cybersec",
     }
+
+
+def _empty_registry_state() -> dict[str, Any]:
+    """Return empty registry state when cluster is not connected."""
+    return {
+        "namespace_exists": False,
+        "pvc_exists": False,
+        "pvc_phase": "",
+        "pvc_volume_name": "",
+        "pv_exists": False,
+        "pv_phase": "",
+        "pv_has_claim_ref": False,
+        "has_stuck_finalizers": False,
+    }
+
+
+def _gather_zarf_registry_state() -> dict[str, Any]:
+    """Gather Zarf registry PVC/PV state from the cluster.
+
+    Uses the same subprocess/kubectl pattern as _gather_node_resources().
+    Detects stale state from failed `zarf init` attempts: Lost PVCs,
+    missing claimRef on PVs, stuck finalizers.
+
+    Returns:
+        Dict with namespace_exists, pvc_exists, pvc_phase, pvc_volume_name,
+        pv_exists, pv_phase, pv_has_claim_ref, has_stuck_finalizers
+    """
+    import json
+
+    result = _empty_registry_state()
+
+    # Check namespace existence
+    try:
+        proc = subprocess.run(
+            ["kubectl", "get", "namespace", "zarf", "-o", "json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            result["namespace_exists"] = True
+    except Exception:
+        pass
+
+    # Check PVC state
+    try:
+        proc = subprocess.run(
+            ["kubectl", "get", "pvc", "zarf-docker-registry",
+             "-n", "zarf", "-o", "json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout)
+            result["pvc_exists"] = True
+            result["pvc_phase"] = data.get("status", {}).get("phase", "")
+            result["pvc_volume_name"] = (
+                data.get("spec", {}).get("volumeName", "")
+            )
+            finalizers = data.get("metadata", {}).get("finalizers", [])
+            if finalizers:
+                result["has_stuck_finalizers"] = True
+    except Exception:
+        pass
+
+    # Check PV state
+    try:
+        proc = subprocess.run(
+            ["kubectl", "get", "pv", "zarf-registry-pv", "-o", "json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout)
+            result["pv_exists"] = True
+            result["pv_phase"] = data.get("status", {}).get("phase", "")
+            claim_ref = data.get("spec", {}).get("claimRef", {})
+            if claim_ref.get("name"):
+                result["pv_has_claim_ref"] = True
+            pv_finalizers = data.get("metadata", {}).get("finalizers", [])
+            if pv_finalizers:
+                result["has_stuck_finalizers"] = True
+    except Exception:
+        pass
+
+    return result
 
 
 def _parse_k8s_memory_to_gb(mem_str: str) -> int:

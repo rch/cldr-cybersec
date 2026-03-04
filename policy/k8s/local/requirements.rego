@@ -270,3 +270,72 @@ info contains msg if {
     services.minio.healthy
     msg := "Ready for local Zarf deployment."
 }
+
+# ==========================================================================
+# Zarf Registry State (DENY/WARN/INFO)
+# Detects stale state from failed `zarf init` attempts.
+# Data source: input.zarf_local.zarf_registry (gathered by local.py)
+# ==========================================================================
+
+registry := zarf.zarf_registry
+
+# DENY: PVC in Lost phase — blocks init, must recover first
+deny contains msg if {
+    registry.pvc_exists
+    registry.pvc_phase == "Lost"
+    msg := concat("", [
+        "Zarf registry PVC is in Lost phase — a previous `zarf init` failed and left stale state.\n",
+        "  Recovery: ./zarf/scripts/zarf-init-recovery.sh\n",
+        "  Or manually: patch finalizers null, force-delete PVC+PV, delete zarf namespace, then retry init.",
+    ])
+}
+
+# WARN: PVC in Pending phase — may indicate missing PV or size mismatch
+warn contains msg if {
+    registry.pvc_exists
+    registry.pvc_phase == "Pending"
+    msg := concat("", [
+        "Zarf registry PVC is Pending — likely no matching PV or size mismatch.\n",
+        "  Check: kubectl get pv zarf-registry-pv\n",
+        "  Fix: create a PV with claimRef pre-binding (see zarf/README.md).",
+    ])
+}
+
+# WARN: PV exists without claimRef — won't auto-bind to PVC
+warn contains msg if {
+    registry.pv_exists
+    not registry.pv_has_claim_ref
+    msg := concat("", [
+        "Zarf registry PV exists but has no claimRef — it won't auto-bind to the PVC.\n",
+        "  Fix: delete PV and recreate with claimRef, or run ./zarf/scripts/zarf-init-recovery.sh",
+    ])
+}
+
+# WARN: Stuck finalizers on PVC or PV
+warn contains msg if {
+    registry.has_stuck_finalizers
+    msg := concat("", [
+        "Zarf registry PVC/PV has stuck finalizers — cleanup required before re-init.\n",
+        "  Fix: kubectl patch pvc zarf-docker-registry -n zarf -p '{\"metadata\":{\"finalizers\":null}}'\n",
+        "  Or run: ./zarf/scripts/zarf-init-recovery.sh",
+    ])
+}
+
+# INFO: Show current PVC/PV state when present
+info contains msg if {
+    registry.pvc_exists
+    registry.pvc_phase == "Bound"
+    msg := sprintf("Zarf registry PVC: Bound (volume: %s)", [registry.pvc_volume_name])
+}
+
+info contains msg if {
+    registry.pv_exists
+    registry.pv_phase != ""
+    msg := sprintf("Zarf registry PV: %s", [registry.pv_phase])
+}
+
+info contains msg if {
+    registry.namespace_exists
+    not registry.pvc_exists
+    msg := "Zarf namespace exists but no registry PVC — init may be incomplete."
+}

@@ -2,7 +2,7 @@
 
 Zarf package for deploying Dask + JupyterHub + Panel-Viz to air-gapped RKE2.
 
-**Current release**: [`v1.1.1`](https://github.com/rch/cldr-cybersec/releases/tag/v1.1.1)
+**Current release**: [`v1.2.1`](https://github.com/rch/cldr-cybersec/releases/tag/v1.2.1)
 
 ---
 
@@ -44,7 +44,7 @@ graph LR
 ## Deploy Variables
 
 ```bash
-zarf package deploy zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
+zarf package deploy zarf-package-cybersec-dask-amd64-1.2.1.tar.zst --confirm \
   --set S3_ENDPOINT=http://minio:9000 \
   --set S3_ACCESS_KEY=<key> \
   --set S3_SECRET_KEY=<secret> \
@@ -72,7 +72,7 @@ zarf package deploy zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
 |----------|-----------|------|
 | `zarf` binary | [Zarf releases](https://github.com/zarf-dev/zarf/releases) (Linux amd64) | ~100 MB |
 | `zarf-init-amd64-v0.66.0.tar.zst` | `zarf tools download-init` | ~300 MB |
-| `zarf-package-cybersec-dask-amd64-1.1.1.tar.zst` | [GitHub Releases](https://github.com/rch/cldr-cybersec/releases/tag/v1.1.1) | ~1.3 GB |
+| `zarf-package-cybersec-dask-amd64-1.2.1.tar.zst` | [GitHub Releases](https://github.com/rch/cldr-cybersec/releases/tag/v1.2.1) | ~1.3 GB |
 
 ```bash
 # Download on a machine with internet access
@@ -116,7 +116,7 @@ sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf init --confirm
 
 # 3. Deploy
 sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
-  zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
+  zarf-package-cybersec-dask-amd64-1.2.1.tar.zst --confirm \
   --set DASK_SPILL_DIR=/mnt/nfs/dask-spill   # or /tmp/dask-spill
 ```
 
@@ -199,7 +199,7 @@ sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
 
 # 4. Deploy with NFS spill path
 sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
-  zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
+  zarf-package-cybersec-dask-amd64-1.2.1.tar.zst --confirm \
   --set DASK_SPILL_DIR=/mnt/nfs/dask-spill \
   --set DASK_WORKER_REPLICAS=4
 
@@ -218,7 +218,7 @@ If no NFS is available, use emptyDir for spill:
 
 # 4. Deploy without specifying DASK_SPILL_DIR
 sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
-  zarf-package-cybersec-dask-amd64-1.1.1.tar.zst --confirm \
+  zarf-package-cybersec-dask-amd64-1.2.1.tar.zst --confirm \
   --set DASK_WORKER_REPLICAS=4
 
 # 5. Patch spill volume to emptyDir (512Mi)
@@ -260,7 +260,7 @@ cd /path/to/cybersec/zarf
 DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock \
   zarf package create . --confirm --skip-sbom
 
-# Output: zarf-package-cybersec-dask-amd64-1.1.1.tar.zst (~1.3 GB)
+# Output: zarf-package-cybersec-dask-amd64-1.2.1.tar.zst (~1.3 GB)
 ```
 
 Upstream images (`dask-kubernetes-operator`, `k8s-hub`, `configurable-http-proxy`) are pulled automatically during `zarf package create`.
@@ -375,7 +375,29 @@ zarf package deploy ... --set DASK_WORKER_REPLICAS=8 --confirm
 ### Recovery from failed `zarf init`
 
 If a previous `zarf init` failed (timed out, lost PV, wrong flags), the
-leftover state will block re-initialization. Clean up before retrying:
+leftover state will block re-initialization.
+
+**Recommended**: Use the recovery script which automates detection and cleanup:
+
+```bash
+# Check state (read-only)
+./scripts/zarf-init-recovery.sh --verify-only
+
+# Preview recovery steps
+./scripts/zarf-init-recovery.sh --dry-run
+
+# Recover and retry init
+./scripts/zarf-init-recovery.sh
+
+# Clean up only (don't retry init)
+./scripts/zarf-init-recovery.sh --skip-init
+```
+
+The preflight check (`/zarf preflight`) also detects stale registry state
+and will block deployment with a DENY if the PVC is in Lost phase.
+
+<details>
+<summary>Manual recovery (if you can't use the script)</summary>
 
 ```bash
 KUBECTL="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
@@ -398,9 +420,21 @@ $KUBECTL get namespace zarf 2>&1 | grep -q "not found" && echo "Clean"
 # 4. Now re-run init from scratch (see Quickstart or Disk-Light sections)
 ```
 
+</details>
+
 **How to tell if cleanup is needed**: Run `kubectl get pvc -n zarf` — if the
 PVC shows `Lost`, `Terminating`, or has a `deletionTimestamp`, you need cleanup.
 A healthy PVC shows `Bound` with a valid PV name.
+
+### Common Recovery Mistakes
+
+These are real mistakes observed during manual recovery attempts:
+
+| Mistake | What goes wrong | Correct approach |
+|---------|----------------|-----------------|
+| Patch PVC finalizers but don't delete PVC | PVC stays in Lost phase, blocks next `zarf init` | After patching finalizers, force-delete: `kubectl delete pvc ... --force --grace-period=0` |
+| Create PV without `claimRef` | PVC can't bind — stays Pending because no PV is pre-bound to it | Always include `claimRef: {namespace: zarf, name: zarf-docker-registry}` in PV spec |
+| YAML indentation error (`spec:` nested under `metadata:`) | `kubectl apply` silently ignores misplaced fields, PV has no capacity/hostPath | Validate with `kubectl apply --dry-run=client -f -` before applying |
 
 ### Registry PVC won't bind (no StorageClass provisioner)
 
@@ -639,7 +673,8 @@ zarf/
 │   └── Dask_S3_Validation.ipynb        # Out-of-core Dask stress test (30 GB)
 └── scripts/
     ├── embed-notebooks.py              # Strips outputs, embeds in ConfigMap YAML
-    └── verify-zarf-deployment.sh       # Post-deploy validation
+    ├── verify-zarf-deployment.sh       # Full deployment + verification
+    └── zarf-init-recovery.sh           # Recovery from failed zarf init
 ```
 
 ## Tested Versions
