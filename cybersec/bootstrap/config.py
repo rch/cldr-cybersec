@@ -100,6 +100,12 @@ class BootstrapConfig:
     fsn_iceberg_auto_refresh: bool = False
     fsn_iceberg_refresh_interval: int = 60  # seconds
 
+    # RKE2 local environment
+    rke2_system_kubeconfig: str = "/etc/rancher/rke2/rke2.yaml"
+    rke2_user_kubeconfig: str = "~/.kube/rke2.yaml"
+    rke2_service_name: str = "rke2-server"
+    rke2_auto_refresh: bool = False
+
     # AWS configuration
     aws_profile: str = "default"
     aws_region: str = "us-east-1"
@@ -206,6 +212,16 @@ class BootstrapConfig:
             "Owner": self.get_developer_email(),
             "Project": self.aws_project,
         }
+
+    def get_rke2_config(self) -> "RKE2Config":
+        """Get RKE2 configuration from bootstrap config."""
+        from ..k8s.rke2 import RKE2Config
+        return RKE2Config(
+            system_kubeconfig=self.rke2_system_kubeconfig,
+            user_kubeconfig=self.rke2_user_kubeconfig,
+            service_name=self.rke2_service_name,
+            auto_refresh=self.rke2_auto_refresh,
+        )
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -339,6 +355,15 @@ class SettingsManager:
             flat["fsn_iceberg_auto_refresh"] = data["fsn"].get("iceberg_auto_refresh", False)
             flat["fsn_iceberg_refresh_interval"] = data["fsn"].get("iceberg_refresh_interval", 60)
 
+        # K8s section
+        if "k8s" in data:
+            k8s = data["k8s"]
+            if "rke2" in k8s:
+                flat["rke2_system_kubeconfig"] = k8s["rke2"].get("system_kubeconfig", "/etc/rancher/rke2/rke2.yaml")
+                flat["rke2_user_kubeconfig"] = k8s["rke2"].get("user_kubeconfig", "~/.kube/rke2.yaml")
+                flat["rke2_service_name"] = k8s["rke2"].get("service_name", "rke2-server")
+                flat["rke2_auto_refresh"] = k8s["rke2"].get("auto_refresh", False)
+
         # AWS section
         if "aws" in data:
             flat["aws_profile"] = data["aws"].get("profile", "default")
@@ -370,6 +395,9 @@ class SettingsManager:
             "NIFI_HOME": ("nifi_home", str),
             "NIFI_STATE_DIR": ("nifi_state_dir", str),
             "POLARIS_HOME": ("polaris_home", str),
+            # RKE2 configuration
+            "CYBERSEC_RKE2_SYSTEM_KUBECONFIG": ("rke2_system_kubeconfig", str),
+            "CYBERSEC_RKE2_USER_KUBECONFIG": ("rke2_user_kubeconfig", str),
             # AWS configuration
             "AWS_PROFILE": ("aws_profile", str),
             "AWS_REGION": ("aws_region", str),
@@ -472,6 +500,14 @@ class SettingsManager:
                 "remember_mode": self._config.fsn_remember_mode,
                 "iceberg_auto_refresh": self._config.fsn_iceberg_auto_refresh,
                 "iceberg_refresh_interval": self._config.fsn_iceberg_refresh_interval,
+            },
+            "k8s": {
+                "rke2": {
+                    "system_kubeconfig": self._config.rke2_system_kubeconfig,
+                    "user_kubeconfig": self._config.rke2_user_kubeconfig,
+                    "service_name": self._config.rke2_service_name,
+                    "auto_refresh": self._config.rke2_auto_refresh,
+                },
             },
             "aws": {
                 "profile": self._config.aws_profile,

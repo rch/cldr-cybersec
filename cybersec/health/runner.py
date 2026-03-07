@@ -9,7 +9,7 @@ from typing import Optional
 
 from .models import CheckResult, HealthContext, HealthReport
 from .catalog import CATEGORIES, QUICK_CHECKS, get_failure_mode
-from .checks import iceberg, flink, infra, pyflink, nifi
+from .checks import iceberg, flink, infra, pyflink, nifi, k8s
 
 
 # Check function registry - maps failure_mode_id to check function
@@ -19,6 +19,7 @@ CHECK_REGISTRY = {
     **infra.CHECKS,
     **pyflink.CHECKS,
     **nifi.CHECKS,
+    **k8s.CHECKS,
 }
 
 

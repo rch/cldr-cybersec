@@ -19,6 +19,14 @@ hub:
   image:
     name: quay.io/jupyterhub/k8s-hub
     tag: "4.0.0"
+  # Hub database — in-memory SQLite, no PVC required.
+  # The default (sqlite-pvc) creates a 1Gi PVC with the cluster's default
+  # StorageClass. On air-gapped RKE2 without a running local-path-provisioner,
+  # that PVC stays Pending forever and blocks the hub from starting.
+  # With sqlite-memory, hub state (sessions, tokens) lives in memory only.
+  # On hub pod restart users re-login; running notebook servers are unaffected.
+  db:
+    type: sqlite-memory
   resources:
     requests:
       cpu: 200m

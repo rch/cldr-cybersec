@@ -250,6 +250,143 @@ async def cmd_k8s_validate(cmd: ParsedCommand) -> CommandResult:
     )
 
 
+async def cmd_k8s_rke2(cmd: ParsedCommand) -> CommandResult:
+    """Show RKE2 environment status.
+
+    Displays service status, kubeconfig freshness, and connectivity.
+
+    Options:
+        --json, -j  Output as JSON
+    """
+    from ..k8s.rke2 import get_rke2_status, RKE2Config
+    from ..bootstrap import BootstrapService
+
+    try:
+        service = BootstrapService()
+        config = service.get_config()
+        rke2_config = config.get_rke2_config()
+    except Exception:
+        rke2_config = RKE2Config()
+
+    status = get_rke2_status(rke2_config)
+
+    data = {
+        "service_active": status.service_active,
+        "service_since": status.service_since.isoformat() if status.service_since else None,
+        "system_kubeconfig_exists": status.system_kubeconfig_exists,
+        "user_kubeconfig_exists": status.user_kubeconfig_exists,
+        "kubeconfig_stale": status.kubeconfig_stale,
+        "staleness_seconds": status.staleness_seconds,
+        "kubectl_connected": status.kubectl_connected,
+        "needs_refresh": status.needs_refresh,
+        "refresh_command": status.refresh_command,
+    }
+
+    # Format timestamps for display
+    def _fmt_mtime(mtime: float | None) -> str:
+        if mtime is None:
+            return "n/a"
+        from datetime import datetime
+        return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+    lines = [
+        "RKE2 Environment Status",
+        "=" * 40,
+        "",
+        "Service:",
+        f"  Active:           {'yes' if status.service_active else 'no'}",
+        f"  Since:            {status.service_since.strftime('%Y-%m-%d %H:%M:%S') if status.service_since else 'n/a'}",
+        "",
+        "Kubeconfig:",
+        f"  System exists:    {'yes' if status.system_kubeconfig_exists else 'no'}",
+        f"  System mtime:     {_fmt_mtime(status.system_kubeconfig_mtime)}",
+        f"  User exists:      {'yes' if status.user_kubeconfig_exists else 'no'}",
+        f"  User mtime:       {_fmt_mtime(status.user_kubeconfig_mtime)}",
+        f"  Stale:            {'YES' if status.kubeconfig_stale else 'no'}",
+    ]
+
+    if status.staleness_seconds is not None:
+        lines.append(f"  Staleness:        {status.staleness_seconds:.0f}s")
+
+    lines.extend([
+        "",
+        "Connectivity:",
+        f"  kubectl:          {'connected' if status.kubectl_connected else 'NOT connected'}",
+        "",
+    ])
+
+    if status.needs_refresh:
+        lines.extend([
+            "ACTION NEEDED: Kubeconfig needs refresh",
+            f"  Run: /k8s rke2 refresh --apply",
+            f"  Or:  {status.refresh_command}",
+        ])
+    else:
+        lines.append("Status: OK - no action needed")
+
+    return CommandResult(
+        success=True,
+        data=data,
+        formatted="\n".join(lines),
+    )
+
+
+async def cmd_k8s_rke2_refresh(cmd: ParsedCommand) -> CommandResult:
+    """Refresh user kubeconfig from system copy.
+
+    Copies the system kubeconfig to the user location with correct
+    ownership and permissions. Requires sudo.
+
+    Options:
+        --apply     Execute the refresh (default is dry-run)
+        --json, -j  Output as JSON
+    """
+    from ..k8s.rke2 import refresh_kubeconfig, RKE2Config
+    from ..bootstrap import BootstrapService
+
+    try:
+        service = BootstrapService()
+        config = service.get_config()
+        rke2_config = config.get_rke2_config()
+    except Exception:
+        rke2_config = RKE2Config()
+
+    apply = cmd.options.get("apply", False)
+    result = refresh_kubeconfig(rke2_config, dry_run=not apply)
+
+    data = result
+
+    if result.get("dry_run"):
+        lines = [
+            "RKE2 Kubeconfig Refresh (dry-run)",
+            "=" * 40,
+            "",
+            f"Command: {result.get('command', 'n/a')}",
+            "",
+            "Run with --apply to execute.",
+        ]
+    elif result.get("success"):
+        lines = [
+            "RKE2 Kubeconfig Refresh",
+            "=" * 40,
+            "",
+            result.get("message", "Done"),
+        ]
+    else:
+        lines = [
+            "RKE2 Kubeconfig Refresh FAILED",
+            "=" * 40,
+            "",
+            result.get("message", "Unknown error"),
+        ]
+
+    return CommandResult(
+        success=result.get("success", False),
+        data=data,
+        formatted="\n".join(lines),
+    )
+
+
 def register_k8s_commands():
     """Register all K8s commands."""
     register_command(
@@ -281,5 +418,23 @@ def register_k8s_commands():
             "/k8s validate",
             "/k8s validate aws",
             "/k8s validate k3d --json",
+        ],
+    )
+
+    register_command(
+        "k8s.rke2",
+        cmd_k8s_rke2,
+        description="Show RKE2 environment status",
+        examples=["/k8s rke2", "/k8s rke2 --json"],
+    )
+
+    register_command(
+        "k8s.rke2.refresh",
+        cmd_k8s_rke2_refresh,
+        description="Refresh user kubeconfig from system copy",
+        options=[{"name": "apply", "help": "Execute refresh (default is dry-run)"}],
+        examples=[
+            "/k8s rke2 refresh",
+            "/k8s rke2 refresh --apply",
         ],
     )

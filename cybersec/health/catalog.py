@@ -648,6 +648,27 @@ NIFI_003 = FailureMode(
     solution_level=AutomationLevel.C,
 )
 
+# K8s failure modes
+K8S_001 = FailureMode(
+    failure_mode_id="K8S_001",
+    category="k8s",
+    name="Kubeconfig Stale",
+    description="User kubeconfig is older than system kubeconfig after RKE2 restart",
+    base_severity=8,   # High - kubectl fails silently
+    base_occurrence=5,  # Moderate - happens on every RKE2 restart
+    base_detection=2,   # Easy - compare file mtimes
+    symptom="kubectl fails with connection refused or certificate errors",
+    cause="RKE2 restarted, system kubeconfig regenerated, user copy not updated",
+    detection_method="Compare mtime of /etc/rancher/rke2/rke2.yaml vs ~/.kube/rke2.yaml",
+    remediation_steps=[
+        "Run: /k8s rke2 refresh --apply",
+        "Or manually: sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/rke2.yaml",
+        "Then: sudo chown $USER:$USER ~/.kube/rke2.yaml && chmod 600 ~/.kube/rke2.yaml",
+    ],
+    observation_level=AutomationLevel.A,
+    solution_level=AutomationLevel.B,  # Requires sudo
+)
+
 # Data quality failure modes
 DATA_001 = FailureMode(
     failure_mode_id="DATA_001",
@@ -704,6 +725,7 @@ FAILURE_MODES: dict[str, FailureMode] = {
     "NIFI_003": NIFI_003,
     "DATA_001": DATA_001,
     "SYSTEM_001": SYSTEM_001,
+    "K8S_001": K8S_001,
 }
 
 # Category groupings - organized by type
@@ -730,6 +752,7 @@ CATEGORIES: dict[str, list[str]] = {
     "system": ["INFRA_004", "SYSTEM_001"],  # OS-level: shm segments, shm limits, eBPF
     "aws": ["INFRA_005"],        # AWS credentials and IAM
     "data": ["DATA_001"],
+    "k8s": ["K8S_001"],
 }
 
 # Backward compatibility aliases
@@ -745,6 +768,7 @@ QUICK_CHECKS: list[str] = [
     "FLINK_001",  # TaskManager
     "ICE_002",    # Catalog connection
     "NIFI_002",   # NiFi running
+    "K8S_001",    # Kubeconfig stale
 ]
 
 

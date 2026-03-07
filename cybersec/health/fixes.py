@@ -238,6 +238,11 @@ async def apply_fixes(diagnostics: dict, dry_run: bool = True) -> list[dict[str,
             result = await _fix_nifi_not_installed(dry_run)
             results.append(result)
 
+        elif failure_mode_id == "K8S_001":
+            # Kubeconfig stale - refresh from system copy
+            result = await _fix_kubeconfig_stale(config, dry_run)
+            results.append(result)
+
     return results
 
 
@@ -1358,5 +1363,34 @@ async def _fix_pyflink_not_installed(dry_run: bool) -> dict[str, Any]:
     except Exception as e:
         result["success"] = False
         result["message"] = f"Error installing PyFlink: {e}"
+
+    return result
+
+
+async def _fix_kubeconfig_stale(config: Any, dry_run: bool) -> dict[str, Any]:
+    """Fix: Refresh user kubeconfig from system copy.
+
+    Copies /etc/rancher/rke2/rke2.yaml to ~/.kube/rke2.yaml with correct
+    ownership and permissions. Requires sudo.
+    """
+    from ..k8s.rke2 import refresh_kubeconfig, RKE2Config
+
+    result: dict[str, Any] = {
+        "failure_mode_id": "K8S_001",
+        "action": "refresh_kubeconfig",
+    }
+
+    try:
+        rke2_config = config.get_rke2_config()
+    except (AttributeError, Exception):
+        rke2_config = RKE2Config()
+
+    refresh_result = refresh_kubeconfig(rke2_config, dry_run=dry_run)
+
+    result["success"] = refresh_result.get("success", False)
+    result["message"] = refresh_result.get("message", "")
+    result["dry_run"] = dry_run
+    if "command" in refresh_result:
+        result["command"] = refresh_result["command"]
 
     return result
