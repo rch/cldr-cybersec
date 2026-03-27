@@ -808,6 +808,13 @@ PY
       export TF_VAR_cloudflare_account_id="''${CLOUDFLARE_ACCOUNT_ID:-}"
       export TF_VAR_cloudflare_zone_id="''${CLOUDFLARE_ZONE_ID:-}"
 
+      # Dynamically detect available AZs (some regions like us-west-1 only have 2)
+      AVAILABLE_AZS=$(aws ec2 describe-availability-zones --region "$REGION" --query 'AvailabilityZones[?State==`available`].ZoneName' --output json 2>/dev/null || echo '[]')
+      if [ "$AVAILABLE_AZS" = "[]" ]; then
+        AVAILABLE_AZS="[\"''${REGION}a\",\"''${REGION}b\",\"''${REGION}c\"]"
+      fi
+      export TF_VAR_availability_zones="$AVAILABLE_AZS"
+
       # Get bucket name from Tofu state
       BUCKET_NAME=$(tofu output -raw s3_bucket_name 2>/dev/null || echo "")
       OBJECT_COUNT=0
