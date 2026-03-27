@@ -96,10 +96,13 @@ kubectl get storageclass
 
 ### Step 4 — Zarf Init
 
-The init package must be in the current directory.
+Zarf auto-detects the init package by looking for `zarf-init-amd64-*.tar.zst`
+in the current directory. If not found, it attempts to download from GitHub
+(which will fail in air-gap).
 
 ```bash
 cd /path/to/artifacts
+ls zarf-init-amd64-*.tar.zst   # confirm init package is here
 
 zarf init --confirm --set REGISTRY_PVC_SIZE=1Gi
 
