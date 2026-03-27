@@ -1,0 +1,84 @@
+---
+# Cluster-only playbook: RKE2 + S3 (no application workloads)
+#
+# Use this when deploying applications via Zarf instead of Ansible roles.
+# Sets up the RKE2 cluster and S3 bucket, then Zarf handles:
+#   - Dask operator + cluster
+#   - JupyterHub
+#   - Panel-Viz (OTEL Navigator + WASM terminal)
+#   - NavigatorEngine + PTY proxy
+#   - Sample notebooks
+#
+# Usage:
+#   ansible-playbook playbooks/cluster-only.yml \
+#     -e "s3_bucket_name=cybersec-dask-<prefix>-data" \
+#     -e "aws_region=us-west-1"
+
+- name: Prepare all nodes
+  hosts: rke2
+  become: true
+  roles:
+    - common
+
+- name: Install RKE2 server (first control plane)
+  hosts: control_plane[0]
+  become: true
+  vars:
+    rke2_role: server
+    rke2_is_first_server: true
+  roles:
+    - rke2-server
+
+- name: Install RKE2 server (additional control planes)
+  hosts: control_plane[1:]
+  become: true
+  serial: 1
+  vars:
+    rke2_role: server
+    rke2_is_first_server: false
+  roles:
+    - rke2-server
+
+- name: Install RKE2 agent (workers)
+  hosts: workers
+  become: true
+  vars:
+    rke2_role: agent
+  roles:
+    - rke2-agent
+
+- name: Install local-path-provisioner (default StorageClass for Zarf)
+  hosts: control_plane[0]
+  become: true
+  tasks:
+    - name: Check if default StorageClass exists
+      ansible.builtin.command:
+        cmd: /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get sc -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}'
+      register: default_sc
+      changed_when: false
+
+    - name: Copy vendored local-path-provisioner manifest
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../../zarf/manifests/local-path-provisioner.yaml"
+        dest: /tmp/local-path-provisioner.yaml
+        mode: '0644'
+      when: default_sc.stdout == ""
+
+    - name: Install local-path-provisioner
+      ansible.builtin.command:
+        cmd: /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml apply -f /tmp/local-path-provisioner.yaml
+      when: default_sc.stdout == ""
+
+    - name: Display StorageClass status
+      ansible.builtin.debug:
+        msg: "Default StorageClass: {{ default_sc.stdout | default('local-path (just installed)') }}"
+  tags: [storage, storageclass]
+
+- name: Setup S3 data bucket
+  hosts: bastion
+  become: false
+  vars_files:
+    - ../group_vars/all.yml
+  roles:
+    - role: s3-data
+      tags: [s3, storage]

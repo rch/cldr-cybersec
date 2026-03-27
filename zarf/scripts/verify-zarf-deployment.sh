@@ -501,6 +501,23 @@ spec:
     name: zarf-docker-registry
 EOF
     log_success "Created PV for Zarf registry ($PV_SIZE)"
+
+    # Also install local-path-provisioner if no default StorageClass exists.
+    # This ensures future PVCs (JupyterHub persistent DB, etc.) can bind dynamically.
+    local default_sc
+    default_sc=$(kubectl get storageclass \
+        -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{end}' \
+        2>/dev/null) || true
+    if [[ -z "$default_sc" ]]; then
+        local manifest_path="$ZARF_DIR/manifests/local-path-provisioner.yaml"
+        if [[ -f "$manifest_path" ]]; then
+            log_info "No default StorageClass — installing local-path-provisioner from vendored manifest"
+            kubectl apply -f "$manifest_path" 2>/dev/null || true
+            kubectl wait --for=condition=ready pod -l app=local-path-provisioner \
+                -n local-path-storage --timeout=60s 2>/dev/null || true
+            log_success "local-path StorageClass installed and set as default"
+        fi
+    fi
 }
 
 # =============================================================================
@@ -534,6 +551,11 @@ initialize_zarf() {
     if [[ -z "$init_pkg" ]]; then
         if [[ "$SKIP_BUILD" == "true" ]]; then
             log_error "No zarf-init package found and --skip-build set"
+            return 1
+        fi
+        if [[ -n "${AIRGAP:-}" ]]; then
+            log_error "No zarf-init package found in $ZARF_DIR and AIRGAP mode is set."
+            log_error "Pre-download in a connected environment: zarf tools download-init"
             return 1
         fi
         log_info "Downloading Zarf init package..."

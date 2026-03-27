@@ -38,7 +38,7 @@ k8s_dashboard_service_namespace: kubernetes-dashboard
 k8s_dashboard_service_port: 443
 
 # Dask Dashboard service
-dask_dashboard_service_name: "{{ dask_cluster_name | default('simple') }}-scheduler"
+dask_dashboard_service_name: "{{ dask_cluster_name | default('cybersec-dask') }}-scheduler"
 dask_dashboard_service_namespace: "{{ dask_namespace | default('dask') }}"
 dask_dashboard_service_port: 8787
 
@@ -48,9 +48,9 @@ jupyterhub_service_namespace: jupyterhub
 jupyterhub_service_port: 80
 
 # Panel Visualization service
-panel_viz_service_name: panel-viz
+panel_viz_service_name: otel-navigator
 panel_viz_service_namespace: panel-viz
-panel_viz_service_port: 80
+panel_viz_service_port: 5006
 
 # Health check configuration
 cloudflared_liveness_path: /ready

@@ -1379,6 +1379,118 @@ EOF
       fi
     '';
 
+    # Deploy via Zarf package (standardized path for air-gap and AWS)
+    # Replaces the Ansible-based aws:deploy for application workloads.
+    # Infrastructure (RKE2 cluster) is still deployed via Ansible cluster-only.yml.
+    "aws:deploy:zarf".exec = ''
+      echo "🚀 Deploying Zarf package to AWS RKE2 cluster..."
+      echo ""
+
+      export PROJECT_ROOT="$PWD"
+
+      # Get infrastructure info from tofu state
+      cd infra/aws/tofu
+      BASTION_IP=$(tofu output -raw bastion_public_ip 2>/dev/null || echo "")
+      CONTROL_IP=$(tofu output -json control_plane_private_ips 2>/dev/null | jq -r '.[0] // empty' || echo "")
+      BUCKET_NAME=$(tofu output -raw s3_bucket_name 2>/dev/null || echo "")
+      AWS_REGION=$(tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
+      INGRESS_PROVIDER=$(tofu output -json ingress_info 2>/dev/null | jq -r '.provider // "cloudflare"')
+      cd "$PROJECT_ROOT"
+
+      if [ -z "$BASTION_IP" ] || [ -z "$CONTROL_IP" ]; then
+        echo "❌ Cluster not provisioned. Run 'devenv tasks run aws:provision' first."
+        exit 1
+      fi
+
+      # Get AWS credentials
+      AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id --profile ''${AWS_PROFILE:-default})
+      AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
+
+      SSH_KEY="$HOME/.ssh/cybersec-dask.pem"
+      SSH_OPTS="-o StrictHostKeyChecking=no"
+      SSH_BASTION="ssh -i $SSH_KEY $SSH_OPTS ec2-user@$BASTION_IP"
+      SSH_CP="ssh -i $SSH_KEY -o ProxyCommand=\"ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP\" $SSH_OPTS ec2-user@$CONTROL_IP"
+
+      echo "Bastion:       $BASTION_IP"
+      echo "Control Plane: $CONTROL_IP"
+      echo "S3 Bucket:     $BUCKET_NAME"
+      echo "Region:        $AWS_REGION"
+      echo "Ingress:       $INGRESS_PROVIDER"
+      echo ""
+
+      # Find the latest Zarf package
+      ZARF_PKG=$(ls -t zarf/zarf-package-cybersec-dask-amd64-*.tar.zst 2>/dev/null | head -1)
+      if [ -z "$ZARF_PKG" ]; then
+        echo "❌ No Zarf package found. Run: devenv tasks run zarf:package"
+        exit 1
+      fi
+      ZARF_PKG_NAME=$(basename "$ZARF_PKG")
+      echo "Package: $ZARF_PKG_NAME ($(du -h "$ZARF_PKG" | cut -f1))"
+      echo ""
+
+      # Phase 1: Transfer package to bastion
+      echo "📦 Phase 1: Transferring package to bastion..."
+      scp -i "$SSH_KEY" $SSH_OPTS "$ZARF_PKG" "ec2-user@$BASTION_IP:/tmp/$ZARF_PKG_NAME"
+
+      # Phase 2: Transfer package from bastion to control plane
+      echo "📦 Phase 2: Transferring package to control plane..."
+      eval $SSH_BASTION "scp -i $SSH_KEY $SSH_OPTS /tmp/$ZARF_PKG_NAME ec2-user@$CONTROL_IP:/tmp/$ZARF_PKG_NAME"
+
+      # Phase 3: Zarf init
+      echo "⚙️  Phase 3: Running zarf init..."
+      eval $SSH_CP "sudo /usr/local/bin/zarf init --confirm 2>&1" || {
+        # zarf binary not found — must be pre-installed for air-gap
+        echo "❌ Zarf binary not found on control plane."
+        echo "   Install it before running this task:"
+        echo "     scp zarf-binary ec2-user@<cp-ip>:/usr/local/bin/zarf"
+        echo "   Or (if internet is available):"
+        echo "     ssh <cp> 'curl -sLS https://zarf.dev/install.sh | sudo bash'"
+        exit 1
+      }
+
+      # Phase 4: Zarf package deploy
+      echo "🚀 Phase 4: Deploying Zarf package..."
+      WORKER_REPLICAS="''${DASK_WORKER_REPLICAS:-16}"
+      eval $SSH_CP "sudo /usr/local/bin/zarf package deploy /tmp/$ZARF_PKG_NAME \
+        --confirm \
+        --set S3_ENDPOINT=\"\" \
+        --set S3_BUCKET=$BUCKET_NAME \
+        --set S3_REGION=$AWS_REGION \
+        --set S3_ACCESS_KEY=$AWS_ACCESS_KEY_ID \
+        --set S3_SECRET_KEY=$AWS_SECRET_ACCESS_KEY \
+        --set DASK_WORKER_REPLICAS=$WORKER_REPLICAS"
+
+      echo ""
+      echo "✅ Zarf package deployed"
+
+      # Phase 5: Deploy Cloudflare tunnel (if applicable)
+      if [ "$INGRESS_PROVIDER" = "cloudflare" ]; then
+        echo ""
+        echo "🌐 Phase 5: Deploying Cloudflare tunnel..."
+        cd infra/aws/tofu
+        CLOUDFLARE_TUNNEL_TOKEN=$(tofu output -raw cloudflare_tunnel_token 2>/dev/null || echo "")
+        CLOUDFLARE_TUNNEL_ID=$(tofu output -raw cloudflare_tunnel_id 2>/dev/null || echo "")
+        export CLOUDFLARE_TUNNEL_TOKEN CLOUDFLARE_TUNNEL_ID
+        cd "$PROJECT_ROOT/infra/aws/ansible"
+        ansible-playbook playbooks/site.yml --tags cloudflare \
+          -e "s3_bucket_name=$BUCKET_NAME" \
+          -e "aws_region=$AWS_REGION"
+        echo "✅ Cloudflare tunnel deployed"
+      fi
+
+      echo ""
+      echo "✅ Deployment complete!"
+      echo ""
+
+      if [ "$INGRESS_PROVIDER" = "cloudflare" ]; then
+        INGRESS_URLS=$(cd "$PROJECT_ROOT/infra/aws/tofu" && tofu output -json ingress_urls 2>/dev/null | jq -r 'to_entries[] | "  - \(.key): \(.value)"')
+        echo "Access URLs (requires WARP):"
+        echo "$INGRESS_URLS"
+      fi
+      echo ""
+      echo "Verify with: devenv tasks run aws:verify"
+    '';
+
     # Write AWS environment variables to .env file for consistent use across sessions
     # This populates OTEL_S3_BUCKET and AWS_REGION from tofu output
     "aws:env".exec = ''
@@ -2720,6 +2832,11 @@ print('Config written to build/environment.json')
       INIT_PKG=$(ls -t zarf-init-*.tar.zst 2>/dev/null | head -1)
 
       if [ -z "$INIT_PKG" ]; then
+        if [ -n "''${AIRGAP:-}" ]; then
+          log_error "No init package found in zarf/ and AIRGAP mode is set."
+          log_error "Pre-download in a connected environment: zarf tools download-init"
+          exit 1
+        fi
         log_info "No init package found in zarf/. Downloading..."
         ZARF_VERSION=$(zarf version 2>/dev/null || echo "v0.41.0")
         zarf tools download-init
@@ -2739,11 +2856,9 @@ print('Config written to build/environment.json')
         log_info "StorageClass '$DEFAULT_SC' available — using small PVC for registry"
         zarf init --confirm --set REGISTRY_PVC_SIZE=1Gi
       else
-        log_info "No StorageClass — installing local-path-provisioner"
-        kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.30/deploy/local-path-storage.yaml 2>/dev/null || true
+        log_info "No StorageClass — installing local-path-provisioner from vendored manifest"
+        kubectl apply -f zarf/manifests/local-path-provisioner.yaml 2>/dev/null || true
         kubectl wait --for=condition=ready pod -l app=local-path-provisioner -n local-path-storage --timeout=60s 2>/dev/null || true
-        # Set as default so PVCs bind automatically
-        kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' 2>/dev/null || true
         log_success "local-path StorageClass installed and set as default"
         zarf init --confirm --set REGISTRY_PVC_SIZE=1Gi
       fi

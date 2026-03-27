@@ -79,7 +79,7 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "cybersec" {
     # True air-gap: bastion routes to control plane NodePort
     ingress_rule {
       hostname = local.ingress_domains.dask
-      service  = var.airgap_mode ? "http://${aws_instance.control_plane[0].private_ip}:30087" : "http://simple-scheduler.dask.svc.cluster.local:8787"
+      service  = var.airgap_mode ? "http://${aws_instance.control_plane[0].private_ip}:30087" : "http://cybersec-dask-scheduler.dask.svc.cluster.local:8787"
     }
 
     # JupyterHub
@@ -100,7 +100,7 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "cybersec" {
     # Panel Visualization
     ingress_rule {
       hostname = local.ingress_domains.viz
-      service  = var.airgap_mode ? "http://${aws_instance.control_plane[0].private_ip}:30506" : "http://panel-viz.panel-viz.svc.cluster.local:80"
+      service  = var.airgap_mode ? "http://${aws_instance.control_plane[0].private_ip}:30506" : "http://otel-navigator.panel-viz.svc.cluster.local:5006"
     }
 
     # Catch-all (required)

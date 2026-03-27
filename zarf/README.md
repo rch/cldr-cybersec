@@ -441,6 +441,21 @@ These are real mistakes observed during manual recovery attempts:
 Bare RKE2 without Rancher has no default StorageClass. The Zarf internal
 registry requests a 20 Gi PVC which will stay `Pending` indefinitely.
 
+**Option A — Install local-path-provisioner (recommended):**
+
+The Zarf package includes `local-path-provisioner` as a component, and the
+manifest is vendored at `manifests/local-path-provisioner.yaml`. Apply it
+before `zarf init` to provide a default StorageClass:
+
+```bash
+sudo kubectl apply -f zarf/manifests/local-path-provisioner.yaml
+sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
+  zarf init --confirm --set REGISTRY_PVC_SIZE=1Gi
+```
+
+The `zarf:local:init` devenv task and `verify-zarf-deployment.sh` both
+handle this automatically.
+
 **~~Option A — Disable PVC entirely~~** (DO NOT USE):
 
 > **`REGISTRY_PVC_ENABLED=false` crashes the registry** with

@@ -85,7 +85,7 @@
     - ../group_vars/all.yml
   vars:
     # Default to cloudflare for WARP device posture security
-    ingress_provider: "{{ lookup('env', 'INGRESS_PROVIDER') | default('cloudflare') }}"
+    ingress_provider: "{{ lookup('env', 'INGRESS_PROVIDER') | default('cloudflare', true) }}"
   roles:
     - role: ngrok
       when: ingress_provider == 'ngrok'

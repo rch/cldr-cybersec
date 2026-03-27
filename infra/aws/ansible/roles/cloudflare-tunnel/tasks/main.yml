@@ -59,6 +59,9 @@
         labels:
           app.kubernetes.io/name: cloudflared
           app.kubernetes.io/component: tunnel
+          # Prevent Zarf agent from mutating image references in this namespace.
+          # cloudflared pulls directly from Docker Hub, not from the Zarf registry.
+          zarf.dev/agent: ignore
 
 - name: Create Cloudflare Tunnel credentials secret
   kubernetes.core.k8s:
@@ -120,6 +123,7 @@
       Service URLs (protected by Zero Trust - requires WARP):
         - Dask Dashboard:  https://{{ cf_dask_domain }}
         - JupyterHub:      https://{{ cf_jupyterhub_domain }}
+        - Panel-Viz:       https://{{ cf_viz_domain }}
         - K8s Dashboard:   https://{{ cf_k8s_dashboard_domain }}
 
       Verify tunnel status:
