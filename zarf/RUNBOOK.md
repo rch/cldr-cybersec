@@ -187,6 +187,34 @@ Access from any node IP: `http://<node-ip>:<nodeport>`
 
 ## Troubleshooting
 
+### Clean up previous Zarf state before re-init
+
+If a previous `zarf init` or `zarf package deploy` was run on this cluster,
+you must clean it first. Common error: `Forbidden: field cannot be less than
+previous value` (PVC size mismatch from earlier init).
+
+```bash
+# Remove previous app package (if any)
+zarf package remove cybersec-dask --confirm 2>/dev/null || true
+
+# Remove previous Zarf init
+zarf destroy --confirm 2>/dev/null || true
+
+# If zarf destroy fails, clean manually:
+kubectl delete namespace zarf --wait=false 2>/dev/null || true
+kubectl delete pvc -n zarf zarf-docker-registry 2>/dev/null || true
+kubectl delete pv -l app=docker-registry 2>/dev/null || true
+
+# Wait for namespace to terminate (may need finalizer cleanup)
+kubectl get ns zarf 2>/dev/null && \
+  kubectl patch ns zarf -p '{"metadata":{"finalizers":null}}' --type=merge
+
+# Verify clean
+kubectl get ns zarf 2>&1 | grep -q "not found" && echo "Clean"
+
+# Now retry Step 4
+```
+
 ### Zarf init PVC stuck Pending
 
 ```bash
@@ -194,10 +222,7 @@ Access from any node IP: `http://<node-ip>:<nodeport>`
 kubectl get storageclass
 
 # If none: install local-path-provisioner (Step 3)
-# If stuck from failed previous attempt:
-kubectl delete pvc -n zarf zarf-docker-registry
-kubectl delete pv zarf-registry-pv 2>/dev/null
-# Then retry Step 4
+# If stuck from failed previous attempt, use the cleanup steps above
 ```
 
 ### Image push timeout during deploy
