@@ -45,6 +45,7 @@ cp zarf/manifests/local-path-provisioner.yaml .
 | `zarf-init-amd64-v0.74.0.tar.zst` | ~390 MB | Yes |
 | `zarf-package-cybersec-dask-amd64-1.3.0.tar.zst` | ~1.3 GB | Yes |
 | `local-path-provisioner.yaml` | 5 KB | Yes (if no default StorageClass) |
+| `scripts/zarf-clean-slate.sh` | 10 KB | Recommended (cleans stale state) |
 
 Transfer all files to the control plane node via USB, SCP, data diode, etc.
 
@@ -66,17 +67,38 @@ chmod +x /usr/local/bin/zarf
 zarf version
 ```
 
-### Step 2 — Verify Cluster Health
+### Step 2 — Clean Slate (required if any previous Zarf attempt was made)
+
+If the cluster has ANY leftover state from a previous Zarf init or deploy
+(even a failed one), run the cleanup script first. This is safe to run on
+a fresh cluster — it will detect nothing to clean and confirm clean state.
+
+```bash
+chmod +x scripts/zarf-clean-slate.sh
+
+# Preview what will be removed (no changes)
+./scripts/zarf-clean-slate.sh --dry-run
+
+# Run cleanup (keeps local-path-provisioner if you want to preserve it)
+./scripts/zarf-clean-slate.sh --keep-provisioner
+
+# Or full cleanup including provisioner
+./scripts/zarf-clean-slate.sh
+
+# Should print: CLEAN SLATE — ready for zarf init
+```
+
+### Step 3 — Verify Cluster Health
 
 ```bash
 kubectl get nodes
 # All nodes should be Ready
 
 kubectl get storageclass
-# Note: if no default StorageClass is listed, Step 3 is required
+# Note: if no default StorageClass is listed, Step 4 is required
 ```
 
-### Step 3 — Install StorageClass (skip if one already exists)
+### Step 4 — Install StorageClass (skip if one already exists)
 
 Bare RKE2 has no default StorageClass. Without one, Zarf's registry PVC
 stays Pending forever.
@@ -94,7 +116,7 @@ kubectl get storageclass
 # local-path (default)   rancher.io/local-path   10s
 ```
 
-### Step 4 — Zarf Init
+### Step 5 — Zarf Init
 
 Zarf auto-detects the init package by looking for `zarf-init-amd64-*.tar.zst`
 in the current directory. If not found, it attempts to download from GitHub
@@ -113,7 +135,7 @@ kubectl get pods -n zarf
 # agent-hook-*                              1/1     Running
 ```
 
-### Step 5 — Deploy Cybersec Dask
+### Step 6 — Deploy Cybersec Dask
 
 ```bash
 zarf package deploy zarf-package-cybersec-dask-amd64-1.3.0.tar.zst \
