@@ -2,6 +2,12 @@
 inputs:
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/rolling
+  # Pin devenv modules to avoid allowAliases bug in newer versions
+  # See: https://github.com/cachix/devenv/issues - devenv CLI doesn't pass
+  # allowAliases to nixpkgs config, causing darwin evaluation failures.
+  # Remove this pin once devenv releases a fix.
+  devenv:
+    url: github:cachix/devenv/92ad9c70fad164e8f4a3656dec91717a5c42cd98?dir=src/modules
 
 # If you're using non-OSS software, you can set allowUnfree to true.
 allowUnfree: true
