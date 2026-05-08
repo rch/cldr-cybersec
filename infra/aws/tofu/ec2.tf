@@ -64,7 +64,8 @@ resource "aws_iam_role_policy" "s3_access" {
           "s3:ListBucket",
           "s3:GetBucketLocation",
           "s3:GetBucketVersioning",
-          "s3:PutBucketVersioning"
+          "s3:PutBucketVersioning",
+          "s3:PutBucketPublicAccessBlock"
         ]
         Resource = "arn:aws:s3:::${var.project}-*"
       },
