@@ -497,7 +497,15 @@ class SpanExplorer(param.Parameterized):
         self._stop_polling = False
         self._current_data_path = None
 
-        ds_info = get_active_dataset()
+        # Bind module-level functions for use in daemon threads.
+        # Panel/Bokeh re-executes scripts per-session in isolated globals;
+        # daemon threads can outlive that globals dict, causing NameError.
+        self._get_active_dataset = get_active_dataset
+        self._load_span_data = load_span_data
+        self._get_dask_client = get_dask_client
+        self._get_dask_stats = get_dask_stats
+
+        ds_info = self._get_active_dataset()
         self.current_dataset = ds_info['dataset']
         self.dataset_phase = ds_info['phase']
         self._current_data_path = ds_info['path']
@@ -563,7 +571,7 @@ class SpanExplorer(param.Parameterized):
         import time as _time
         while not self._stop_polling:
             try:
-                stats = get_dask_stats()
+                stats = self._get_dask_stats()
                 self.workers = stats['workers']
                 self.processing = stats['processing']
             except Exception:
@@ -586,7 +594,7 @@ class SpanExplorer(param.Parameterized):
         _time.sleep(10)
         while not self._stop_polling:
             try:
-                ds_info = get_active_dataset()
+                ds_info = self._get_active_dataset()
                 new_dataset = ds_info['dataset']
                 if new_dataset != self.current_dataset:
                     _logger.info(f"Dataset changed: {self.current_dataset} -> {new_dataset}")
@@ -643,8 +651,8 @@ class SpanExplorer(param.Parameterized):
             try:
                 _set_params(phase=f"Connecting to Dask ({self.current_dataset})...")
                 _log.info(f"Connecting to Dask ({self.current_dataset})...")
-                client = get_dask_client()
-                stats = get_dask_stats()
+                client = self._get_dask_client()
+                stats = self._get_dask_stats()
                 _set_params(workers=stats['workers'])
 
                 def on_progress(msg):
@@ -652,7 +660,7 @@ class SpanExplorer(param.Parameterized):
                     _log.info(msg)
 
                 start, end = self._get_time_range()
-                self._ddf = load_span_data(
+                self._ddf = self._load_span_data(
                     start, end,
                     data_path=self._current_data_path,
                     on_progress=on_progress,
