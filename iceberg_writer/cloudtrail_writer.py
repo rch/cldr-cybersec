@@ -12,7 +12,7 @@ from pyiceberg.types import (
     NestedField, StringType, BooleanType, TimestampType
 )
 from pyiceberg.partitioning import PartitionSpec, PartitionField
-from pyiceberg.transforms import DayTransform
+from pyiceberg.transforms import DayTransform, HourTransform
 from pyiceberg.table.sorting import SortOrder, SortField
 from pyiceberg.transforms import IdentityTransform
 import pyarrow as pa
@@ -85,8 +85,8 @@ class IcebergWriter:
             PartitionField(
                 source_id=3,  # event_timestamp
                 field_id=1000,
-                transform=DayTransform(),
-                name="event_day"
+                transform=HourTransform(),
+                name="event_hour"
             ),
             PartitionField(
                 source_id=6,  # aws_region
@@ -116,6 +116,11 @@ class IcebergWriter:
                 schema=schema,
                 partition_spec=partition_spec,
                 sort_order=sort_order,
+                properties={
+                    "write.metadata.delete-after-commit.enabled": "true",
+                    "write.metadata.previous-versions-max": "5",
+                    "history.expire.max-snapshot-age-ms": "3600000"
+                }
             )
             print(f"Created table: {namespace}.{table_name}")
             return table

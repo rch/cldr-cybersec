@@ -4623,7 +4623,7 @@ except Exception as e:
     # Build flink-cyber Java datagen JAR if not already built (one-shot process)
     java-datagen-bootstrap = {
       exec = ''
-        JAR="$PWD/flink-cyber/flink-common/target/flink-common-2.4.0-iceberg.jar"
+        JAR="$PWD/flink-cyber/flink-common/target/flink-common-2.4.0.jar"
         if [ -f "$JAR" ]; then
           echo "Java datagen JAR exists: $JAR"
           exit 0
@@ -4674,6 +4674,7 @@ except Exception as e:
           -D jobmanager.rpc.address=localhost \
           -D rest.bind-address=0.0.0.0 \
           -D rest.port=8081 \
+          -D jobmanager.memory.process.size=1024m \
           -D state.checkpoints.dir=file://$FLINK_STATE_DIR/checkpoints \
           -D state.savepoints.dir=file://$FLINK_STATE_DIR/savepoints \
           -D 'classloader.parent-first-patterns.additional=com.codahale.metrics;org.apache.flink.dropwizard'
@@ -4715,6 +4716,12 @@ except Exception as e:
         exec "$FLINK_HOME/bin/taskmanager.sh" start-foreground \
           -D jobmanager.rpc.address=localhost \
           -D taskmanager.numberOfTaskSlots=4 \
+          -D taskmanager.memory.process.size=8192m \
+          -D taskmanager.memory.task.heap.size=4096m \
+          -D taskmanager.memory.managed.fraction=0.1 \
+          -D taskmanager.memory.jvm-overhead.fraction=0.1 \
+          -D taskmanager.memory.network.fraction=0.1 \
+          -D taskmanager.memory.task.off-heap.size=512m \
           -D taskmanager.tmp.dirs=$FLINK_STATE_DIR/tmp \
           -D 'classloader.parent-first-patterns.additional=com.codahale.metrics;org.apache.flink.dropwizard'
       '';
@@ -4823,7 +4830,7 @@ except Exception as e:
         # Function to check if job is already running
         check_job_running() {
           curl -s http://localhost:8081/jobs/overview 2>/dev/null | \
-            grep -q '"state":"RUNNING"'
+            jq -e '.jobs[] | select(.name == "insert-into_cybersec.default.cloudtrail_events" and (.state == "RUNNING" or .state == "RESTARTING" or .state == "CREATED" or .state == "INITIALIZING"))' > /dev/null
         }
 
         # Check if CloudTrail DataGen is already running
@@ -4877,7 +4884,7 @@ except Exception as e:
         # Set Flink paths
         export FLINK_HOME="$PWD/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1"
         FLINK_BIN="$FLINK_HOME/bin/flink"
-        JAR="$PWD/flink-cyber/flink-common/target/flink-common-2.4.0-iceberg.jar"
+        JAR="$PWD/flink-cyber/flink-common/target/flink-common-2.4.0.jar"
 
         # Configurable rows per second (default 100 for benchmarking)
         RPS="''${JAVA_DATAGEN_RPS:-100}"
@@ -4888,7 +4895,7 @@ except Exception as e:
         # Function to check if job is already running
         check_job_running() {
           curl -s http://localhost:8081/jobs/overview 2>/dev/null | \
-            grep -q '"state":"RUNNING"'
+            jq -e '.jobs[] | select(.name == "insert-into_iceberg_catalog.cybersec.cloudtrail_events" and (.state == "RUNNING" or .state == "RESTARTING" or .state == "CREATED" or .state == "INITIALIZING"))' > /dev/null
         }
 
         # Function to submit the Java datagen job
@@ -4920,6 +4927,43 @@ except Exception as e:
           fi
           sleep 30
         done
+      '';
+      process-compose = {
+        availability = {
+          restart = "on_failure";
+          max_restarts = 3;
+        };
+        depends_on = {
+          flink-taskmanager = {
+            condition = "process_healthy";
+          };
+          polaris-init = {
+            condition = "process_completed_successfully";
+          };
+          java-datagen-bootstrap = {
+            condition = "process_completed_successfully";
+          };
+        };
+      };
+    };
+
+    # Java CloudTrail Iceberg Maintenance
+    # Runs the continuous Iceberg Snapshot and Orphan cleanup routine
+    java-cloudtrail-maintenance = {
+      exec = ''
+        echo "Starting Java CloudTrail Iceberg Maintenance job..."
+
+        # Set Flink paths
+        export FLINK_HOME="$PWD/thirdparty/flink/flink-dist/target/flink-1.20.1-bin/flink-1.20.1"
+        FLINK_BIN="$FLINK_HOME/bin/flink"
+        JAR="$PWD/flink-cyber/flink-common/target/flink-common-2.4.0.jar"
+
+        export FLINK_ENV_JAVA_OPTS="--add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED --add-opens java.base/java.lang.reflect=ALL-UNNAMED --add-opens java.base/java.text=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/java.net=ALL-UNNAMED --add-opens java.base/java.util.concurrent=ALL-UNNAMED --add-opens java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/sun.security.action=ALL-UNNAMED"
+
+        echo "Submitting Iceberg Maintenance Job..."
+        "$FLINK_BIN" run \
+          -c com.cloudera.cyber.flink.iceberg.CloudTrailIcebergMaintenanceJob \
+          "$JAR"
       '';
       process-compose = {
         availability = {

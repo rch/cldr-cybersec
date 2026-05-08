@@ -85,7 +85,7 @@ public class CloudTrailDataGenIcebergJob {
             "CREATE TEMPORARY TABLE cloudtrail_source (" +
             "  event_version STRING," +
             "  event_id STRING," +
-            "  event_time TIMESTAMP(3)," +
+            "  event_time AS CAST(LOCALTIMESTAMP AS TIMESTAMP(6))," +
             "  event_name STRING," +
             "  aws_region STRING," +
             "  source_ip_address STRING," +
@@ -120,7 +120,7 @@ public class CloudTrailDataGenIcebergJob {
         // Stream data from source to Iceberg table
         String insertSql = 
             "INSERT INTO iceberg_catalog.cybersec.cloudtrail_events " +
-            "SELECT * FROM cloudtrail_source";
+            "SELECT *, DATE_FORMAT(event_time, 'yyyy-MM-dd-HH') FROM cloudtrail_source";
         
         System.out.println("Starting CloudTrail DataGen -> Iceberg job...");
         System.out.println("REST Catalog: " + catalogUri + "/api/catalog");

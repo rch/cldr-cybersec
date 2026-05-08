@@ -90,9 +90,29 @@ CREATE TABLE IF NOT EXISTS cloudtrail_events (
   response_elements STRING,
   event_time TIMESTAMP(3),
   event_type STRING,
+  event_hour STRING,
   PRIMARY KEY (event_id) NOT ENFORCED
-) PARTITIONED BY (aws_region);
+) PARTITIONED BY (aws_region, event_hour) WITH (
+  'write.metadata.delete-after-commit.enabled' = 'true',
+  'write.metadata.previous-versions-max' = '5',
+  'history.expire.max-snapshot-age-ms' = '3600000'
+);
 
 -- Insert data from DataGen into Iceberg (runs continuously until stopped)
 INSERT INTO cloudtrail_events
-SELECT * FROM default_catalog.default_database.cloudtrail_datagen;
+SELECT 
+  event_id,
+  event_name,
+  event_source,
+  aws_region,
+  source_ip_address,
+  user_agent,
+  user_identity_type,
+  user_identity_principal_id,
+  user_identity_arn,
+  request_parameters,
+  response_elements,
+  event_time,
+  event_type,
+  DATE_FORMAT(event_time, 'yyyy-MM-dd-HH') AS event_hour
+FROM default_catalog.default_database.cloudtrail_datagen;

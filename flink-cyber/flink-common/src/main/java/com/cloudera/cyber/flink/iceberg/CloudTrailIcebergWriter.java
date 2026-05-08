@@ -104,11 +104,15 @@ public class CloudTrailIcebergWriter {
             "  user_identity_account_id STRING," +
             "  request_parameters STRING," +
             "  response_elements STRING," +
+            "  event_hour STRING," +
             "  PRIMARY KEY (event_id) NOT ENFORCED" +
-            ") WITH (" +
+            ") PARTITIONED BY (aws_region, event_hour) WITH (" +
             "  'format-version' = '2'," +
             "  'write.format.default' = 'parquet'," +
-            "  'write.parquet.compression-codec' = 'snappy'" +
+            "  'write.parquet.compression-codec' = 'snappy'," +
+            "  'write.metadata.delete-after-commit.enabled' = 'true'," +
+            "  'write.metadata.previous-versions-max' = '5'," +
+            "  'history.expire.max-snapshot-age-ms' = '3600000'" +
             ")",
             DATABASE_NAME,
             TABLE_NAME
@@ -130,7 +134,7 @@ public class CloudTrailIcebergWriter {
         
         // Insert data into the Iceberg table
         String insertSql = String.format(
-            "INSERT INTO %s.%s.%s SELECT * FROM cloudtrail_input",
+            "INSERT INTO %s.%s.%s SELECT *, DATE_FORMAT(event_time, 'yyyy-MM-dd-HH') FROM cloudtrail_input",
             CATALOG_NAME,
             DATABASE_NAME,
             TABLE_NAME
