@@ -793,8 +793,38 @@ PY
       echo "AWS Account: $ACCOUNT_ID"
       echo ""
 
-      # Get region from environment or AWS config
-      REGION="''${AWS_REGION:-$(aws configure get region 2>/dev/null || echo "us-east-1")}"
+      # Auto-detect region from tfstate (resources have ARNs with region).
+      # Mirrors aws:destroy. Critical for ownership isolation: AWS_REGION env
+      # MUST NOT be allowed to silently retarget a teardown at a different
+      # region than the one the local state actually represents.
+      STATE_REGION=""
+      if [ -f terraform.tfstate ]; then
+        STATE_REGION=$(python3 - <<'PY'
+import json, re
+try:
+    state = json.load(open("terraform.tfstate"))
+    for resource in state.get("resources", []):
+        for instance in resource.get("instances", []):
+            attrs = instance.get("attributes", {})
+            for key in ["arn", "id"]:
+                val = attrs.get(key, "")
+                if isinstance(val, str) and val.startswith("arn:aws:"):
+                    match = re.search(r"arn:aws:[^:]+:([a-z]{2}-[a-z]+-\d+):", val)
+                    if match:
+                        print(match.group(1))
+                        exit(0)
+except Exception:
+    pass
+PY
+)
+      fi
+
+      if [ -n "$STATE_REGION" ]; then
+        REGION="$STATE_REGION"
+        echo "📍 Detected region from tfstate: $REGION"
+      else
+        REGION="''${AWS_REGION:-$(aws configure get region 2>/dev/null || echo "us-east-1")}"
+      fi
       KEY_NAME="cybersec-dask-$PREFIX"
 
       # Export TF variables required for plan

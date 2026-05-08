@@ -7,12 +7,25 @@
 #
 # Dependencies: kubectl only (no jq, no python, no zarf CLI required)
 #
+# ISOLATION RULE
+# This script operates on whatever cluster the resolved KUBECONFIG points
+# to. Multiple cybersec-dask clusters can coexist in the same AWS account
+# (e.g. a us-west-1 production-like stack and a local us-east-1 dev
+# stack). To prevent accidental cross-cluster cleanup, destructive runs
+# require explicit context confirmation:
+#
+#   --i-confirm-context=<ctx>            # CLI flag
+#   ZARF_CLEAN_SLATE_CONFIRM_CONTEXT=<ctx>  # env var
+#
+# Where <ctx> must equal `kubectl config current-context`. --dry-run and
+# --verify-only are read-only and skip the check.
+#
 # Usage:
-#   ./zarf-clean-slate.sh                    # Full cleanup
-#   ./zarf-clean-slate.sh --dry-run          # Preview only (no changes)
-#   ./zarf-clean-slate.sh --keep-provisioner # Keep local-path-provisioner
-#   ./zarf-clean-slate.sh --clean-disk       # Also wipe /var/lib/zarf-registry
-#   ./zarf-clean-slate.sh --verify-only      # Check state, no changes
+#   ./zarf-clean-slate.sh --i-confirm-context=<ctx>     # Full cleanup
+#   ./zarf-clean-slate.sh --dry-run                     # Preview only (no changes)
+#   ./zarf-clean-slate.sh --keep-provisioner --i-confirm-context=<ctx>
+#   ./zarf-clean-slate.sh --clean-disk --i-confirm-context=<ctx>
+#   ./zarf-clean-slate.sh --verify-only                 # Check state, no changes
 # =============================================================================
 
 set -euo pipefail
@@ -24,13 +37,15 @@ DRY_RUN=false
 VERIFY_ONLY=false
 KEEP_PROVISIONER=false
 CLEAN_DISK=false
+CONFIRM_CONTEXT=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --dry-run)           DRY_RUN=true;          shift ;;
-        --verify-only)       VERIFY_ONLY=true;      shift ;;
-        --keep-provisioner)  KEEP_PROVISIONER=true;  shift ;;
-        --clean-disk)        CLEAN_DISK=true;        shift ;;
+        --dry-run)              DRY_RUN=true;          shift ;;
+        --verify-only)          VERIFY_ONLY=true;      shift ;;
+        --keep-provisioner)     KEEP_PROVISIONER=true;  shift ;;
+        --clean-disk)           CLEAN_DISK=true;        shift ;;
+        --i-confirm-context=*)  CONFIRM_CONTEXT="${1#*=}"; shift ;;
         -h|--help)
             sed -n '2,/^# =====/{ /^# /s/^# //p }' "$0"
             exit 0
@@ -83,6 +98,46 @@ resolve_kubeconfig() {
     done
     log_error "No kubeconfig found. Set KUBECONFIG or ensure RKE2 is installed."
     exit 1
+}
+
+# =============================================================================
+# Cluster context confirmation
+# =============================================================================
+# Print resolved kubeconfig + current-context + API server URL, then refuse
+# to proceed with a destructive run unless the operator explicitly confirms
+# the target context. Read-only modes (--dry-run, --verify-only) skip the
+# check. See ISOLATION RULE in the header for rationale.
+confirm_target_cluster() {
+    local current_context server_url
+    current_context=$(kubectl config current-context 2>/dev/null) || current_context="(unknown)"
+    server_url=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null) || server_url="(unknown)"
+
+    echo ""
+    echo -e "${BOLD}Target cluster:${NC}"
+    echo "  KUBECONFIG:      $KUBECONFIG"
+    echo "  current-context: $current_context"
+    echo "  api server:      $server_url"
+    echo ""
+
+    if [[ "$DRY_RUN" == "true" ]] || [[ "$VERIFY_ONLY" == "true" ]]; then
+        log_info "Read-only mode — skipping context confirmation"
+        return 0
+    fi
+
+    local expected="${CONFIRM_CONTEXT:-${ZARF_CLEAN_SLATE_CONFIRM_CONTEXT:-}}"
+    if [[ -z "$expected" ]]; then
+        log_error "Cluster context confirmation required for destructive run."
+        log_error "  Re-run with: --i-confirm-context=$current_context"
+        log_error "  Or:          ZARF_CLEAN_SLATE_CONFIRM_CONTEXT=$current_context $0 ..."
+        exit 1
+    fi
+    if [[ "$expected" != "$current_context" ]]; then
+        log_error "Context mismatch — refusing to operate."
+        log_error "  Confirmed: $expected"
+        log_error "  Current:   $current_context"
+        exit 1
+    fi
+    log_ok "Context confirmed: $current_context"
 }
 
 # =============================================================================
@@ -505,6 +560,8 @@ main() {
         log_error "Cannot connect to cluster. Check KUBECONFIG and network."
         exit 1
     fi
+
+    confirm_target_cluster
 
     discover
 
