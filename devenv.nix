@@ -2575,7 +2575,12 @@ asyncio.run(main())
 
       log_info "Using $BUILDER to build image..."
 
+      # zarf.yaml declares architecture: amd64 and the deployment target is
+      # x86_64 EC2 (m6i/r6i). On Apple Silicon hosts we must force linux/amd64
+      # via Rosetta — building for the host arch produces an arm64 image with
+      # libstdc++/wheel incompatibilities and an undeployable artifact.
       $BUILDER build \
+        --platform linux/amd64 \
         -t cybersec-dask:2025.2.0 \
         -f zarf/images/Dockerfile.cybersec-dask \
         --build-arg BASE_IMAGE=ghcr.io/dask/dask:2025.2.0 \
