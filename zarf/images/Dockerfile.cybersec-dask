@@ -76,30 +76,14 @@ RUN mkdir -p /app/static/ghostty && \
     [shutil.move(f, '/app/static/ghostty/' + os.path.basename(f)) for f in glob.glob('/tmp/package/dist/*')]; \
     print('ghostty-web extracted:', os.listdir('/app/static/ghostty/'))"
 
-# Create loader.js shim: bridges ES module to Panel's script-tag context
-# Panel's __javascript__ loads this as a regular <script>. It injects a
-# <script type="module"> that properly imports the ES module, loads WASM,
+# loader.js shim bridges the ghostty-web ES module to Panel's script-tag
+# context. Panel's __javascript__ loads it as a regular <script>; it
+# injects a <script type="module"> that imports the ES module, loads WASM,
 # and exposes everything on window.__ghostty for the render script.
-RUN cat > /app/static/ghostty/loader.js << 'LOADEREOF'
-(function() {
-    if (window.__ghostty || window.__ghosttyLoading) return;
-    window.__ghosttyLoading = true;
-    var s = document.createElement('script');
-    s.type = 'module';
-    s.textContent = [
-        "import { Ghostty, Terminal, FitAddon } from '/ghostty/ghostty-web.js';",
-        "try {",
-        "  const instance = await Ghostty.load('/ghostty/ghostty-vt.wasm');",
-        "  window.__ghostty = { Ghostty, Terminal, FitAddon, instance };",
-        "} catch(e) {",
-        "  console.error('ghostty-web init failed:', e);",
-        "  window.__ghosttyError = e;",
-        "}",
-        "window.dispatchEvent(new CustomEvent('ghostty-ready'));",
-    ].join('\n');
-    document.head.appendChild(s);
-})();
-LOADEREOF
+# Kept as a sibling file (not an inline heredoc) so podman/buildah parses
+# the Dockerfile correctly — line-oriented Dockerfile parsing treats JS
+# lines starting with '(' as new instructions.
+COPY zarf/images/loader.js /app/static/ghostty/loader.js
 
 # Verify app can be imported (catches syntax errors at build time)
 RUN python -c "import ast; ast.parse(open('/app/otel-navigator.py').read()); print('App syntax OK')"
