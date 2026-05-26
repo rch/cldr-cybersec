@@ -8,6 +8,18 @@ variable "aws_region" {
   default     = "us-east-1"
 }
 
+# Leaving this null falls through to the standard SDK chain
+# (AWS_PROFILE -> AWS_ACCESS_KEY_ID -> SSO -> instance metadata). The aws:provision
+# task pins this from $AWS_PROFILE so the resolved account matches the operator's
+# active session. A hardcoded value here previously caused a deploy to land in
+# the wrong account because the named profile resolved to different credentials
+# than the operator's SSO session.
+variable "aws_profile" {
+  description = "AWS named profile to use for the provider; null = honor AWS_PROFILE env / SDK default chain"
+  type        = string
+  default     = null
+}
+
 variable "environment" {
   description = "Environment name (dev, staging, prod)"
   type        = string

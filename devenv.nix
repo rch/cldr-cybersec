@@ -424,6 +424,13 @@ print('Environment config written to build/environment.json')
       export TF_VAR_ssh_key_name="$KEY_NAME"
       export TF_VAR_aws_region="$REGION"
 
+      # Pin the tofu provider to the operator's resolved AWS profile so the
+      # deployment lands in the same account that aws sts get-caller-identity
+      # just confirmed above. Without this pin the provider falls back to the
+      # SDK default chain, which may resolve to a different account than the
+      # operator intended (see provider.tf comment).
+      export TF_VAR_aws_profile="$PROFILE"
+
       # Ingress provider: cloudflare (default) or ngrok
       # Override with INGRESS_PROVIDER env var if needed
       export TF_VAR_ingress_provider="''${INGRESS_PROVIDER:-cloudflare}"
@@ -661,6 +668,9 @@ PY
       export TF_VAR_developer_email="$EMAIL"
       export TF_VAR_ssh_key_name="$KEY_NAME"
       export TF_VAR_aws_region="$REGION"
+      # Pin provider to the operator's profile so destroy targets the same
+      # account as the prior apply (see provider.tf comment).
+      export TF_VAR_aws_profile="$PROFILE"
 
       # Ingress provider: cloudflare (default) or ngrok
       export TF_VAR_ingress_provider="''${INGRESS_PROVIDER:-cloudflare}"
@@ -785,12 +795,14 @@ PY
       cd infra/aws/tofu
 
       # Get developer identity
+      PROFILE="''${AWS_PROFILE:-default}"
       PREFIX=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_prefix; settings = SettingsManager(); config = settings.load(); print(get_developer_prefix(config))")
       EMAIL=$(uv run python -c "from cybersec.bootstrap.config import SettingsManager; from cybersec.bootstrap.identity import get_developer_email; settings = SettingsManager(); config = settings.load(); print(get_developer_email(config))")
       ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "unknown")
 
       echo "Developer: $EMAIL (prefix: $PREFIX)"
       echo "AWS Account: $ACCOUNT_ID"
+      echo "AWS Profile: $PROFILE"
       echo ""
 
       # Auto-detect region from tfstate (resources have ARNs with region).
@@ -832,6 +844,9 @@ PY
       export TF_VAR_developer_email="$EMAIL"
       export TF_VAR_ssh_key_name="$KEY_NAME"
       export TF_VAR_aws_region="$REGION"
+      # Pin provider to the operator's profile so teardown targets the same
+      # account as the prior apply (see provider.tf comment).
+      export TF_VAR_aws_profile="$PROFILE"
 
       # Ingress provider settings
       export TF_VAR_ingress_provider="''${INGRESS_PROVIDER:-cloudflare}"
