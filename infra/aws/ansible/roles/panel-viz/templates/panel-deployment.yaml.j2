@@ -125,7 +125,18 @@ spec:
               # -------------------------------------------------------------------------
 
               def get_storage_options() -> dict:
-                  opts = {'key': AWS_ACCESS_KEY_ID, 'secret': AWS_SECRET_ACCESS_KEY}
+                  # If env creds are empty, fall through to the boto3 default
+                  # credential chain (EC2 instance role). If STS creds are
+                  # provided we MUST include the session token, or s3fs sends
+                  # only key+secret and S3 returns 403 / "Access Key Id does
+                  # not exist".
+                  opts = {}
+                  if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+                      opts['key'] = AWS_ACCESS_KEY_ID
+                      opts['secret'] = AWS_SECRET_ACCESS_KEY
+                      _session_token = os.environ.get('AWS_SESSION_TOKEN', '')
+                      if _session_token:
+                          opts['token'] = _session_token
                   if S3_ENDPOINT:
                       opts['client_kwargs'] = {'endpoint_url': S3_ENDPOINT}
                   if AWS_REGION:

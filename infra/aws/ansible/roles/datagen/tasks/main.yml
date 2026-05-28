@@ -25,6 +25,7 @@
       stringData:
         AWS_ACCESS_KEY_ID: "{{ datagen_aws_access_key_id }}"
         AWS_SECRET_ACCESS_KEY: "{{ datagen_aws_secret_access_key }}"
+        AWS_SESSION_TOKEN: "{{ datagen_aws_session_token }}"
         AWS_REGION: "{{ datagen_aws_region }}"
 
 # -------------------------------------------------------------------------
@@ -81,6 +82,7 @@
   ansible.builtin.shell: |
     export AWS_ACCESS_KEY_ID="{{ datagen_aws_access_key_id }}"
     export AWS_SECRET_ACCESS_KEY="{{ datagen_aws_secret_access_key }}"
+    export AWS_SESSION_TOKEN="{{ datagen_aws_session_token }}"
     export AWS_REGION="{{ datagen_aws_region }}"
     echo '{"dataset": "{{ datagen_minimal_s3_prefix }}", "updated_at": "'$(date -Iseconds)'", "phase": "minimal"}' | \
       aws s3 cp - s3://{{ datagen_s3_bucket }}/_active_dataset.json

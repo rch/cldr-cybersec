@@ -21,8 +21,12 @@ panel_cpu_limit: "2"
 panel_cpu_request: "500m"
 
 # Dask cluster connection
-# Uses the simple-scheduler deployed by dask role
-panel_dask_scheduler: "simple-scheduler.dask.svc.cluster.local:8786"
+# Default target is the cybersec-dask DaskCluster deployed by the zarf
+# package (cybersec-dask-amd64-*.tar.zst) — that cluster uses the
+# cybersec-dask:2025.2.0 image with HoloViews/Datashader/Panel/Bokeh
+# pre-installed. The legacy `simple` cluster from the dask role can be
+# torn down once cybersec-dask is healthy to free node memory.
+panel_dask_scheduler: "cybersec-dask-scheduler.dask.svc.cluster.local:8786"
 
 # S3/MinIO configuration for data access
 # Empty endpoint = use real AWS S3 (not MinIO)
@@ -33,8 +37,18 @@ panel_otel_data_path: "s3://{{ panel_s3_bucket }}/otel-minimal/"
 
 # AWS credentials (from environment, AWS CLI config, or vault)
 # Priority: 1. Environment vars, 2. AWS CLI credentials file, 3. MinIO fallback
-panel_aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') | default(lookup('ini', 'aws_access_key_id', section='default', file='~/.aws/credentials', errors='ignore'), true) | default(lookup('env', 'MINIO_ACCESS_KEY'), true) }}"
-panel_aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') | default(lookup('ini', 'aws_secret_access_key', section='default', file='~/.aws/credentials', errors='ignore'), true) | default(lookup('env', 'MINIO_SECRET_KEY'), true) }}"
+# Defaults to empty so the pod falls through to the EC2 instance role
+# (cybersec-dask-rke2-node has s3:GetObject/PutObject on cybersec-dask-*).
+# Previously these defaulted to ~/.aws/credentials [default] / MinIO env
+# vars, which on developer machines often pointed to keys in a DIFFERENT
+# AWS account and caused S3 reads to fail with "Access Key Id does not
+# exist". Override only when targeting a non-AWS S3 (e.g. MinIO local).
+panel_aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') | default(lookup('env', 'MINIO_ACCESS_KEY'), true) }}"
+panel_aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') | default(lookup('env', 'MINIO_SECRET_KEY'), true) }}"
+# Session token required when AWS_ACCESS_KEY_ID is an STS temporary credential
+# (ASIA... prefix). Empty when using long-lived IAM user keys (AKIA... prefix)
+# or the EC2 instance role.
+panel_aws_session_token: "{{ lookup('env', 'AWS_SESSION_TOKEN') | default('', true) }}"
 # Note: Uses aws_region from deploy task, PANEL_AWS_REGION env var, or defaults
 panel_aws_region: "{{ aws_region | default(lookup('env', 'PANEL_AWS_REGION') | default(lookup('env', 'AWS_REGION'), true) | default('us-east-1', true), true) }}"
 

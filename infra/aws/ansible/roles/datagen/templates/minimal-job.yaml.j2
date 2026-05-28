@@ -103,11 +103,18 @@ spec:
               HTTP_STATUS_CODES = [200, 200, 200, 201, 400, 500]
 
               # Initialize S3
-              s3 = fs.S3FileSystem(
-                  access_key=os.environ["AWS_ACCESS_KEY_ID"],
-                  secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-                  region=os.environ.get("AWS_REGION", "us-east-1"),
-              )
+              # See large-job.yaml.j2 for rationale; STS creds require
+              # session_token or S3 rejects with "InvalidAccessKeyId".
+              _ak = os.environ.get("AWS_ACCESS_KEY_ID", "")
+              _sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+              _st = os.environ.get("AWS_SESSION_TOKEN", "")
+              _s3_kwargs = {"region": os.environ.get("AWS_REGION", "us-east-1")}
+              if _ak and _sk:
+                  _s3_kwargs["access_key"] = _ak
+                  _s3_kwargs["secret_key"] = _sk
+                  if _st:
+                      _s3_kwargs["session_token"] = _st
+              s3 = fs.S3FileSystem(**_s3_kwargs)
               base_path = "{{ datagen_s3_bucket }}/{{ datagen_minimal_s3_prefix }}"
 
               # Time range

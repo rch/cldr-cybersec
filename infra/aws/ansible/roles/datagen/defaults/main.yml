@@ -60,9 +60,16 @@ datagen_large_deadline_seconds: 129600
 # Common Configuration
 # -------------------------------------------------------------------------
 
-# AWS credentials (from environment or AWS CLI config)
-datagen_aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') | default(lookup('ini', 'aws_access_key_id', section='default', file='~/.aws/credentials', errors='ignore'), true) }}"
-datagen_aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') | default(lookup('ini', 'aws_secret_access_key', section='default', file='~/.aws/credentials', errors='ignore'), true) }}"
+# AWS credentials. Defaults to empty so pods fall through to the EC2
+# instance role (cybersec-dask-rke2-node has s3:GetObject/PutObject on
+# cybersec-dask-* via IMDS — see infra/aws/tofu/ec2.tf). Previously these
+# defaulted to ~/.aws/credentials [default], which on developer machines
+# pointed to long-lived IAM user keys in a DIFFERENT AWS account and
+# caused S3 writes to fail with "Access Key Id does not exist".
+# Override only when targeting a non-AWS S3 (e.g. MinIO local).
+datagen_aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') | default('', true) }}"
+datagen_aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') | default('', true) }}"
+datagen_aws_session_token: "{{ lookup('env', 'AWS_SESSION_TOKEN') | default('', true) }}"
 datagen_aws_region: "{{ aws_region | default(lookup('env', 'AWS_REGION') | default('us-east-1', true), true) }}"
 
 # Container image for datagen jobs
