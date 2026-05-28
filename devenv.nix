@@ -1372,10 +1372,19 @@ EOF
       echo ""
       export PROJECT_ROOT="$PWD"
 
-      # Override MinIO credentials with real AWS credentials from profile
-      export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id --profile ''${AWS_PROFILE:-default})
-      export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
-      export AWS_SESSION_TOKEN=$(aws configure get aws_session_token --profile ''${AWS_PROFILE:-default} 2>/dev/null || echo "")
+      # Override MinIO credentials with real AWS credentials from profile.
+      # Use export-credentials so SSO profiles work too — aws configure get
+      # only reads static keys and returns empty for SSO profiles.
+      CREDS_JSON=$(aws configure export-credentials --profile "''${AWS_PROFILE:-default}" 2>/dev/null || echo '{}')
+      export AWS_ACCESS_KEY_ID=$(echo "$CREDS_JSON" | jq -r '.AccessKeyId // empty')
+      export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS_JSON" | jq -r '.SecretAccessKey // empty')
+      export AWS_SESSION_TOKEN=$(echo "$CREDS_JSON" | jq -r '.SessionToken // empty')
+
+      if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+        echo "❌ Failed to resolve AWS credentials for profile ''${AWS_PROFILE:-default}."
+        echo "   For SSO profiles: aws sso login --profile ''${AWS_PROFILE:-default}"
+        exit 1
+      fi
 
       # Prevent conflict with local MinIO
       unset S3_ENDPOINT
@@ -1454,9 +1463,21 @@ EOF
         exit 1
       fi
 
-      # Get AWS credentials
-      AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id --profile ''${AWS_PROFILE:-default})
-      AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
+      # Get AWS credentials via export-credentials so SSO profiles work too.
+      # aws configure get aws_access_key_id only reads static keys from
+      # ~/.aws/credentials and returns exit 1 (empty value) for SSO profiles,
+      # which kills the task under set -e before the SCP phase even starts.
+      CREDS_JSON=$(aws configure export-credentials --profile "''${AWS_PROFILE:-default}" 2>/dev/null || echo '{}')
+      AWS_ACCESS_KEY_ID=$(echo "$CREDS_JSON" | jq -r '.AccessKeyId // empty')
+      AWS_SECRET_ACCESS_KEY=$(echo "$CREDS_JSON" | jq -r '.SecretAccessKey // empty')
+      AWS_SESSION_TOKEN=$(echo "$CREDS_JSON" | jq -r '.SessionToken // empty')
+
+      if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+        echo "❌ Failed to resolve AWS credentials for profile ''${AWS_PROFILE:-default}."
+        echo "   For SSO profiles: aws sso login --profile ''${AWS_PROFILE:-default}"
+        echo "   For static profiles: confirm ~/.aws/credentials has aws_access_key_id set."
+        exit 1
+      fi
 
       SSH_KEY="$HOME/.ssh/cybersec-dask.pem"
       SSH_OPTS="-o StrictHostKeyChecking=no"
@@ -1480,37 +1501,176 @@ EOF
       echo "Package: $ZARF_PKG_NAME ($(du -h "$ZARF_PKG" | cut -f1))"
       echo ""
 
-      # Phase 1: Transfer package to bastion
+      # Phase 1a: Stage SSH key on bastion. The bastion needs it to hop to the
+      # control plane in phase 2. We previously tried to pass $SSH_KEY through
+      # the SSH wrapper, but that path is a laptop-side absolute (e.g.
+      # /Users/<you>/.ssh/cybersec-dask.pem) and does not exist on the bastion.
+      SSH_KEY_BASENAME=$(basename "$SSH_KEY")
+      BASTION_KEY_PATH="/home/ec2-user/.ssh/$SSH_KEY_BASENAME"
+      echo "🔐 Staging SSH key on bastion at $BASTION_KEY_PATH..."
+      scp -i "$SSH_KEY" $SSH_OPTS "$SSH_KEY" "ec2-user@$BASTION_IP:$BASTION_KEY_PATH"
+      eval $SSH_BASTION "chmod 600 $BASTION_KEY_PATH"
+
+      # Phase 1b: Transfer package to bastion
       echo "📦 Phase 1: Transferring package to bastion..."
-      scp -i "$SSH_KEY" $SSH_OPTS "$ZARF_PKG" "ec2-user@$BASTION_IP:/tmp/$ZARF_PKG_NAME"
+      scp -i "$SSH_KEY" $SSH_OPTS "$ZARF_PKG" "ec2-user@$BASTION_IP:/var/tmp/$ZARF_PKG_NAME"
 
-      # Phase 2: Transfer package from bastion to control plane
+      # Phase 2: Transfer package from bastion to control plane (use the key
+      # we just staged on the bastion, not the laptop path).
       echo "📦 Phase 2: Transferring package to control plane..."
-      eval $SSH_BASTION "scp -i $SSH_KEY $SSH_OPTS /tmp/$ZARF_PKG_NAME ec2-user@$CONTROL_IP:/tmp/$ZARF_PKG_NAME"
+      eval $SSH_BASTION "scp -i $BASTION_KEY_PATH $SSH_OPTS /var/tmp/$ZARF_PKG_NAME ec2-user@$CONTROL_IP:/var/tmp/$ZARF_PKG_NAME"
 
-      # Phase 3: Zarf init
-      echo "⚙️  Phase 3: Running zarf init..."
-      eval $SSH_CP "sudo /usr/local/bin/zarf init --confirm 2>&1" || {
-        # zarf binary not found — must be pre-installed for air-gap
-        echo "❌ Zarf binary not found on control plane."
-        echo "   Install it before running this task:"
-        echo "     scp zarf-binary ec2-user@<cp-ip>:/usr/local/bin/zarf"
-        echo "   Or (if internet is available):"
-        echo "     ssh <cp> 'curl -sLS https://zarf.dev/install.sh | sudo bash'"
+      # Phase 2b: Ensure the zarf binary AND its init package are present on
+      # the control plane. The cybersec-dask package was built against zarf
+      # v0.70.1; pin to that exact version to avoid archive-format skew. CP
+      # reaches GitHub via the VPC NAT gateway. Both downloads are idempotent
+      # — re-running the task skips work that is already done.
+      ZARF_VERSION="v0.70.1"
+      ZARF_BIN_URL="https://github.com/zarf-dev/zarf/releases/download/''${ZARF_VERSION}/zarf_''${ZARF_VERSION}_Linux_amd64"
+      ZARF_INIT_PKG="zarf-init-amd64-''${ZARF_VERSION}.tar.zst"
+      ZARF_INIT_URL="https://github.com/zarf-dev/zarf/releases/download/''${ZARF_VERSION}/''${ZARF_INIT_PKG}"
+      echo "🔧 Phase 2b: Ensuring zarf ''${ZARF_VERSION} (binary + init package) on control plane..."
+      # Pipe the staging script via stdin instead of eval $SSH_CP "..." with
+      # semicolons. eval joins all its args with spaces and re-parses, so any
+      # semicolon (or newline followed by another command) inside the quoted
+      # script gets re-interpreted as a top-level command separator after
+      # the ssh invocation. That made cmd2 in `ssh ... 'cmd1; cmd2'` run
+      # LOCALLY instead of on the remote host — exactly the bug we hit when
+      # /usr/local/bin/zarf version was being executed on the laptop.
+      ssh -i "$SSH_KEY" \
+        -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
+        $SSH_OPTS ec2-user@$CONTROL_IP bash -s <<REMOTE_HEREDOC || {
+set -e
+if ! /usr/local/bin/zarf version >/dev/null 2>&1; then
+  echo "  Installing zarf binary $ZARF_VERSION..."
+  curl -sSfL "$ZARF_BIN_URL" -o /tmp/zarf-install
+  sudo -n install -m 0755 /tmp/zarf-install /usr/local/bin/zarf
+  rm -f /tmp/zarf-install
+fi
+if [ ! -f "/var/tmp/$ZARF_INIT_PKG" ]; then
+  echo "  Downloading zarf init package $ZARF_INIT_PKG..."
+  curl -sSfL "$ZARF_INIT_URL" -o "/var/tmp/$ZARF_INIT_PKG"
+fi
+echo -n "  zarf binary: "
+/usr/local/bin/zarf version
+echo -n "  init pkg:    "
+ls -lh "/var/tmp/$ZARF_INIT_PKG"
+REMOTE_HEREDOC
+        echo "❌ Failed to stage zarf on control plane."
+        echo "   Verify NAT egress from private subnet, then re-run the task."
         exit 1
       }
 
-      # Phase 4: Zarf package deploy
+      # Phase 2c: Ensure a default StorageClass exists ONLY if zarf has not
+      # been initialized yet. The chicken-and-egg ordering is:
+      #   1. zarf init needs PVC storage for its registry → needs a default SC
+      #   2. The cybersec-dask package vendors local-path-provisioner as a
+      #      Helm chart, but that runs in Phase 4 (after zarf init succeeds)
+      # So on a fresh cluster we apply upstream local-path-provisioner here
+      # to unblock init. On a cluster that's already zarf-initialized we
+      # skip (and Phase 3b below removes the bootstrap install so the
+      # package deploy's Helm chart can own it cleanly).
+      LOCAL_PATH_VERSION="v0.0.32"
+      LOCAL_PATH_URL="https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_VERSION/deploy/local-path-storage.yaml"
+      KUBECTL="sudo -n KUBECONFIG=/etc/rancher/rke2/rke2.yaml /var/lib/rancher/rke2/bin/kubectl"
+      echo "💾 Phase 2c: Bootstrap StorageClass check..."
+      ssh -i "$SSH_KEY" \
+        -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
+        $SSH_OPTS ec2-user@$CONTROL_IP bash -s <<REMOTE_HEREDOC || {
+set -e
+# If zarf is already initialized AND its registry is bound to a PV, the
+# StorageClass it used is enough. Phase 4 will manage local-path-provisioner
+# via Helm. Don't touch storage here.
+if $KUBECTL get deployment -n zarf zarf-docker-registry >/dev/null 2>&1; then
+  echo "  zarf already initialized — package deploy will manage local-path-provisioner."
+  exit 0
+fi
+# Fresh cluster path: install upstream local-path-provisioner and mark default
+# if no default exists. zarf init can then create its PVC. Phase 3b removes
+# the bootstrap copy after init so Helm can own it.
+if ! $KUBECTL get sc local-path >/dev/null 2>&1; then
+  echo "  Applying $LOCAL_PATH_URL (bootstrap; Helm will own it post-init)..."
+  $KUBECTL apply -f "$LOCAL_PATH_URL"
+fi
+DEFAULT_SC=\$($KUBECTL get sc -o json | jq -r '.items[] | select(.metadata.annotations["storageclass.kubernetes.io/is-default-class"] == "true") | .metadata.name' | head -1)
+if [ -z "\$DEFAULT_SC" ]; then
+  echo "  Marking local-path as default StorageClass..."
+  $KUBECTL patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+fi
+echo "  StorageClasses:"
+$KUBECTL get sc
+REMOTE_HEREDOC
+        echo "❌ Failed to ensure default StorageClass on cluster."
+        echo "   zarf init will hang on a Pending PVC without one."
+        exit 1
+      }
+
+      # Phase 2d: Clear any stuck zarf namespace from a previous failed init.
+      # If zarf init was killed mid-run, the zarf-docker-registry PVC is left
+      # behind without a StorageClass, and a fresh init will not recreate it.
+      # Only deletes when at least one PVC is Pending — won't touch a healthy
+      # zarf namespace.
+      echo "🧹 Phase 2d: Clearing any stale zarf namespace from prior init..."
+      ssh -i "$SSH_KEY" \
+        -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
+        $SSH_OPTS ec2-user@$CONTROL_IP \
+        "$KUBECTL get namespace zarf >/dev/null 2>&1 && (echo '  zarf namespace exists, checking for stuck PVC...'; $KUBECTL get pvc -n zarf -o json | jq -e '.items[] | select(.status.phase == \"Pending\")' >/dev/null 2>&1 && (echo '  Found stuck PVC, deleting zarf namespace for clean re-init...'; $KUBECTL delete namespace zarf --wait=true) || echo '  zarf namespace healthy, leaving in place') || echo '  No prior zarf namespace, clean start.'"
+
+      # Phase 3: Zarf init. Run from /var/tmp so zarf can find the init
+      # package next to the cybersec-dask package. Direct ssh (no eval) to
+      # match Phase 2b and avoid the semicolon-in-eval foot-gun.
+      echo "⚙️  Phase 3: Running zarf init..."
+      ssh -i "$SSH_KEY" \
+        -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
+        $SSH_OPTS ec2-user@$CONTROL_IP \
+        "cd /var/tmp && sudo -n /usr/local/bin/zarf init --confirm"
+
+      # Phase 3b: Hand off StorageClass ownership to Helm. The bootstrap
+      # local-path install from Phase 2c was needed to get zarf init past
+      # its PVC requirement, but the cybersec-dask package's Helm chart
+      # wants to own these resources cleanly. Helm refuses to adopt
+      # resources without its management labels, so we delete the bootstrap
+      # copy here (the zarf-docker-registry PVC stays bound to its
+      # already-provisioned PV — deleting the provisioner doesn't disturb
+      # existing volumes). Idempotent — no-op when the bootstrap copy is
+      # absent (e.g. on retry after Phase 4 has already installed Helm-owned
+      # resources).
+      echo "🔄 Phase 3b: Handing off local-path-provisioner to Helm..."
+      ssh -i "$SSH_KEY" \
+        -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
+        $SSH_OPTS ec2-user@$CONTROL_IP bash -s <<REMOTE_HEREDOC || true
+# Only act if the namespace exists AND isn't already managed by Helm
+if $KUBECTL get namespace local-path-storage >/dev/null 2>&1; then
+  MANAGED_BY=\$($KUBECTL get namespace local-path-storage -o jsonpath='{.metadata.labels.app\\.kubernetes\\.io/managed-by}' 2>/dev/null || echo "")
+  if [ "\$MANAGED_BY" != "Helm" ]; then
+    echo "  Removing bootstrap local-path-provisioner so Helm can own it..."
+    $KUBECTL delete clusterrolebinding local-path-provisioner-bind --ignore-not-found
+    $KUBECTL delete clusterrole local-path-provisioner-role --ignore-not-found
+    $KUBECTL delete storageclass local-path --ignore-not-found
+    $KUBECTL delete namespace local-path-storage --wait=true --ignore-not-found
+  else
+    echo "  local-path-provisioner already Helm-managed, skipping."
+  fi
+fi
+REMOTE_HEREDOC
+
+      # Phase 4: Zarf package deploy. Direct ssh (no eval) so the --set
+      # arguments stay reliably attached to the remote command and sudo -n
+      # avoids the password prompt.
       echo "🚀 Phase 4: Deploying Zarf package..."
       WORKER_REPLICAS="''${DASK_WORKER_REPLICAS:-16}"
-      eval $SSH_CP "sudo /usr/local/bin/zarf package deploy /tmp/$ZARF_PKG_NAME \
-        --confirm \
-        --set S3_ENDPOINT=\"\" \
-        --set S3_BUCKET=$BUCKET_NAME \
-        --set S3_REGION=$AWS_REGION \
-        --set S3_ACCESS_KEY=$AWS_ACCESS_KEY_ID \
-        --set S3_SECRET_KEY=$AWS_SECRET_ACCESS_KEY \
-        --set DASK_WORKER_REPLICAS=$WORKER_REPLICAS"
+      ssh -i "$SSH_KEY" \
+        -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
+        $SSH_OPTS ec2-user@$CONTROL_IP \
+        "sudo -n /usr/local/bin/zarf package deploy /var/tmp/$ZARF_PKG_NAME \
+          --confirm \
+          --set S3_ENDPOINT= \
+          --set S3_BUCKET=$BUCKET_NAME \
+          --set S3_REGION=$AWS_REGION \
+          --set S3_ACCESS_KEY=$AWS_ACCESS_KEY_ID \
+          --set S3_SECRET_KEY=$AWS_SECRET_ACCESS_KEY \
+          --set S3_SESSION_TOKEN=$AWS_SESSION_TOKEN \
+          --set DASK_WORKER_REPLICAS=$WORKER_REPLICAS"
 
       echo ""
       echo "✅ Zarf package deployed"
@@ -1656,10 +1816,19 @@ EOF
       echo "🚀 Deploying JupyterHub..."
       export PROJECT_ROOT="$PWD"
 
-      # Override MinIO credentials with real AWS credentials from profile
-      export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id --profile ''${AWS_PROFILE:-default})
-      export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
-      export AWS_SESSION_TOKEN=$(aws configure get aws_session_token --profile ''${AWS_PROFILE:-default} 2>/dev/null || echo "")
+      # Override MinIO credentials with real AWS credentials from profile.
+      # Use export-credentials so SSO profiles work too — aws configure get
+      # only reads static keys and returns empty for SSO profiles.
+      CREDS_JSON=$(aws configure export-credentials --profile "''${AWS_PROFILE:-default}" 2>/dev/null || echo '{}')
+      export AWS_ACCESS_KEY_ID=$(echo "$CREDS_JSON" | jq -r '.AccessKeyId // empty')
+      export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS_JSON" | jq -r '.SecretAccessKey // empty')
+      export AWS_SESSION_TOKEN=$(echo "$CREDS_JSON" | jq -r '.SessionToken // empty')
+
+      if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+        echo "❌ Failed to resolve AWS credentials for profile ''${AWS_PROFILE:-default}."
+        echo "   For SSO profiles: aws sso login --profile ''${AWS_PROFILE:-default}"
+        exit 1
+      fi
 
       # Get region from tofu state
       export AWS_REGION=$(cd infra/aws/tofu && tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
@@ -1680,10 +1849,19 @@ EOF
       echo "🚀 Deploying Panel visualization service..."
       export PROJECT_ROOT="$PWD"
 
-      # Override MinIO credentials with real AWS credentials from profile
-      export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id --profile ''${AWS_PROFILE:-default})
-      export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
-      export AWS_SESSION_TOKEN=$(aws configure get aws_session_token --profile ''${AWS_PROFILE:-default} 2>/dev/null || echo "")
+      # Override MinIO credentials with real AWS credentials from profile.
+      # Use export-credentials so SSO profiles work too — aws configure get
+      # only reads static keys and returns empty for SSO profiles.
+      CREDS_JSON=$(aws configure export-credentials --profile "''${AWS_PROFILE:-default}" 2>/dev/null || echo '{}')
+      export AWS_ACCESS_KEY_ID=$(echo "$CREDS_JSON" | jq -r '.AccessKeyId // empty')
+      export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS_JSON" | jq -r '.SecretAccessKey // empty')
+      export AWS_SESSION_TOKEN=$(echo "$CREDS_JSON" | jq -r '.SessionToken // empty')
+
+      if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+        echo "❌ Failed to resolve AWS credentials for profile ''${AWS_PROFILE:-default}."
+        echo "   For SSO profiles: aws sso login --profile ''${AWS_PROFILE:-default}"
+        exit 1
+      fi
 
       # Get region from tofu state
       export AWS_REGION=$(cd infra/aws/tofu && tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
@@ -1881,10 +2059,19 @@ EOF
       echo ""
       export PROJECT_ROOT="$PWD"
 
-      # Override MinIO credentials with real AWS credentials from profile
-      export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id --profile ''${AWS_PROFILE:-default})
-      export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key --profile ''${AWS_PROFILE:-default})
-      export AWS_SESSION_TOKEN=$(aws configure get aws_session_token --profile ''${AWS_PROFILE:-default} 2>/dev/null || echo "")
+      # Override MinIO credentials with real AWS credentials from profile.
+      # Use export-credentials so SSO profiles work too — aws configure get
+      # only reads static keys and returns empty for SSO profiles.
+      CREDS_JSON=$(aws configure export-credentials --profile "''${AWS_PROFILE:-default}" 2>/dev/null || echo '{}')
+      export AWS_ACCESS_KEY_ID=$(echo "$CREDS_JSON" | jq -r '.AccessKeyId // empty')
+      export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS_JSON" | jq -r '.SecretAccessKey // empty')
+      export AWS_SESSION_TOKEN=$(echo "$CREDS_JSON" | jq -r '.SessionToken // empty')
+
+      if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+        echo "❌ Failed to resolve AWS credentials for profile ''${AWS_PROFILE:-default}."
+        echo "   For SSO profiles: aws sso login --profile ''${AWS_PROFILE:-default}"
+        exit 1
+      fi
       unset S3_ENDPOINT
 
       # Get infrastructure state from tofu
