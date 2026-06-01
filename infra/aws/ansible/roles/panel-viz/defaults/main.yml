@@ -43,8 +43,8 @@ panel_otel_data_path: "s3://{{ panel_s3_bucket }}/otel-minimal/"
 # vars, which on developer machines often pointed to keys in a DIFFERENT
 # AWS account and caused S3 reads to fail with "Access Key Id does not
 # exist". Override only when targeting a non-AWS S3 (e.g. MinIO local).
-panel_aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') | default(lookup('env', 'MINIO_ACCESS_KEY'), true) }}"
-panel_aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') | default(lookup('env', 'MINIO_SECRET_KEY'), true) }}"
+panel_aws_access_key_id: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') | default('', true) }}"
+panel_aws_secret_access_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') | default('', true) }}"
 # Session token required when AWS_ACCESS_KEY_ID is an STS temporary credential
 # (ASIA... prefix). Empty when using long-lived IAM user keys (AKIA... prefix)
 # or the EC2 instance role.

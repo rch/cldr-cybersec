@@ -222,6 +222,33 @@ def load_span_data(start_time: datetime, end_time: datetime, data_path: str = No
     else:
         all_files = _file_list_cache[cache_key]
 
+    # --- Anchor relative window to the dataset's latest date ---
+    # Relative presets ("Last 24 Hours") are computed against wall-clock now(),
+    # but OTEL data is often historical / batch-loaded (on-prem S3 gateways
+    # especially). When the requested window ends after the most recent data,
+    # slide it back so it ends at the latest data date, preserving the span --
+    # so "Last 24 Hours" always returns the 24h ending at the newest records.
+    # No-op for live/current data; preferred over the all-data fallback below.
+    if date_strings is not None and all_files:
+        import re as _re
+        _data_dates = sorted({
+            _m.group(1) for _f in all_files
+            for _m in [_re.search(r'date=(\d{4}-\d{2}-\d{2})', _f)] if _m
+        })
+        if _data_dates:
+            _max_date = datetime.strptime(_data_dates[-1], '%Y-%m-%d').date()
+            if end_date > _max_date:
+                _span = end_date - start_date
+                end_date = _max_date
+                start_date = _max_date - _span
+                date_strings = []
+                _cur = start_date
+                while _cur <= end_date:
+                    date_strings.append(_cur.strftime('%Y-%m-%d'))
+                    _cur += timedelta(days=1)
+                if on_progress:
+                    on_progress(f"Anchored to latest data: {start_date}..{end_date}")
+
     # --- Date filtering (with fallback to all data) ---
     if date_strings is not None:
         parquet_files = [
