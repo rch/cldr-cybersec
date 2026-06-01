@@ -112,6 +112,13 @@ def get_storage_options() -> dict:
             opts['token'] = AWS_SESSION_TOKEN
     if S3_ENDPOINT:
         opts['client_kwargs'] = {'endpoint_url': S3_ENDPOINT}
+        # On-prem S3-compatible gateways (MinIO et al.) reached by IP/hostname
+        # reject AWS virtual-hosted addressing (bucket.endpoint); force
+        # path-style (endpoint/bucket) + SigV4. No-op for real AWS S3, which
+        # never sets S3_ENDPOINT. This storage_options dict is also serialized
+        # to the Dask workers via dd.read_parquet, so the workers inherit it.
+        opts['config_kwargs'] = {'s3': {'addressing_style': 'path'},
+                                 'signature_version': 's3v4'}
     if AWS_REGION:
         opts.setdefault('client_kwargs', {})
         opts['client_kwargs']['region_name'] = AWS_REGION

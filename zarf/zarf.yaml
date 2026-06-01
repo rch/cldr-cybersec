@@ -149,9 +149,11 @@ components:
               kubectl exec -n dask "$SCHEDULER" -- python -c "
               import s3fs, os
               fs = s3fs.S3FileSystem(
-                  key=os.environ.get('AWS_ACCESS_KEY_ID', ''),
-                  secret=os.environ.get('AWS_SECRET_ACCESS_KEY', ''),
-                  client_kwargs={'endpoint_url': os.environ['S3_ENDPOINT']}
+                  key=os.environ.get('AWS_ACCESS_KEY_ID', '') or None,
+                  secret=os.environ.get('AWS_SECRET_ACCESS_KEY', '') or None,
+                  token=os.environ.get('AWS_SESSION_TOKEN', '') or None,
+                  client_kwargs={'endpoint_url': os.environ['S3_ENDPOINT']},
+                  config_kwargs={'s3': {'addressing_style': 'path'}, 'signature_version': 's3v4'}
               )
               bucket = '$BUCKET'
               try:

@@ -1,0 +1,15 @@
+# cybersec-dask air-gap bootstrap — authoritative version + checksum manifest
+# All three artifacts MUST be used together. The zarf binary and init-package
+# version MUST match the package build version (Zarf v0.70.1); a mismatch is
+# rejected by Zarf ("format-version skew") and is unrecoverable in air-gap.
+
+package_version:   1.4.0
+zarf_version:      v0.70.1
+
+[artifacts]
+zarf_binary        zarf_v0.70.1_Linux_amd64                       sha256:a409b568ab8120f5cc3ed0cbbaa819f031750bb320b8b8e26a345c3e2ddaad2a
+zarf_init_package  zarf-init-amd64-v0.70.1.tar.zst                sha256:fb59dd7e595b53d8bfb2350e13d8092fba3b3e4f05c06c697f0d6f2da66276db
+cybersec_package   zarf-package-cybersec-dask-amd64-1.4.0.tar.zst sha256:2c3ca58b645bc217f4665aeac68d48b339e3ee759aabbfc74632a67dc916054a
+
+[verify]
+# sha256sum -c <(grep -A4 '\[artifacts\]' BOOTSTRAP_VERSIONS.txt | awk '/sha256:/{gsub("sha256:","",$3); print $3"  "$2}')

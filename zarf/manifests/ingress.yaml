@@ -78,6 +78,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: panel-viz
+                name: otel-navigator
                 port:
                   number: 5006

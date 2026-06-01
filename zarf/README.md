@@ -2,7 +2,7 @@
 
 Zarf package for deploying Dask + JupyterHub + Panel-Viz to air-gapped RKE2.
 
-**Current release**: [`v1.2.1`](https://github.com/rch/cldr-cybersec/releases/tag/v1.2.1)
+**Current release**: [`v1.4.0`](https://github.com/rch/cldr-cybersec/releases/tag/zarf-v1.4.0)
 
 ---
 
@@ -44,7 +44,7 @@ graph LR
 ## Deploy Variables
 
 ```bash
-zarf package deploy zarf-package-cybersec-dask-amd64-1.2.1.tar.zst --confirm \
+zarf package deploy zarf-package-cybersec-dask-amd64-1.4.0.tar.zst --confirm \
   --set S3_ENDPOINT=http://minio:9000 \
   --set S3_ACCESS_KEY=<key> \
   --set S3_SECRET_KEY=<secret> \
@@ -71,13 +71,13 @@ zarf package deploy zarf-package-cybersec-dask-amd64-1.2.1.tar.zst --confirm \
 | Artifact | How to get | Size |
 |----------|-----------|------|
 | `zarf` binary | [Zarf releases](https://github.com/zarf-dev/zarf/releases) (Linux amd64) | ~100 MB |
-| `zarf-init-amd64-v0.66.0.tar.zst` | `zarf tools download-init` | ~300 MB |
-| `zarf-package-cybersec-dask-amd64-1.2.1.tar.zst` | [GitHub Releases](https://github.com/rch/cldr-cybersec/releases/tag/v1.2.1) | ~1.3 GB |
+| `zarf-init-amd64-v0.70.1.tar.zst` | `zarf tools download-init` | ~300 MB |
+| `zarf-package-cybersec-dask-amd64-1.4.0.tar.zst` | [GitHub Releases](https://github.com/rch/cldr-cybersec/releases/tag/zarf-v1.4.0) | ~1.3 GB |
 
 ```bash
 # Download on a machine with internet access
-curl -LO https://github.com/zarf-dev/zarf/releases/download/v0.66.0/zarf_v0.66.0_Linux_amd64
-mv zarf_v0.66.0_Linux_amd64 zarf && chmod +x zarf
+curl -LO https://github.com/zarf-dev/zarf/releases/download/v0.70.1/zarf_v0.70.1_Linux_amd64
+mv zarf_v0.70.1_Linux_amd64 zarf && chmod +x zarf
 ./zarf tools download-init
 # Download cybersec-dask package from GitHub Releases (link above)
 ```
@@ -116,7 +116,7 @@ sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf init --confirm
 
 # 3. Deploy
 sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
-  zarf-package-cybersec-dask-amd64-1.2.1.tar.zst --confirm \
+  zarf-package-cybersec-dask-amd64-1.4.0.tar.zst --confirm \
   --set DASK_SPILL_DIR=/mnt/nfs/dask-spill   # or /tmp/dask-spill
 ```
 
@@ -199,7 +199,7 @@ sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
 
 # 4. Deploy with NFS spill path
 sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
-  zarf-package-cybersec-dask-amd64-1.2.1.tar.zst --confirm \
+  zarf-package-cybersec-dask-amd64-1.4.0.tar.zst --confirm \
   --set DASK_SPILL_DIR=/mnt/nfs/dask-spill \
   --set DASK_WORKER_REPLICAS=4
 
@@ -218,7 +218,7 @@ If no NFS is available, use emptyDir for spill:
 
 # 4. Deploy without specifying DASK_SPILL_DIR
 sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf package deploy \
-  zarf-package-cybersec-dask-amd64-1.2.1.tar.zst --confirm \
+  zarf-package-cybersec-dask-amd64-1.4.0.tar.zst --confirm \
   --set DASK_WORKER_REPLICAS=4
 
 # 5. Patch spill volume to emptyDir (512Mi)
@@ -260,7 +260,7 @@ cd /path/to/cybersec/zarf
 DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock \
   zarf package create . --confirm --skip-sbom
 
-# Output: zarf-package-cybersec-dask-amd64-1.2.1.tar.zst (~1.3 GB)
+# Output: zarf-package-cybersec-dask-amd64-1.4.0.tar.zst (~1.3 GB)
 ```
 
 Upstream images (`dask-kubernetes-operator`, `k8s-hub`, `configurable-http-proxy`) are pulled automatically during `zarf package create`.
@@ -697,7 +697,7 @@ zarf/
 | Component | Version |
 |-----------|---------|
 | RKE2 | v1.34.3+rke2r1 |
-| Zarf | v0.66.0 |
+| Zarf | v0.70.1 |
 | Dask | 2025.2.0 |
 | Dask Operator | 2024.1.0 |
 | JupyterHub | 4.0.0 |

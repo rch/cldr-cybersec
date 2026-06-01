@@ -46,24 +46,28 @@ spec:
               name: tcp-comm
             - containerPort: 8787
               name: tcp-dashboard
-          # AWS credentials are intentionally NOT set here. On AWS deploys,
-          # the worker nodes' EC2 instance role (cybersec-dask-rke2-node has
-          # s3:GetObject/PutObject on cybersec-dask-*) covers S3 access via
-          # IMDS, and boto3/s3fs default credential chain finds them with
-          # zero env-var configuration. STS temp credentials baked into
-          # env vars at deploy-time (the previous default behaviour) expire
-          # in ~1 hour, after which every Dask worker fails with
-          # "InvalidAccessKeyId" — see docs/scratch/2026-05-28/. For non-AWS
-          # S3 (MinIO local, or a different AWS account's bucket), set
-          # ZARF_VAR_S3_ACCESS_KEY / ZARF_VAR_S3_SECRET_KEY / ZARF_VAR_S3_SESSION_TOKEN
-          # explicitly when running `zarf package deploy`; the Helm chart in
-          # the cybersec-dask component will then add the corresponding env
-          # vars at render time.
+          # S3 credentials are templated from the Zarf S3_* variables and
+          # default to EMPTY. Empty AWS_ACCESS_KEY_ID/SECRET means boto3/s3fs
+          # fall through to the default credential chain — on AWS that is the
+          # EC2 instance role via IMDS (no static keys; nothing expires; STS
+          # temp keys baked at deploy-time used to expire in ~1h, see
+          # docs/scratch/2026-05-28/). In a TRUE AIR-GAP deploy against a local
+          # S3-compatible gateway there is NO IMDS, so you MUST pass the gateway
+          # creds at deploy time:
+          #   --set S3_ENDPOINT=<url> --set S3_ACCESS_KEY=<k> --set S3_SECRET_KEY=<s>
+          # Injected into BOTH scheduler and worker pods because dask-cluster is
+          # a RAW-MANIFEST component (zarf.yaml) — no Helm chart renders these.
           env:
             - name: S3_ENDPOINT
               value: "###ZARF_VAR_S3_ENDPOINT###"
             - name: AWS_REGION
               value: "###ZARF_VAR_S3_REGION###"
+            - name: AWS_ACCESS_KEY_ID
+              value: "###ZARF_VAR_S3_ACCESS_KEY###"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "###ZARF_VAR_S3_SECRET_KEY###"
+            - name: AWS_SESSION_TOKEN
+              value: "###ZARF_VAR_S3_SESSION_TOKEN###"
           resources:
             requests:
               cpu: "250m"
@@ -100,9 +104,10 @@ spec:
             - 6Gi
             - --local-directory
             - /dask-spill
-          # See scheduler comment above — AWS creds come from the EC2
-          # instance role via IMDS on AWS deploys; only set ZARF_VAR_S3_*
-          # for non-AWS S3 (MinIO local, foreign-account bucket).
+          # See scheduler comment above — S3 creds are templated from the Zarf
+          # S3_* variables (empty default => AWS IMDS fallback; set them for a
+          # non-AWS / air-gap S3 gateway). Injected here too because the Dask
+          # WORKERS perform the actual parquet read/write for the viz data path.
           env:
             - name: DASK_DASHBOARD_ADDRESS
               value: ":8787"
@@ -110,6 +115,12 @@ spec:
               value: "###ZARF_VAR_S3_ENDPOINT###"
             - name: AWS_REGION
               value: "###ZARF_VAR_S3_REGION###"
+            - name: AWS_ACCESS_KEY_ID
+              value: "###ZARF_VAR_S3_ACCESS_KEY###"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "###ZARF_VAR_S3_SECRET_KEY###"
+            - name: AWS_SESSION_TOKEN
+              value: "###ZARF_VAR_S3_SESSION_TOKEN###"
           volumeMounts:
             - name: dask-spill
               mountPath: /dask-spill

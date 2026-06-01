@@ -4,7 +4,7 @@
 > Copy-paste every command — variables are set once in Phase 0.
 > Each step links to a Discussion section at the bottom for rationale.
 
-**Package version**: `v1.2.x` &nbsp;|&nbsp; **Zarf**: `v0.66.0` &nbsp;|&nbsp; **RKE2**: `v1.34.x`
+**Package version**: `v1.4.0` &nbsp;|&nbsp; **Zarf**: `v0.70.1` &nbsp;|&nbsp; **RKE2**: `v1.34.x`
 
 ---
 
@@ -346,7 +346,7 @@ zarf version
 ls -lh zarf-init-amd64-*.tar.zst
 ```
 
-Both the `zarf` binary and the `zarf-init-amd64-v0.66.0.tar.zst` package must be
+Both the `zarf` binary and the `zarf-init-amd64-v0.70.1.tar.zst` package must be
 present in the current directory (or on PATH for the binary).
 
 ### 5g. kube-system pods (Zarf injector requirement)

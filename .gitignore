@@ -228,3 +228,6 @@ process-compose-postgress-err.txt
 infra/aws/ansible/inventory/hosts
 zarf/packages/
 zarf/*.tar.zst
+
+# Air-gap bootstrap binaries (published as release assets, not tracked)
+zarf/airgap-bootstrap/

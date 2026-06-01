@@ -1,7 +1,14 @@
 # Cybersec Dask — Air-Gap Deployment Runbook
 
-**Package**: `cybersec-dask` v1.3.0
+**Package**: `cybersec-dask` v1.4.0
+**Built with**: Zarf **v0.70.1** (the deploy binary and init package MUST match this version)
 **Target**: RKE2 cluster (bare metal or cloud, no internet required at deploy time)
+
+> ⚠️ **Version pinning is critical in air-gap.** Zarf rejects a package whose
+> build version differs from the deploying binary ("format-version skew"), and
+> you cannot recover offline. Use **zarf v0.70.1** and **zarf-init-amd64-v0.70.1.tar.zst**
+> with this v1.4.0 package. The authoritative trio + checksums are listed in
+> `BOOTSTRAP_VERSIONS.txt` (shipped as a release asset).
 
 ---
 
@@ -15,37 +22,58 @@
 
 ## Phase 1: Acquire Artifacts (Connected Machine)
 
-```bash
-# 1. Zarf binary
-curl -LO https://github.com/zarf-dev/zarf/releases/download/v0.74.0/zarf_v0.74.0_Linux_amd64
-mv zarf_v0.74.0_Linux_amd64 zarf && chmod +x zarf
+> **Simplest path:** download all four required artifacts straight from the
+> [zarf-v1.4.0 release](https://github.com/rch/cldr-cybersec/releases/tag/zarf-v1.4.0)
+> — the release bundles the version-matched `zarf` binary, init package, the
+> cybersec-dask package, and `BOOTSTRAP_VERSIONS.txt` (with checksums). Then skip
+> to the Transfer Checklist. The manual steps below are the build-it-yourself path.
 
-# 2. Zarf init package
+```bash
+# 1. Zarf binary — MUST be v0.70.1 to match the package build version
+curl -LO https://github.com/zarf-dev/zarf/releases/download/v0.70.1/zarf_v0.70.1_Linux_amd64
+mv zarf_v0.70.1_Linux_amd64 zarf && chmod +x zarf
+
+# 2. Zarf init package — version MUST match the binary (v0.70.1)
 ./zarf tools download-init
-# produces: zarf-init-amd64-v0.74.0.tar.zst (~390 MB)
+# produces: zarf-init-amd64-v0.70.1.tar.zst (~390 MB)
 
 # 3. Cybersec Dask package (build from source or download release)
-# Option A: Build
+# Option A: Build  (requires the same zarf v0.70.1 in PATH)
 git clone https://github.com/cloudera/cybersec && cd cybersec
 zarf package create zarf/ --confirm
-# produces: zarf/zarf-package-cybersec-dask-amd64-1.3.0.tar.zst (~1.3 GB)
+# produces: zarf/zarf-package-cybersec-dask-amd64-1.4.0.tar.zst (~1.3 GB)
 
 # Option B: Download from GitHub Releases
-# https://github.com/rch/cldr-cybersec/releases/tag/zarf-v1.3.0
+# https://github.com/rch/cldr-cybersec/releases/tag/zarf-v1.4.0
 
-# 4. Vendored StorageClass manifest (included in repo)
+# 4. Vendored StorageClass manifest + recovery scripts (included in repo)
 cp zarf/manifests/local-path-provisioner.yaml .
+cp zarf/scripts/zarf-clean-slate.sh zarf/scripts/zarf-init-recovery.sh .
 ```
+
+> ⚠️ **The zarf binary, the `zarf-init-amd64-vX.Y.Z.tar.zst`, and the package
+> must all be the SAME zarf version (v0.70.1).** A mismatch (e.g. a v0.74.0
+> binary against this v0.70.1 package) is rejected by Zarf and is unrecoverable
+> on an air-gapped node. Verify against `BOOTSTRAP_VERSIONS.txt`.
 
 ### Transfer Checklist
 
 | File | Size | Required |
 |------|------|----------|
-| `zarf` (binary) | ~100 MB | Yes |
-| `zarf-init-amd64-v0.74.0.tar.zst` | ~390 MB | Yes |
-| `zarf-package-cybersec-dask-amd64-1.3.0.tar.zst` | ~1.3 GB | Yes |
+| `zarf` (binary, **v0.70.1** linux/amd64) | ~180 MB | Yes |
+| `zarf-init-amd64-v0.70.1.tar.zst` | ~390 MB | Yes |
+| `zarf-package-cybersec-dask-amd64-1.4.0.tar.zst` | ~1.3 GB | Yes |
 | `local-path-provisioner.yaml` | 5 KB | Yes (if no default StorageClass) |
-| `scripts/zarf-clean-slate.sh` | 10 KB | Recommended (cleans stale state) |
+| `scripts/zarf-clean-slate.sh` | ~20 KB | Recommended (cleans stale state) |
+| `scripts/zarf-init-recovery.sh` | ~5 KB | Recommended (registry-PVC recovery) |
+| `BOOTSTRAP_VERSIONS.txt` | 1 KB | Recommended (version + checksum manifest) |
+
+Before transfer, verify all three artifacts against the shipped manifest:
+
+```bash
+grep 'sha256:' BOOTSTRAP_VERSIONS.txt | awk '{gsub("sha256:","",$3); print $3"  "$2}' | sha256sum -c -
+# expect: <each artifact>: OK
+```
 
 Transfer all files to the control plane node via USB, SCP, data diode, etc.
 
@@ -138,25 +166,45 @@ kubectl get pods -n zarf
 ### Step 6 — Deploy Cybersec Dask
 
 ```bash
-zarf package deploy zarf-package-cybersec-dask-amd64-1.3.0.tar.zst \
+zarf package deploy zarf-package-cybersec-dask-amd64-1.4.0.tar.zst \
   --confirm \
   --set DASK_WORKER_REPLICAS=4 \
   --set DASK_SPILL_DIR=/tmp/dask-spill
 ```
 
-**Optional S3 variables** (if connecting to S3-compatible storage):
+#### S3 storage — REQUIRED for a local (non-AWS) gateway
+
+There is **no AWS instance role / IMDS in air-gap**, so the Dask workers and the
+viz app cannot auto-discover credentials. If your OTEL data lives on a local
+S3-compatible gateway (MinIO, etc.) you **must** pass the endpoint **and** the
+access/secret keys, or the Dask workers fail S3 auth silently and **Panel-Viz
+renders an empty heatmap**:
 
 ```bash
-zarf package deploy zarf-package-cybersec-dask-amd64-1.3.0.tar.zst \
+zarf package deploy zarf-package-cybersec-dask-amd64-1.4.0.tar.zst \
   --confirm \
   --set DASK_WORKER_REPLICAS=4 \
   --set DASK_SPILL_DIR=/tmp/dask-spill \
-  --set S3_ENDPOINT=http://minio:9000 \
+  --set S3_ENDPOINT=http://minio.storage.svc:9000 \
   --set S3_BUCKET=cybersec-data \
   --set S3_REGION=us-east-1 \
   --set S3_ACCESS_KEY=<access-key> \
   --set S3_SECRET_KEY=<secret-key>
 ```
+
+Notes for on-prem gateways:
+
+- **Credentials are mandatory** here (unlike AWS, where they are left empty so
+  the instance role is used). Omitting `S3_ACCESS_KEY`/`S3_SECRET_KEY` deploys
+  cleanly but leaves the data path unauthenticated → blank viz.
+- **Path-style addressing** is applied automatically whenever `S3_ENDPOINT` is
+  set (gateways reached by IP/hostname reject AWS virtual-hosted addressing).
+- Credentials are injected into the **Dask scheduler + workers**, the **viz**
+  pod, and the **navigator-engine** so the whole data path authenticates.
+- The package auto-creates the bucket on deploy if it does not exist. Load your
+  OTEL parquet under `s3://<S3_BUCKET>/<dataset>/spans/...` (default dataset is
+  `otel-minimal`; the app honors an `_active_dataset.json` marker at the bucket
+  root if present). Override the path with `--set OTEL_DATA_PATH=...` if needed.
 
 Deployment takes ~5-15 minutes (image push to internal registry is the bottleneck).
 
@@ -266,6 +314,43 @@ zarf tools registry catalog 127.0.0.1:31999
 zarf package deploy zarf-package-cybersec-dask-*.tar.zst --confirm \
   --components=cybersec-images
 ```
+
+### Panel-Viz loads but the heatmap is blank (no data)
+
+The pod is healthy and the page renders, but the scatter/heatmap is empty. On an
+on-prem gateway this is almost always an S3 data-path problem, not a viz bug:
+
+```bash
+# 1. Confirm credentials reached the data path (must be non-empty on a gateway)
+kubectl exec -n dask deploy/cybersec-dask-scheduler -- \
+  sh -c 'echo "AKID len=${#AWS_ACCESS_KEY_ID} ENDPOINT=$S3_ENDPOINT BUCKET=$S3_BUCKET"'
+# AKID len must be > 0. If 0, redeploy with --set S3_ACCESS_KEY/S3_SECRET_KEY.
+
+# 2. Confirm the gateway is reachable with PATH-STYLE addressing and that data exists
+kubectl exec -n panel-viz deploy/otel-navigator -- python -c "
+import os, s3fs
+fs = s3fs.S3FileSystem(
+    key=os.environ['AWS_ACCESS_KEY_ID'], secret=os.environ['AWS_SECRET_ACCESS_KEY'],
+    client_kwargs={'endpoint_url': os.environ['S3_ENDPOINT']},
+    config_kwargs={'s3': {'addressing_style': 'path'}})
+b = os.environ['S3_BUCKET']
+print('parquet files:', len(fs.glob(f'{b}/**/spans/**/*.parquet')))"
+# 0 files => no data loaded into the bucket, or wrong OTEL_DATA_PATH/bucket.
+```
+
+Common causes and fixes:
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `AKID len=0` | credentials not passed | redeploy with `--set S3_ACCESS_KEY=... --set S3_SECRET_KEY=...` |
+| `InvalidAccessKeyId` / connection refused | wrong gateway addressing | already auto path-style when `S3_ENDPOINT` set; verify endpoint URL/port |
+| `0 parquet files` | no data, or wrong path | load data under `s3://<bucket>/<dataset>/spans/`, or `--set OTEL_DATA_PATH=` |
+| renders only with a wide preset | data older than "Last 24 Hours" | none needed — v1.4.0 anchors the window to the dataset's latest date |
+
+> The **sample notebooks** (`Dask_S3_Validation.ipynb`, `OTEL_Data_Generator.ipynb`)
+> are AWS-oriented examples ("uses IAM role automatically") — for an on-prem
+> gateway, edit their S3 client cells to pass `endpoint_url` + `key`/`secret`
+> and `config_kwargs={'s3': {'addressing_style': 'path'}}`.
 
 ### Disk-constrained node
 
