@@ -2,7 +2,7 @@ kind: ZarfPackageConfig
 metadata:
   name: cybersec-dask
   description: Air-gap deployment package for Dask, JupyterHub, and Panel-Viz on RKE2
-  version: "1.3.0"
+  version: "1.4.0"
   architecture: amd64
   authors: Cybersec Toolkit Team
   url: https://github.com/cloudera/cybersec
