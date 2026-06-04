@@ -20,10 +20,14 @@
 # Where <ctx> must equal `kubectl config current-context`. --dry-run and
 # --verify-only are read-only and skip the check.
 #
+# By default the cluster's local-path StorageClass is KEPT (and re-marked
+# default if needed) so the next `zarf init` registry PVC can bind. Stuck
+# Terminating namespaces are force-cleared via the /finalize subresource.
+#
 # Usage:
-#   ./zarf-clean-slate.sh --i-confirm-context=<ctx>     # Full cleanup
+#   ./zarf-clean-slate.sh --i-confirm-context=<ctx>     # Full cleanup (keeps StorageClass)
 #   ./zarf-clean-slate.sh --dry-run                     # Preview only (no changes)
-#   ./zarf-clean-slate.sh --keep-provisioner --i-confirm-context=<ctx>
+#   ./zarf-clean-slate.sh --remove-storageclass --i-confirm-context=<ctx>  # also drop local-path SC
 #   ./zarf-clean-slate.sh --clean-disk --i-confirm-context=<ctx>
 #   ./zarf-clean-slate.sh --verify-only                 # Check state, no changes
 # =============================================================================
@@ -37,13 +41,20 @@ DRY_RUN=false
 VERIFY_ONLY=false
 KEEP_PROVISIONER=false
 CLEAN_DISK=false
+REMOVE_SC=false
 CONFIRM_CONTEXT=""
+
+# All CRDs the Dask Kubernetes operator installs. Their instances carry
+# finalizers; if the operator is being torn down at the same time, those
+# finalizers never clear and they wedge their namespace in Terminating.
+DASK_CRDS="daskclusters.kubernetes.dask.org daskworkergroups.kubernetes.dask.org daskjobs.kubernetes.dask.org daskautoscalers.kubernetes.dask.org"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --dry-run)              DRY_RUN=true;          shift ;;
         --verify-only)          VERIFY_ONLY=true;      shift ;;
         --keep-provisioner)     KEEP_PROVISIONER=true;  shift ;;
+        --remove-storageclass)  REMOVE_SC=true;         shift ;;
         --clean-disk)           CLEAN_DISK=true;        shift ;;
         --i-confirm-context=*)  CONFIRM_CONTEXT="${1#*=}"; shift ;;
         -h|--help)
@@ -143,25 +154,49 @@ confirm_target_cluster() {
 # =============================================================================
 # Helper: wait for namespace deletion with finalizer force-patch
 # =============================================================================
+# Force-clear a namespace's spec.finalizers via the /finalize subresource.
+# A plain `kubectl patch ns ... finalizers` does NOT remove the built-in
+# "kubernetes" finalizer that pins a namespace in Terminating — ONLY the
+# /finalize subresource does. jq-free: fetch JSON, flatten, blank the
+# finalizers array, POST it back to /finalize. (GNU sed on the RKE2 node.)
+force_finalize_ns() {
+    local ns="$1" tmp
+    kubectl get ns "$ns" &>/dev/null || return 0
+    [[ "$DRY_RUN" == "true" ]] && { log_dry "force-finalize namespace/$ns"; return 0; }
+    tmp=$(mktemp)
+    if kubectl get ns "$ns" -o json 2>/dev/null \
+        | tr -d '\n' \
+        | sed 's/"spec":[[:space:]]*{[^}]*}/"spec":{"finalizers":[]}/' > "$tmp" \
+        && [[ -s "$tmp" ]]; then
+        kubectl replace --raw "/api/v1/namespaces/$ns/finalize" -f "$tmp" &>/dev/null || true
+    fi
+    rm -f "$tmp"
+}
+
 wait_ns_gone() {
     local ns="$1"
-    local timeout=30
+    local timeout=60
     local elapsed=0
 
     while kubectl get ns "$ns" &>/dev/null && [[ $elapsed -lt $timeout ]]; do
-        sleep 2
-        elapsed=$((elapsed + 2))
+        sleep 3
+        elapsed=$((elapsed + 3))
+        # Break finalizer deadlocks partway through rather than waiting the
+        # full timeout (a stuck namespace never clears on its own).
+        if [[ $elapsed -eq 15 ]] && kubectl get ns "$ns" &>/dev/null; then
+            log_warn "$ns still Terminating — clearing finalizers via /finalize"
+            force_finalize_ns "$ns"
+        fi
     done
 
-    # If still exists, force-patch finalizers
     if kubectl get ns "$ns" &>/dev/null; then
-        log_warn "$ns stuck in Terminating — patching finalizers"
-        kubectl patch ns "$ns" -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
-        sleep 5
+        log_warn "$ns still Terminating — final /finalize attempt"
+        force_finalize_ns "$ns"
+        sleep 3
     fi
 
     if kubectl get ns "$ns" &>/dev/null; then
-        log_warn "$ns still exists after force-patch"
+        log_error "$ns still exists after /finalize"
         return 1
     fi
     return 0
@@ -288,30 +323,28 @@ discover() {
 phase_1_crd_instances() {
     log_header "Phase 1: CRD Instances"
 
-    if kubectl get crd daskclusters.kubernetes.dask.org &>/dev/null; then
-        local clusters
-        clusters=$(kubectl get daskclusters -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null) || true
-
-        if [[ -n "$clusters" ]]; then
-            while IFS='/' read -r ns name; do
-                [[ -z "$name" ]] && continue
-                log_info "Deleting DaskCluster $ns/$name"
-                if [[ "$DRY_RUN" == "true" ]]; then
-                    log_dry "kubectl delete daskcluster $name -n $ns"
-                else
-                    # Patch finalizers first to prevent hang
-                    kubectl patch daskcluster "$name" -n "$ns" \
-                        -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
-                    kubectl delete daskcluster "$name" -n "$ns" \
-                        --timeout=15s 2>/dev/null || true
-                fi
-            done <<< "$clusters"
-        else
-            log_ok "No DaskCluster instances found"
-        fi
-    else
-        log_ok "DaskCluster CRD not installed"
-    fi
+    local any=false
+    for crd in $DASK_CRDS; do
+        kubectl get crd "$crd" &>/dev/null || continue
+        local kind="${crd%%.*}"   # daskclusters, daskworkergroups, ...
+        local items
+        items=$(kubectl get "$kind" -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null) || true
+        [[ -z "$items" ]] && continue
+        any=true
+        while IFS='/' read -r ns name; do
+            [[ -z "$name" ]] && continue
+            log_info "Clearing $kind $ns/$name"
+            if [[ "$DRY_RUN" == "true" ]]; then
+                log_dry "kubectl delete $kind $name -n $ns"
+            else
+                # Strip finalizers first so deletion can't hang on a missing operator
+                kubectl patch "$kind" "$name" -n "$ns" \
+                    -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+                kubectl delete "$kind" "$name" -n "$ns" --timeout=15s 2>/dev/null || true
+            fi
+        done <<< "$items"
+    done
+    $any || log_ok "No Dask CRD instances found"
 }
 
 # =============================================================================
@@ -410,11 +443,14 @@ phase_4_cluster_scoped() {
         esac
     done
 
-    # DaskCluster CRD
-    if kubectl get crd daskclusters.kubernetes.dask.org &>/dev/null; then
-        log_info "Deleting CRD: daskclusters.kubernetes.dask.org"
-        run_cmd kubectl delete crd daskclusters.kubernetes.dask.org 2>/dev/null || true
-    fi
+    # Dask operator CRDs (all of them)
+    for crd in $DASK_CRDS; do
+        if kubectl get crd "$crd" &>/dev/null; then
+            log_info "Deleting CRD: $crd"
+            run_cmd kubectl patch crd "$crd" -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null || true
+            run_cmd kubectl delete crd "$crd" --timeout=20s 2>/dev/null || true
+        fi
+    done
 
     log_ok "Cluster-scoped resources cleaned"
 }
@@ -440,17 +476,35 @@ phase_5_storage() {
         esac
     done
 
-    # local-path-provisioner
-    if [[ "$KEEP_PROVISIONER" == "true" ]]; then
-        log_info "Keeping local-path-provisioner (--keep-provisioner)"
-    else
+    # local-path StorageClass / provisioner.
+    # By DEFAULT we KEEP the cluster's default StorageClass. Deleting it leaves
+    # the next `zarf init` registry PVC stuck Pending, and RKE2 just re-creates
+    # its managed copy anyway (often without the default annotation). Only
+    # remove on explicit --remove-storageclass.
+    if [[ "$REMOVE_SC" == "true" && "$KEEP_PROVISIONER" != "true" ]]; then
         if kubectl get ns local-path-storage &>/dev/null; then
             delete_ns "local-path-storage"
         fi
         if kubectl get storageclass local-path &>/dev/null; then
-            log_info "Deleting StorageClass: local-path"
+            log_warn "Deleting StorageClass local-path (--remove-storageclass) — re-apply local-path-provisioner.yaml before zarf init"
             run_cmd kubectl delete storageclass local-path 2>/dev/null || true
         fi
+    else
+        log_info "Keeping local-path StorageClass (needed by zarf init's registry PVC)"
+        if kubectl get storageclass local-path &>/dev/null && [[ "$DRY_RUN" != "true" ]]; then
+            local is_default
+            is_default=$(kubectl get sc local-path -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}' 2>/dev/null) || true
+            if [[ "$is_default" != "true" ]]; then
+                log_info "Re-marking local-path as the default StorageClass"
+                kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    # Sweep Evicted/Failed pod tombstones left by earlier disk pressure
+    if [[ "$DRY_RUN" != "true" ]]; then
+        log_info "Sweeping Failed/Evicted pod tombstones"
+        kubectl delete pods -A --field-selector=status.phase=Failed --ignore-not-found >/dev/null 2>&1 || true
     fi
 
     # Host disk cleanup
@@ -480,14 +534,20 @@ verify() {
 
     # Namespaces
     local check_namespaces="zarf dask dask-operator jupyterhub panel-viz"
-    if [[ "$KEEP_PROVISIONER" != "true" ]]; then
+    if [[ "$REMOVE_SC" == "true" ]]; then
         check_namespaces="$check_namespaces local-path-storage"
     fi
 
     for ns in $check_namespaces; do
         if kubectl get ns "$ns" &>/dev/null; then
-            log_error "Namespace still exists: $ns"
-            issues=$((issues + 1))
+            # One more force-finalize + brief wait before declaring failure —
+            # avoids a false FAIL while a namespace is genuinely mid-terminate.
+            force_finalize_ns "$ns"
+            sleep 3
+            if kubectl get ns "$ns" &>/dev/null; then
+                log_error "Namespace still exists: $ns"
+                issues=$((issues + 1))
+            fi
         fi
     done
 
@@ -501,10 +561,12 @@ verify() {
     done
 
     # CRDs
-    if kubectl get crd daskclusters.kubernetes.dask.org &>/dev/null; then
-        log_error "CRD still exists: daskclusters.kubernetes.dask.org"
-        issues=$((issues + 1))
-    fi
+    for crd in $DASK_CRDS; do
+        if kubectl get crd "$crd" &>/dev/null; then
+            log_error "CRD still exists: $crd"
+            issues=$((issues + 1))
+        fi
+    done
 
     # PVs
     for pv in $(kubectl get pv -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
@@ -515,14 +577,26 @@ verify() {
         esac
     done
 
-    # StorageClass status
+    # StorageClass status — the gate for the next zarf init's registry PVC
     echo ""
-    if kubectl get storageclass local-path &>/dev/null; then
-        log_ok "StorageClass local-path: available"
-    elif [[ "$KEEP_PROVISIONER" == "true" ]]; then
-        log_warn "StorageClass local-path: not found (was --keep-provisioner used on first run?)"
+    if [[ "$REMOVE_SC" == "true" ]]; then
+        if kubectl get storageclass local-path &>/dev/null; then
+            log_warn "StorageClass local-path still present (RKE2 re-creates its managed copy)"
+        else
+            log_info "StorageClass local-path removed — apply local-path-provisioner.yaml before zarf init"
+        fi
+    elif kubectl get storageclass local-path &>/dev/null; then
+        local sc_default
+        sc_default=$(kubectl get sc local-path -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}' 2>/dev/null) || true
+        if [[ "$sc_default" == "true" ]]; then
+            log_ok "StorageClass local-path: available (default)"
+        else
+            log_warn "StorageClass local-path present but NOT default — registry PVC will hang; run: kubectl patch sc local-path -p '{\"metadata\":{\"annotations\":{\"storageclass.kubernetes.io/is-default-class\":\"true\"}}}'"
+            issues=$((issues + 1))
+        fi
     else
-        log_info "StorageClass local-path: not present (apply local-path-provisioner.yaml before zarf init)"
+        log_warn "StorageClass local-path missing — apply local-path-provisioner.yaml before zarf init"
+        issues=$((issues + 1))
     fi
 
     # Cluster nodes
