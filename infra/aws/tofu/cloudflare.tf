@@ -74,33 +74,47 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "cybersec" {
       service  = "ssh://localhost:22"
     }
 
+    # App routes. cloudflared runs ON THE BASTION (installed via user-data), which
+    # cannot resolve in-cluster service DNS (*.svc.cluster.local) — the bastion's
+    # resolver is the VPC DNS, not CoreDNS. So app traffic ALWAYS routes to the
+    # control-plane NodePorts, which the bastion CAN reach, regardless of airgap_mode.
+    # (Routing to service-DNS would require an IN-CLUSTER cloudflared, which this
+    # deployment does not run — a bastion-tunnel + service-DNS config 502s.)
+
     # Dask Dashboard
-    # Soft air-gap: K8s service DNS (cloudflared inside cluster)
-    # True air-gap: bastion routes to control plane NodePort
     ingress_rule {
       hostname = local.ingress_domains.dask
-      service  = var.airgap_mode ? "http://${aws_instance.control_plane[0].private_ip}:30087" : "http://cybersec-dask-scheduler.dask.svc.cluster.local:8787"
+      service  = "http://${aws_instance.control_plane[0].private_ip}:30087"
     }
 
     # JupyterHub
     ingress_rule {
       hostname = local.ingress_domains.jupyterhub
-      service  = var.airgap_mode ? "http://${aws_instance.control_plane[0].private_ip}:30080" : "http://proxy-public.jupyterhub.svc.cluster.local:80"
+      service  = "http://${aws_instance.control_plane[0].private_ip}:30080"
     }
 
     # Kubernetes API (replaces dashboard in air-gap)
     ingress_rule {
       hostname = local.ingress_domains.k8s
-      service  = var.airgap_mode ? "https://${aws_instance.control_plane[0].private_ip}:6443" : "https://kubernetes-dashboard.kubernetes-dashboard.svc.cluster.local:443"
+      service  = "https://${aws_instance.control_plane[0].private_ip}:6443"
       origin_request {
         no_tls_verify = true
       }
     }
 
+    # Panel Visualization - terminal WebSocket (pty-proxy sidecar on :8765).
+    # Must precede the catch-all viz rule below: tunnel rules match in order,
+    # first match wins. Without this, /ws falls through to :5006 (Panel app).
+    ingress_rule {
+      hostname = local.ingress_domains.viz
+      path     = "^/ws"
+      service  = "http://${aws_instance.control_plane[0].private_ip}:30765"
+    }
+
     # Panel Visualization
     ingress_rule {
       hostname = local.ingress_domains.viz
-      service  = var.airgap_mode ? "http://${aws_instance.control_plane[0].private_ip}:30506" : "http://otel-navigator.panel-viz.svc.cluster.local:5006"
+      service  = "http://${aws_instance.control_plane[0].private_ip}:30506"
     }
 
     # Catch-all (required)
