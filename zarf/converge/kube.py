@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 DEFAULT_MANIFEST = Path(__file__).resolve().parent.parent / "artifacts.manifest.json"
+# Bundled k8s manifests (local-path-provisioner.yaml) live next to the package source
+# locally; converge-aws.sh stages them into <stage>/manifests/ to match this default.
+DEFAULT_MANIFESTS_DIR = Path(__file__).resolve().parent.parent / "manifests"
 
 
 @dataclass
@@ -30,6 +33,7 @@ class Ctx:
     manifest: dict = field(default_factory=dict)
     zarf_bin: Optional[str] = None
     package_path: Optional[str] = None
+    manifests_dir: Optional[str] = None      # dir holding bundled manifests (local-path-provisioner.yaml)
     registry_pv_size: str = "5Gi"
     registry_pvc_enabled: bool = True
     s3: dict = field(default_factory=dict)

@@ -7,6 +7,11 @@ rke2_channel: stable
 # Data directory for local storage
 data_dir: /mnt/data
 
+# Layer-A bootstrap-images tarball (local-path-provisioner + busybox) preloaded into
+# RKE2's agent/images dir for air-gap StorageClass bootstrap. Built on the control
+# host by zarf/scripts/build-bootstrap-images.sh. playbook_dir is .../infra/aws/ansible/playbooks.
+bootstrap_images_tarball: "{{ playbook_dir }}/../../../../zarf/cybersec-bootstrap-images-amd64.tar"
+
 # System tuning for Dask workloads
 sysctl_settings:
   vm.max_map_count: 262144

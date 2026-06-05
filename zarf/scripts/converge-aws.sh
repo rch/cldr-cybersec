@@ -12,12 +12,12 @@
 #                        transported image — that guard is structural in the engine)
 #     dry-run            show what apply WOULD do
 #
-# Credentials: kubectl-only healing needs NONE — workloads read the in-cluster
-# S3 secret created by the original deploy. A from-scratch deploy that must
-# (re)create that secret should go through `aws:deploy:zarf`. If creds ARE needed
-# for a component this run, export them and they flow to zarf via ZARF_VAR_* env
-# (never argv): S3_ENDPOINT S3_BUCKET S3_REGION S3_ACCESS_KEY S3_SECRET_KEY
-# S3_SESSION_TOKEN.
+# Credentials: kubectl-only healing needs NONE — workloads read the in-cluster S3
+# secret. For a from-scratch deploy that must (re)create that secret, export the
+# S3_* vars below before calling this script (this IS the converge path that
+# `aws:deploy:zarf` drives — it exports them for you). They flow to zarf via
+# ZARF_VAR_* env, never argv: S3_ENDPOINT S3_BUCKET S3_REGION S3_ACCESS_KEY
+# S3_SECRET_KEY S3_SESSION_TOKEN. DASK_WORKER_REPLICAS (non-secret) → --set.
 #
 # SSH access: assumes your egress is already allowed by the bastion SG
 # (allowed_ssh_cidrs — e.g. the WARP/Tailscale range). Add a temporary /32 only
@@ -67,6 +67,13 @@ STAGE="/home/ec2-user/cybersec-converge"
 cp_ssh "rm -rf $STAGE && mkdir -p $STAGE" </dev/null
 scp -q -i "$SSH_KEY" -o ProxyCommand="$PROXY" "${SSH_OPTS[@]}" -r \
   zarf/converge zarf/artifacts.manifest.json "ec2-user@$CONTROL_IP:$STAGE/" </dev/null
+# Stage the bundled local-path manifest so converge can bootstrap the default
+# StorageClass with kubectl (registry-free, node-preloaded image) — breaks the
+# SC<->registry chicken-egg on a fresh cluster. Matches the engine's default
+# --manifests-dir (<stage>/manifests/).
+cp_ssh "mkdir -p $STAGE/manifests" </dev/null
+scp -q -i "$SSH_KEY" -o ProxyCommand="$PROXY" "${SSH_OPTS[@]}" \
+  zarf/manifests/local-path-provisioner.yaml "ec2-user@$CONTROL_IP:$STAGE/manifests/" </dev/null
 
 # --- locate the transported package (optional) -------------------------------
 # Needed only for component-deploy remediations; --verify and kubectl-only fixes
@@ -94,6 +101,13 @@ if [ -n "$CREDS_LINES" ]; then
   echo "   creds: $(printf '%s' "$CREDS_LINES" | grep -c .) S3 var(s) staged to tmpfs (off argv)"
 fi
 
+# --- non-secret zarf vars via --set (deterministic first-deploy sizing) ------
+# DASK_WORKER_REPLICAS isn't a secret, so it rides argv; T4.workers-capacity will
+# still cap to live schedulable capacity, but seeding the dask-cluster deploy with
+# the node count avoids an oversubscribed first pass that then has to be reaped.
+SET_ARGS=()
+[ -n "${DASK_WORKER_REPLICAS:-}" ] && SET_ARGS+=(--set "DASK_WORKER_REPLICAS=${DASK_WORKER_REPLICAS}")
+
 # --- run the engine on the control plane -------------------------------------
 CREDS_ARGS=()
 [ -n "$CREDS_REMOTE" ] && CREDS_ARGS=(--creds-file "$CREDS_REMOTE")
@@ -101,7 +115,8 @@ set +e
 cp_ssh "cd $STAGE && sudo -n env PYTHONDONTWRITEBYTECODE=1 KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
   python3 -m converge \
   --kubectl '/var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml' \
-  ${PKG_ARGS[*]} ${CREDS_ARGS[*]} $MODE_FLAG" </dev/null
+  --manifests-dir $STAGE/manifests \
+  ${PKG_ARGS[*]} ${CREDS_ARGS[*]} ${SET_ARGS[*]} $MODE_FLAG" </dev/null
 RC=$?
 set -e
 

@@ -1562,125 +1562,34 @@ REMOTE_HEREDOC
         exit 1
       }
 
-      # Phase 2c: Ensure a default StorageClass exists ONLY if zarf has not
-      # been initialized yet. The chicken-and-egg ordering is:
-      #   1. zarf init needs PVC storage for its registry → needs a default SC
-      #   2. The cybersec-dask package vendors local-path-provisioner as a
-      #      Helm chart, but that runs in Phase 4 (after zarf init succeeds)
-      # So on a fresh cluster we apply upstream local-path-provisioner here
-      # to unblock init. On a cluster that's already zarf-initialized we
-      # skip (and Phase 3b below removes the bootstrap install so the
-      # package deploy's Helm chart can own it cleanly).
-      LOCAL_PATH_VERSION="v0.0.32"
-      LOCAL_PATH_URL="https://raw.githubusercontent.com/rancher/local-path-provisioner/$LOCAL_PATH_VERSION/deploy/local-path-storage.yaml"
-      KUBECTL="sudo -n KUBECONFIG=/etc/rancher/rke2/rke2.yaml /var/lib/rancher/rke2/bin/kubectl"
-      echo "💾 Phase 2c: Bootstrap StorageClass check..."
-      ssh -i "$SSH_KEY" \
-        -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
-        $SSH_OPTS ec2-user@$CONTROL_IP bash -s <<REMOTE_HEREDOC || {
-set -e
-# If zarf is already initialized AND its registry is bound to a PV, the
-# StorageClass it used is enough. Phase 4 will manage local-path-provisioner
-# via Helm. Don't touch storage here.
-if $KUBECTL get deployment -n zarf zarf-docker-registry >/dev/null 2>&1; then
-  echo "  zarf already initialized — package deploy will manage local-path-provisioner."
-  exit 0
-fi
-# Fresh cluster path: install upstream local-path-provisioner and mark default
-# if no default exists. zarf init can then create its PVC. Phase 3b removes
-# the bootstrap copy after init so Helm can own it.
-if ! $KUBECTL get sc local-path >/dev/null 2>&1; then
-  echo "  Applying $LOCAL_PATH_URL (bootstrap; Helm will own it post-init)..."
-  $KUBECTL apply -f "$LOCAL_PATH_URL"
-fi
-DEFAULT_SC=\$($KUBECTL get sc -o json | jq -r '.items[] | select(.metadata.annotations["storageclass.kubernetes.io/is-default-class"] == "true") | .metadata.name' | head -1)
-if [ -z "\$DEFAULT_SC" ]; then
-  echo "  Marking local-path as default StorageClass..."
-  $KUBECTL patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
-fi
-echo "  StorageClasses:"
-$KUBECTL get sc
-REMOTE_HEREDOC
-        echo "❌ Failed to ensure default StorageClass on cluster."
-        echo "   zarf init will hang on a Pending PVC without one."
+      # Phases 2c–4 (StorageClass bootstrap → stale-ns clear → zarf init →
+      # package deploy) are now driven by the CONVERGENCE ENGINE (zarf/converge):
+      # discover → diff target → remediate → fixpoint. Idempotent and recoverable
+      # from any partial-failure state — replacing the linear heredocs that failed
+      # differently every run. Transport (Phases 1–2b above) already staged the
+      # package + zarf binary on the control plane. The StorageClass bootstrap is
+      # now registry-free: converge kubectl-applies the BUNDLED local-path manifest
+      # against the node-preloaded image, so it NO LONGER pulls v0.0.32 from
+      # raw.githubusercontent.com (the egress dependency that broke true air-gap).
+      echo "🔄 Phases 2c–4: convergence engine → target state..."
+      # S3 creds reach zarf via ZARF_VAR_* env (never argv) — converge-aws.sh
+      # stages them to tmpfs. DASK_WORKER_REPLICAS seeds deterministic first-deploy
+      # sizing (then T4.workers-capacity caps to live schedulable capacity).
+      export S3_ENDPOINT="" \
+             S3_BUCKET="$BUCKET_NAME" \
+             S3_REGION="$AWS_REGION" \
+             S3_ACCESS_KEY="$AWS_ACCESS_KEY_ID" \
+             S3_SECRET_KEY="$AWS_SECRET_ACCESS_KEY" \
+             S3_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
+             DASK_WORKER_REPLICAS="''${DASK_WORKER_REPLICAS:-''${WORKER_NODE_COUNT:-4}}"
+      bash "$PROJECT_ROOT/zarf/scripts/converge-aws.sh" apply || {
+        echo "❌ Convergence did not reach target state — see the status table above."
+        echo "   Inspect/heal with: MODE=verify devenv tasks run aws:converge"
         exit 1
       }
 
-      # Phase 2d: Clear any stuck zarf namespace from a previous failed init.
-      # If zarf init was killed mid-run, the zarf-docker-registry PVC is left
-      # behind without a StorageClass, and a fresh init will not recreate it.
-      # Only deletes when at least one PVC is Pending — won't touch a healthy
-      # zarf namespace.
-      echo "🧹 Phase 2d: Clearing any stale zarf namespace from prior init..."
-      ssh -i "$SSH_KEY" \
-        -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
-        $SSH_OPTS ec2-user@$CONTROL_IP \
-        "$KUBECTL get namespace zarf >/dev/null 2>&1 && (echo '  zarf namespace exists, checking for stuck PVC...'; $KUBECTL get pvc -n zarf -o json | jq -e '.items[] | select(.status.phase == \"Pending\")' >/dev/null 2>&1 && (echo '  Found stuck PVC, deleting zarf namespace for clean re-init...'; $KUBECTL delete namespace zarf --wait=true) || echo '  zarf namespace healthy, leaving in place') || echo '  No prior zarf namespace, clean start.'"
-
-      # Phase 3: Zarf init. Run from /var/tmp so zarf can find the init
-      # package next to the cybersec-dask package. Direct ssh (no eval) to
-      # match Phase 2b and avoid the semicolon-in-eval foot-gun.
-      echo "⚙️  Phase 3: Running zarf init..."
-      ssh -i "$SSH_KEY" \
-        -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
-        $SSH_OPTS ec2-user@$CONTROL_IP \
-        "cd /var/tmp && sudo -n /usr/local/bin/zarf init --confirm"
-
-      # Phase 3b: Hand off StorageClass ownership to Helm. The bootstrap
-      # local-path install from Phase 2c was needed to get zarf init past
-      # its PVC requirement, but the cybersec-dask package's Helm chart
-      # wants to own these resources cleanly. Helm refuses to adopt
-      # resources without its management labels, so we delete the bootstrap
-      # copy here (the zarf-docker-registry PVC stays bound to its
-      # already-provisioned PV — deleting the provisioner doesn't disturb
-      # existing volumes). Idempotent — no-op when the bootstrap copy is
-      # absent (e.g. on retry after Phase 4 has already installed Helm-owned
-      # resources).
-      echo "🔄 Phase 3b: Handing off local-path-provisioner to Helm..."
-      ssh -i "$SSH_KEY" \
-        -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
-        $SSH_OPTS ec2-user@$CONTROL_IP bash -s <<REMOTE_HEREDOC || true
-# Only act if the namespace exists AND isn't already managed by Helm
-if $KUBECTL get namespace local-path-storage >/dev/null 2>&1; then
-  MANAGED_BY=\$($KUBECTL get namespace local-path-storage -o jsonpath='{.metadata.labels.app\\.kubernetes\\.io/managed-by}' 2>/dev/null || echo "")
-  if [ "\$MANAGED_BY" != "Helm" ]; then
-    echo "  Removing bootstrap local-path-provisioner so Helm can own it..."
-    $KUBECTL delete clusterrolebinding local-path-provisioner-bind --ignore-not-found
-    $KUBECTL delete clusterrole local-path-provisioner-role --ignore-not-found
-    $KUBECTL delete storageclass local-path --ignore-not-found
-    $KUBECTL delete namespace local-path-storage --wait=true --ignore-not-found
-  else
-    echo "  local-path-provisioner already Helm-managed, skipping."
-  fi
-fi
-REMOTE_HEREDOC
-
-      # Phase 4: Zarf package deploy. Direct ssh (no eval) so the --set
-      # arguments stay reliably attached to the remote command and sudo -n
-      # avoids the password prompt.
-      echo "🚀 Phase 4: Deploying Zarf package..."
-      # Default Dask worker replicas to the WORKER-NODE COUNT (~1 worker/node;
-      # each requests 4Gi and an m7i.large fits exactly one), so we never
-      # oversubscribe and strand workers Pending — the failure the convergence
-      # engine otherwise has to reap. The control-plane / headroom node carries
-      # the viz stack. Override with DASK_WORKER_REPLICAS; falls back to 4 (the
-      # package default) when the tofu worker output is unavailable.
-      WORKER_REPLICAS="''${DASK_WORKER_REPLICAS:-''${WORKER_NODE_COUNT:-4}}"
-      ssh -i "$SSH_KEY" \
-        -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
-        $SSH_OPTS ec2-user@$CONTROL_IP \
-        "sudo -n /usr/local/bin/zarf package deploy /var/tmp/$ZARF_PKG_NAME \
-          --confirm \
-          --set S3_ENDPOINT= \
-          --set S3_BUCKET=$BUCKET_NAME \
-          --set S3_REGION=$AWS_REGION \
-          --set S3_ACCESS_KEY=$AWS_ACCESS_KEY_ID \
-          --set S3_SECRET_KEY=$AWS_SECRET_ACCESS_KEY \
-          --set S3_SESSION_TOKEN=$AWS_SESSION_TOKEN \
-          --set DASK_WORKER_REPLICAS=$WORKER_REPLICAS"
-
       echo ""
-      echo "✅ Zarf package deployed"
+      echo "✅ Cluster converged to target state"
 
       # Phase 5: Deploy Cloudflare tunnel (if applicable)
       if [ "$INGRESS_PROVIDER" = "cloudflare" ]; then
@@ -2848,6 +2757,17 @@ asyncio.run(main())
         log_info "Running closure gate (artifacts.manifest.json)..."
         if ! python3 scripts/check-closure.py "$PKG"; then
           log_error "Closure gate FAILED — package incomplete or over budget (see above)."
+          exit 1
+        fi
+
+        # Build the Layer-A bootstrap-images tarball (local-path-provisioner +
+        # busybox) for air-gap node preload (task #4): RKE2 imports it from
+        # agent/images/ at start so the StorageClass provisioner + helper pod run
+        # with NO registry and NO egress. The ansible `common` role copies it onto
+        # every node before rke2 starts.
+        log_info "Building bootstrap-images tarball for node preload..."
+        if ! bash scripts/build-bootstrap-images.sh; then
+          log_error "Failed to build bootstrap-images tarball (need podman/docker)."
           exit 1
         fi
 

@@ -99,3 +99,39 @@
     path: /etc/rancher/rke2
     state: directory
     mode: '0755'
+
+# --- Layer-A bootstrap image preload (task #4) -------------------------------
+# Drop the local-path-provisioner + busybox tarball into RKE2's auto-import dir
+# BEFORE rke2 starts (this `common` role runs ahead of rke2-server/rke2-agent), so
+# the default-StorageClass provisioner + its helper pod are available with NO zarf
+# registry and NO internet egress. This is what lets converge's StorageClass
+# bootstrap (T0.5) kubectl-apply the bundled manifest on a fresh air-gap node.
+# CONSERVATION: image-gc-high-threshold=100 (RKE2 config) never prunes it.
+# Build the tarball with: bash zarf/scripts/build-bootstrap-images.sh
+- name: Create RKE2 agent images directory (air-gap image preload)
+  file:
+    path: /var/lib/rancher/rke2/agent/images
+    state: directory
+    mode: '0755'
+
+- name: Stat the bootstrap-images tarball on the control host
+  delegate_to: localhost
+  become: false
+  stat:
+    path: "{{ bootstrap_images_tarball }}"
+  register: _bootstrap_tar
+
+- name: Fail clearly if the bootstrap-images tarball is missing
+  assert:
+    that: _bootstrap_tar.stat.exists
+    fail_msg: >-
+      Bootstrap-images tarball not found at {{ bootstrap_images_tarball }}.
+      Build it first: `bash zarf/scripts/build-bootstrap-images.sh` (or
+      `devenv tasks run zarf:package`). The air-gap StorageClass bootstrap needs
+      the local-path-provisioner + busybox images preloaded into node containerd.
+
+- name: Preload bootstrap images into RKE2 agent images dir (imported at rke2 start)
+  copy:
+    src: "{{ bootstrap_images_tarball }}"
+    dest: /var/lib/rancher/rke2/agent/images/cybersec-bootstrap-images-amd64.tar
+    mode: '0644'

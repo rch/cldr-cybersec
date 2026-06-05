@@ -19,7 +19,7 @@ from pathlib import Path
 from . import __version__
 from .catalog import CATALOG
 from .engine import closure_violations, evaluate, reconcile, report
-from .kube import Ctx, load_manifest
+from .kube import Ctx, DEFAULT_MANIFESTS_DIR, load_manifest
 
 
 def _default_zarf() -> str | None:
@@ -41,6 +41,9 @@ def main(argv=None) -> int:
                     help='base kubectl command (default: "zarf tools kubectl")')
     ap.add_argument("--kubeconfig", help="append --kubeconfig <path> to kubectl")
     ap.add_argument("--manifest", help="path to artifacts.manifest.json")
+    ap.add_argument("--manifests-dir", default=str(DEFAULT_MANIFESTS_DIR),
+                    help="dir with bundled k8s manifests (local-path-provisioner.yaml) for "
+                         "registry-free StorageClass bootstrap")
     ap.add_argument("--zarf", default=_default_zarf(), help="path to the zarf binary")
     ap.add_argument("--package", help="path to the deploy .tar.zst (for component remediations)")
     ap.add_argument("--topology", choices=["single-tight", "multi-ample", "auto"], default="auto")
@@ -82,6 +85,7 @@ def main(argv=None) -> int:
         manifest=load_manifest(args.manifest),
         zarf_bin=args.zarf,
         package_path=args.package,
+        manifests_dir=args.manifests_dir,
         registry_pv_size=args.registry_pvc_size,
         registry_pvc_enabled=not args.no_registry_pvc,
         s3=s3,

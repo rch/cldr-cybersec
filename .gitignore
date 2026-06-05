@@ -228,6 +228,10 @@ process-compose-postgress-err.txt
 infra/aws/ansible/inventory/hosts
 zarf/packages/
 zarf/*.tar.zst
+zarf/*.tar
+# Layer-A bootstrap-images tarball (built by build-bootstrap-images.sh) — a release
+# asset / provision-time artifact, not tracked
+zarf/cybersec-bootstrap-images-amd64.tar
 # zarf package inspect output (SBOM JSON + HTML viewers) — generated, not tracked
 zarf/cybersec-dask/
 

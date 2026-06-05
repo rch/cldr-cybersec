@@ -14,6 +14,7 @@ remediations degrade to a precise manual hint instead of failing.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import List
 
 from .kube import Ctx
@@ -78,6 +79,21 @@ def _ensure_default_sc(ctx: Ctx, sc: str = "local-path") -> bool:
                '{"metadata":{"annotations":'
                '{"storageclass.kubernetes.io/is-default-class":"true"}}}'])
     return r.returncode == 0
+
+
+def _apply_bundled_local_path(ctx: Ctx) -> Fix:
+    """Apply the BUNDLED local-path-provisioner manifest with kubectl — registry-
+    INDEPENDENT (the image is node-preloaded, pulled with IfNotPresent), so it
+    bootstraps the default StorageClass with NO zarf registry and NO egress. This is
+    what breaks the SC↔registry chicken-egg on a fresh cluster. Degrades to a precise
+    MANUAL hint if the manifest wasn't staged next to the engine (--manifests-dir)."""
+    path = Path(ctx.manifests_dir) / "local-path-provisioner.yaml" if ctx.manifests_dir else None
+    if not path or not path.exists():
+        return Fix(False, "MANUAL: kubectl apply local-path-provisioner.yaml "
+                          "(bundled manifest not staged — pass --manifests-dir)")
+    r = ctx.apply_yaml(path.read_text())
+    return Fix(r.returncode == 0,
+               f"applied bundled local-path-provisioner.yaml (node image): rc={r.returncode}")
 
 
 # --------------------------------------------------------------------------- #
@@ -152,7 +168,14 @@ def _rem_sc_default(ctx: Ctx) -> Fix:
     if ctx.exists("storageclass", "local-path"):
         ok = _ensure_default_sc(ctx)
         return Fix(ok, "marked local-path default" if ok else "patch failed")
-    return _zarf_deploy_components(ctx, "local-path-provisioner")
+    # No StorageClass yet: apply the BUNDLED manifest via kubectl (registry-
+    # independent — node-preloaded image), then mark it default. Registry-free, so
+    # it can run BEFORE zarf init (T1) — this is the cycle-break.
+    fix = _apply_bundled_local_path(ctx)
+    if not fix.changed:
+        return fix  # MANUAL / failed — propagate the hint
+    _ensure_default_sc(ctx)
+    return Fix(True, f"{fix.detail}; marked local-path default")
 
 
 def _det_provisioner(ctx: Ctx) -> Probe:
@@ -163,7 +186,10 @@ def _det_provisioner(ctx: Ctx) -> Probe:
 
 
 def _rem_provisioner(ctx: Ctx) -> Fix:
-    return _zarf_deploy_components(ctx, "local-path-provisioner")
+    # Apply the bundled manifest via kubectl (node-preloaded image), NOT a zarf
+    # component deploy — the provisioner must come up before the registry exists,
+    # and re-applying the same manifest the SC bootstrap used is idempotent.
+    return _apply_bundled_local_path(ctx)
 
 
 # --------------------------------------------------------------------------- #
@@ -186,8 +212,17 @@ def _rem_registry_running(ctx: Ctx) -> Fix:
     # this is a harmless no-op. Layer-B throughout; never touches images.
     pvcs = ctx.items("pvc", ns="zarf")
     if any(p.get("status", {}).get("phase") == "Pending" for p in pvcs):
+        # Gentle first: give the Pending PVC a claimRef-prebound PV to bind to.
         ctx.apply_yaml(REGISTRY_PV_YAML.format(size=ctx.registry_pv_size))
         _force_finalize_ns(ctx, "zarf")
+        # Escalate: a still-Pending PVC means the ns is wedged from a prior failed
+        # init — delete it for a clean re-init (Phase 2d parity). `zarf init`
+        # recreates everything, so even a racing delete is harmless. The delete can
+        # itself hang on a finalizer, so force-finalize after it.
+        if any(p.get("status", {}).get("phase") == "Pending"
+               for p in ctx.items("pvc", ns="zarf")):
+            ctx.k(["delete", "namespace", "zarf", "--wait=false"])
+            _force_finalize_ns(ctx, "zarf")
     if not ctx.have_zarf():
         return Fix(False, "MANUAL: zarf init --confirm (zarf binary not available here)")
     args = ["init", "--confirm", f"--set=REGISTRY_PVC_SIZE={ctx.registry_pv_size}"]
