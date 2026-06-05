@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import __version__
 from .catalog import CATALOG
-from .engine import closure_violations, evaluate, reconcile, report
+from .engine import closure_violations, evaluate, reconcile, report, report_teardown, teardown
 from .kube import Ctx, DEFAULT_MANIFESTS_DIR, load_manifest
 
 
@@ -36,6 +36,8 @@ def main(argv=None) -> int:
     mode.add_argument("--apply", action="store_true", help="remediate to a fixpoint")
     mode.add_argument("--verify", action="store_true", help="assert target state (oracle); no changes")
     mode.add_argument("--dry-run", action="store_true", help="show what would be remediated (default)")
+    mode.add_argument("--teardown", action="store_true",
+                      help="clean-slate: remove the Layer-B app stack (registry/SC + images CONSERVED)")
 
     ap.add_argument("--kubectl", default="zarf tools kubectl",
                     help='base kubectl command (default: "zarf tools kubectl")')
@@ -99,8 +101,13 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
 
-    print(f"converge {__version__}  |  topology={ctx.topology_profile()}  |  "
-          f"mode={'apply' if args.apply else 'verify' if args.verify else 'dry-run'}")
+    mode_name = ("apply" if args.apply else "verify" if args.verify
+                 else "teardown" if args.teardown else "dry-run")
+    print(f"converge {__version__}  |  topology={ctx.topology_profile()}  |  mode={mode_name}")
+
+    if args.teardown:
+        attempted, remaining = teardown(ctx)
+        return 0 if report_teardown(attempted, remaining) else 1
 
     if args.apply:
         results, order = reconcile(ctx, CATALOG)

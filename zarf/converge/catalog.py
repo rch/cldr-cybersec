@@ -341,6 +341,25 @@ def _rem_engine(ctx: Ctx) -> Fix:
     return _zarf_deploy_components(ctx, "navigator-engine")
 
 
+def _det_jupyterhub(ctx: Ctx) -> Probe:
+    ready, total = ctx.pods_ready("jupyterhub", "component=hub")
+    return Probe(ready >= 1, f"jupyterhub hub ready {ready}/{total}")
+
+
+def _rem_jupyterhub(ctx: Ctx) -> Fix:
+    return _zarf_deploy_components(ctx, "jupyterhub")
+
+
+def _det_sample_notebooks(ctx: Ctx) -> Probe:
+    ok = ctx.exists("configmap", "sample-notebooks", ns="jupyterhub")
+    return Probe(ok, "sample-notebooks ConfigMap present" if ok
+                 else "sample-notebooks ConfigMap absent")
+
+
+def _rem_sample_notebooks(ctx: Ctx) -> Fix:
+    return _zarf_deploy_components(ctx, "sample-notebooks")
+
+
 def _det_ingress(ctx: Ctx) -> Probe:
     ings = ctx.items("ingress")
     names = [i["metadata"]["name"] for i in ings]
@@ -350,6 +369,17 @@ def _det_ingress(ctx: Ctx) -> Probe:
 
 def _rem_ingress(ctx: Ctx) -> Fix:
     return _zarf_deploy_components(ctx, "ingress")
+
+
+# --------------------------------------------------------------------------- #
+# Clean-slate teardown targets (the disposable Layer-B APP STACK)
+# --------------------------------------------------------------------------- #
+# `converge --teardown` removes these and nothing else. The foundational tier
+# (zarf registry, local-path-storage / StorageClass) and ALL Layer-A node images
+# are CONSERVED — teardown is the clean slate of the WORKLOADS, not the platform,
+# so a subsequent `--apply` redeploys fast from the still-present registry.
+APP_NAMESPACES = ["dask", "dask-operator", "jupyterhub", "panel-viz"]
+DASK_CRD_KINDS = ["daskclusters", "daskworkergroups", "daskautoscalers", "daskjobs"]
 
 
 # --------------------------------------------------------------------------- #
@@ -400,6 +430,10 @@ CATALOG: List[Invariant] = [
               depends_on=("T4.scheduler", "T4.workers-capacity")),
     Invariant("T5.navigator-engine", "T5", "navigator-engine Ready", Layer.B,
               _det_engine, _rem_engine, depends_on=("T4.scheduler",)),
+    Invariant("T5.jupyterhub", "T5", "JupyterHub hub Ready", Layer.B,
+              _det_jupyterhub, _rem_jupyterhub, depends_on=("T2.images-pushed",)),
+    Invariant("T5.sample-notebooks", "T5", "Sample-notebooks ConfigMap present", Layer.B,
+              _det_sample_notebooks, _rem_sample_notebooks, depends_on=("T2.images-pushed",)),
 
     Invariant("T6.ingress", "T6", "Ingress resources present", Layer.B,
               _det_ingress, _rem_ingress, depends_on=("T5.otel-navigator",)),

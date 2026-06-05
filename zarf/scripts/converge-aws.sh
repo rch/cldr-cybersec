@@ -6,11 +6,14 @@
 # plane (over the bastion hop) and runs it there, kubectl-only at runtime.
 #
 # Usage:
-#   zarf/scripts/converge-aws.sh [verify|apply|dry-run]
+#   zarf/scripts/converge-aws.sh [verify|apply|dry-run|teardown]
 #     verify   (default) read-only target oracle — reports drift, changes nothing
 #     apply              remediate to a fixpoint (Layer-B only; NEVER deletes a
 #                        transported image — that guard is structural in the engine)
 #     dry-run            show what apply WOULD do
+#     teardown           clean-slate the Layer-B app stack (dask/panel-viz/jupyter/
+#                        engine); registry/StorageClass + node images are CONSERVED,
+#                        so a following `apply` redeploys fast. Turn-key + idempotent.
 #
 # Credentials: kubectl-only healing needs NONE — workloads read the in-cluster S3
 # secret. For a from-scratch deploy that must (re)create that secret, export the
@@ -26,10 +29,11 @@ set -euo pipefail
 
 MODE="${1:-verify}"
 case "$MODE" in
-  verify)  MODE_FLAG="--verify" ;;
-  apply)   MODE_FLAG="--apply" ;;
-  dry-run) MODE_FLAG="--dry-run" ;;
-  *) echo "usage: $0 [verify|apply|dry-run]" >&2; exit 2 ;;
+  verify)   MODE_FLAG="--verify" ;;
+  apply)    MODE_FLAG="--apply" ;;
+  dry-run)  MODE_FLAG="--dry-run" ;;
+  teardown) MODE_FLAG="--teardown" ;;
+  *) echo "usage: $0 [verify|apply|dry-run|teardown]" >&2; exit 2 ;;
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

@@ -18,6 +18,7 @@ MAX_PASSES = 8
 PASS_DELAY = 15  # seconds between passes — let async cluster ops (pod term/sched) settle
 STALL_LIMIT = 3  # consecutive no-progress passes before declaring a stall; gives a freshly
                  # rescheduled pod time to pass its readiness probe before we give up on it
+TEARDOWN_SETTLE_PASSES = 6  # force-finalize retries for a namespace stuck Terminating
 
 _SYMBOL = {
     Outcome.OK: "\033[32m[ ok ]\033[0m",
@@ -131,6 +132,75 @@ def reconcile(ctx: Ctx, catalog: List[Invariant]) -> Tuple[Dict[str, Eval], List
             break  # genuine stall: STALL_LIMIT passes with no state change
         time.sleep(PASS_DELAY)  # let pod termination / rescheduling settle before re-detect
     return results, order
+
+
+def teardown(ctx: Ctx) -> Tuple[List[str], List[str]]:
+    """Drive to the CLEAN-SLATE state — remove the disposable Layer-B app stack,
+    idempotently and hands-off (the inverse of reconcile()). Neutralize Dask CR
+    finalizers first so the operator can't deadlock the delete, delete the workload
+    namespaces, then force-finalize any stuck Terminating. NEVER touches Layer-A node
+    images or the foundational tier (zarf registry / StorageClass), so a subsequent
+    ``--apply`` redeploys fast from the still-present registry. Returns
+    (attempted, remaining); remaining empty ⇒ clean slate reached."""
+    from .catalog import APP_NAMESPACES, DASK_CRD_KINDS, _force_finalize_ns
+
+    # 1. neutralize Dask CR finalizers (avoid an operator-gone deletion deadlock)
+    for kind in DASK_CRD_KINDS:
+        for it in ctx.items(kind):
+            md = it.get("metadata", {})
+            name, ns = md.get("name"), md.get("namespace")
+            if not name:
+                continue
+            patch = ["patch", kind, name] + (["-n", ns] if ns else [])
+            ctx.k(patch + ["--type", "merge", "-p", '{"metadata":{"finalizers":null}}'])
+
+    # 2. delete the app-stack namespaces (the platform tier is conserved)
+    attempted = [ns for ns in APP_NAMESPACES if ctx.exists("namespace", ns)]
+    for ns in attempted:
+        print(f"  tearing down namespace {ns}")
+        ctx.k(["delete", "namespace", ns, "--wait=false"])
+
+    # 3. Settle. Let the namespace GC cascade-delete the workloads, and force-remove
+    #    any lingering pods (grace=0) so NOTHING is left running when the namespace
+    #    object disappears. Force-finalizing a namespace while its pods still run
+    #    ORPHANS them — the ns is removed out from under live containers, which keep
+    #    running with no owning namespace. So we force-finalize the namespace itself
+    #    only as a LAST resort: after pods are cleared AND it's still genuinely stuck
+    #    Terminating (≥3 grace passes).
+    for i in range(TEARDOWN_SETTLE_PASSES):
+        stuck = [ns for ns in attempted if ctx.exists("namespace", ns)]
+        if not stuck:
+            break
+        for ns in stuck:
+            ctx.run(ctx.kubectl + ["delete", "pods", "--all", "-n", ns,
+                                   "--force", "--grace-period=0", "--wait=false"])
+        if i >= 2:
+            for ns in stuck:
+                _force_finalize_ns(ctx, ns)
+        time.sleep(PASS_DELAY)
+
+    remaining = [ns for ns in APP_NAMESPACES if ctx.exists("namespace", ns)]
+    return attempted, remaining
+
+
+def report_teardown(attempted: List[str], remaining: List[str]) -> bool:
+    """Print the teardown summary; return True iff the clean slate was reached."""
+    print("\n  CLEAN-SLATE teardown — Layer-B app stack "
+          "(registry/StorageClass + node images CONSERVED)")
+    print("  " + "-" * 60)
+    if not attempted:
+        print("  \033[90mnothing to remove — app stack already absent\033[0m")
+    for ns in attempted:
+        ok = ns not in remaining
+        mark = "\033[36m[removed]\033[0m" if ok else "\033[31m[STUCK]\033[0m"
+        print(f"  {mark}  namespace/{ns}")
+    print()
+    if remaining:
+        print(f"  \033[31m✖ {len(remaining)} namespace(s) still Terminating: "
+              f"{remaining}\033[0m")
+        return False
+    print("  \033[32m✔ CLEAN SLATE — app stack removed; redeploy with --apply\033[0m")
+    return True
 
 
 def _all_settled(order: List[Invariant], results: Dict[str, Eval]) -> bool:

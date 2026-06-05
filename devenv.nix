@@ -1625,8 +1625,10 @@ REMOTE_HEREDOC
     #   MODE=apply            remediate to a fixpoint (Layer-B only; never deletes a
     #                         transported image — that guard is structural)
     #   MODE=dry-run          show what apply WOULD do
+    #   MODE=teardown         clean-slate the app stack (registry/SC + images kept);
+    #                         turn-key + idempotent — pair with MODE=apply to redeploy
     # Use aws:deploy:zarf for an initial from-scratch deploy; use this to
-    # verify/heal an existing one idempotently.
+    # verify/heal/teardown+redeploy an existing one idempotently.
     "aws:converge".exec = ''
       exec bash ${config.devenv.root}/zarf/scripts/converge-aws.sh "''${MODE:-verify}"
     '';
