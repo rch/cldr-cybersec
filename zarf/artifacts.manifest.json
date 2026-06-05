@@ -1,0 +1,69 @@
+{
+  "schema": "cybersec-dask/artifacts.manifest/v1",
+  "_description": [
+    "CLOSURE source of truth: the transport-once Layer-A artifacts the air-gap deployment requires.",
+    "Two consumers: (1) `zarf:package` CI-gates that the built bundle contains every declared artifact",
+    "and stays under the size budget; (2) `converge` preflight (T0) verifies the air-gap environment has",
+    "them loaded BEFORE acting, failing loud + exact if not.",
+    "CONSERVATION: nothing listed here may be deleted by any deploy/converge step. Loss of a Layer-A",
+    "artifact = offline re-inspect + re-transport (the crictl-rmi-prune and deleted-StorageClass outages)."
+  ],
+  "package": {
+    "name": "cybersec-dask",
+    "version": "1.4.0",
+    "size_budget_bytes": 2147483648,
+    "size_warn_bytes": 1879048192,
+    "_note": "GitHub release-asset hard limit is 2 GiB (2147483648). Warn at ~1.75 GiB so we slim before hitting it."
+  },
+  "bootstrap_images": {
+    "_note": [
+      "Layer-A images that MUST live in the NODE's containerd BEFORE the Zarf internal registry exists,",
+      "because the default-StorageClass provisioner runs pre-registry (chicken-and-egg: it can't be pulled",
+      "from a registry that the provisioner is needed to stand up). These are pre-loaded at node setup",
+      "(RKE2 bundled-images dir or `ctr -n k8s.io images import`) and MUST NEVER be pruned. This is the",
+      "exact gap the `crictl rmi --prune` disaster exposed."
+    ],
+    "images": [
+      { "ref": "rancher/local-path-provisioner:v0.0.30", "role": "default-StorageClass provisioner", "critical": true, "layer": "A" },
+      { "ref": "busybox:1.37", "role": "local-path helper pod (mkdir/teardown)", "critical": true, "layer": "A" }
+    ]
+  },
+  "package_images": {
+    "_note": "Layer-A images carried INSIDE the Zarf package and pushed to the internal registry during deploy. The CI gate verifies the built .tar.zst declares all of these (Zarf rewrites localhost:5555 refs to the internal registry on deploy).",
+    "images": [
+      { "ref": "localhost:5555/cybersec-dask:2025.2.0", "role": "Dask + Panel/HoloViews/Datashader + cybersec app (the ~2 GB image)", "layer": "A", "expensive_push": true },
+      { "ref": "ghcr.io/dask/dask-kubernetes-operator:2024.1.0", "role": "Dask Kubernetes operator", "layer": "A" },
+      { "ref": "quay.io/jupyterhub/k8s-hub:4.0.0", "role": "JupyterHub hub", "layer": "A" },
+      { "ref": "quay.io/jupyterhub/configurable-http-proxy:4.5.5", "role": "JupyterHub proxy", "layer": "A" }
+    ]
+  },
+  "binaries": {
+    "_note": "Carried alongside the package for fully-offline init; pinned to avoid archive-format skew.",
+    "items": [
+      { "name": "zarf", "version": "v0.70.1", "role": "deploy engine (bundles `zarf tools kubectl`)", "layer": "A" },
+      { "name": "zarf-init", "version": "v0.70.1", "file": "zarf-init-amd64-v0.70.1.tar.zst", "role": "registry/injector seed package", "layer": "A" }
+    ]
+  },
+  "charts": [
+    { "file": "charts/dask-kubernetes-operator-2024.1.0.tgz", "layer": "A" },
+    { "file": "charts/jupyterhub-4.0.0.tgz", "layer": "A" }
+  ],
+  "manifests": [
+    "manifests/local-path-provisioner.yaml",
+    "manifests/registry-pv.yaml",
+    "manifests/namespace.yaml",
+    "manifests/dask-cluster.yaml",
+    "manifests/panel-viz.yaml",
+    "manifests/engine.yaml",
+    "manifests/ingress.yaml",
+    "manifests/jupyterhub-values.yaml",
+    "manifests/dask-operator-values.yaml",
+    "manifests/jupyterhub-namespace.yaml",
+    "manifests/sample-notebooks-configmap.yaml"
+  ],
+  "node_requirements": {
+    "_note": "Layer-A node-level invariants verified by converge T0. The engine DETECTS + HINTS; the real fix lives in the RKE2 config templates (infra/aws/ansible/roles/rke2-*/templates) and node setup. converge never changes kubelet args itself.",
+    "kubelet_eviction": "lenient + persistent: eviction-hard=imagefs.available<2%,nodefs.available<2%,nodefs.inodesFree<2%,memory.available<100Mi — so disk pressure cannot flap mid-deploy and survives rke2 restarts",
+    "containerd_disk": "registry + image layers fit on the node's data/root volume; size accordingly per topology profile"
+  }
+}

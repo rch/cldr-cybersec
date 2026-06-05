@@ -1703,6 +1703,18 @@ REMOTE_HEREDOC
       echo "Verify with: devenv tasks run aws:verify"
     '';
 
+    # Drive the live AWS cluster to TARGET STATE with the convergence engine
+    # (zarf/converge): discover → diff → remediate → repeat to a fixpoint.
+    #   MODE=verify (default) read-only target oracle — reports drift, no changes
+    #   MODE=apply            remediate to a fixpoint (Layer-B only; never deletes a
+    #                         transported image — that guard is structural)
+    #   MODE=dry-run          show what apply WOULD do
+    # Use aws:deploy:zarf for an initial from-scratch deploy; use this to
+    # verify/heal an existing one idempotently.
+    "aws:converge".exec = ''
+      exec bash ${config.devenv.root}/zarf/scripts/converge-aws.sh "''${MODE:-verify}"
+    '';
+
     # Write AWS environment variables to .env file for consistent use across sessions
     # This populates OTEL_S3_BUCKET and AWS_REGION from tofu output
     "aws:env".exec = ''
@@ -2821,6 +2833,17 @@ asyncio.run(main())
       if [ $? -eq 0 ]; then
         PKG=$(ls -t zarf-package-cybersec-dask-*.tar.zst 2>/dev/null | head -1)
         log_success "Package created: $PKG"
+
+        # Closure gate: every Layer-A image declared in artifacts.manifest.json
+        # MUST be in the bundle, and the bundle MUST stay under the GitHub
+        # release-asset size budget. Catches "we forgot to package X" at BUILD
+        # time instead of stranding the air-gap cluster at deploy time.
+        log_info "Running closure gate (artifacts.manifest.json)..."
+        if ! python3 scripts/check-closure.py "$PKG"; then
+          log_error "Closure gate FAILED — package incomplete or over budget (see above)."
+          exit 1
+        fi
+
         echo ""
         echo "Transfer package to air-gap environment and deploy with:"
         echo "  zarf init --confirm"

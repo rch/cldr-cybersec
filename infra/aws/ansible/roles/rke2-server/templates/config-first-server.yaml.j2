@@ -22,3 +22,16 @@ service-cidr: "10.43.0.0/16"
 
 # Enable audit logging
 audit-policy-file: /etc/rancher/rke2/audit-policy.yaml
+
+# --- Air-gap disk discipline (persistent; survives rke2 restarts) ---
+# RKE2's default eviction (imagefs/nodefs.available<10%) trips disk-pressure on a
+# tight single-node air-gap disk and re-applies the NoSchedule taint mid-deploy,
+# wedging `zarf init`'s registry pod. Run close-to-full instead, and prioritize
+# evicting (recoverable) pods over deleting (IRREPLACEABLE in air-gap) images:
+# image GC is held off until the disk is truly full so the kubelet NEVER
+# auto-prunes a transported image (Conservation). Override per topology profile.
+kubelet-arg:
+  - "eviction-hard=imagefs.available<{{ rke2_eviction_imagefs_pct | default(2) }}%,nodefs.available<{{ rke2_eviction_nodefs_pct | default(2) }}%,nodefs.inodesFree<2%,memory.available<100Mi"
+  - "eviction-minimum-reclaim=imagefs.available=1%,nodefs.available=1%"
+  - "image-gc-high-threshold=100"
+  - "image-gc-low-threshold=99"

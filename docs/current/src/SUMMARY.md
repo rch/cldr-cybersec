@@ -43,6 +43,7 @@
     - [Health Diagnostics](./operations/health.md)
     - [Bootstrap System](./operations/bootstrap.md)
     - [Air-Gap Deployment](./operations/airgap-deployment.md)
+    - [Runbook: Air-Gap Update (MOP)](./operations/runbook-airgap-update.md)
     - [Multi-RKE2 Isolation](./operations/multi-rke2-isolation.md)
     - [Testing & Verification](./operations/testing.md)
     - [Historical Retrieval](./operations/historical.md)

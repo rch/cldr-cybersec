@@ -1,0 +1,188 @@
+"""The reconciliation engine: dependency-ordered evaluation/remediation to a
+fixpoint, the closure preflight, the structural Layer-A guard, and reporting.
+
+Two consumers of the same catalog:
+  * evaluate()  — single read-only pass (powers --verify and --dry-run)
+  * reconcile() — multi-pass apply loop with stall detection (powers --apply)
+"""
+from __future__ import annotations
+
+from typing import Dict, List, Tuple
+
+import time
+
+from .kube import Ctx
+from .model import Cost, Eval, Invariant, Layer, Outcome
+
+MAX_PASSES = 8
+PASS_DELAY = 15  # seconds between passes — let async cluster ops (pod term/sched) settle
+STALL_LIMIT = 3  # consecutive no-progress passes before declaring a stall; gives a freshly
+                 # rescheduled pod time to pass its readiness probe before we give up on it
+
+_SYMBOL = {
+    Outcome.OK: "\033[32m[ ok ]\033[0m",
+    Outcome.REMEDIATED: "\033[36m[fixed]\033[0m",
+    Outcome.WOULD_FIX: "\033[33m[would]\033[0m",
+    Outcome.MANUAL: "\033[35m[MANUAL]\033[0m",
+    Outcome.BLOCKED: "\033[90m[blkd]\033[0m",
+    Outcome.FAILED: "\033[31m[FAIL]\033[0m",
+    Outcome.SKIPPED: "\033[90m[skip]\033[0m",
+}
+
+
+def topo_order(catalog: List[Invariant]) -> List[Invariant]:
+    """Kahn topological sort over depends_on (stable on catalog order for ties)."""
+    indeg = {i.id: 0 for i in catalog}
+    for i in catalog:
+        for d in i.depends_on:
+            if d in indeg:
+                indeg[i.id] += 1
+    out: List[Invariant] = []
+    # process in original order to keep ties deterministic
+    ready = [i for i in catalog if indeg[i.id] == 0]
+    seen = set()
+    while ready:
+        nxt = ready.pop(0)
+        if nxt.id in seen:
+            continue
+        seen.add(nxt.id)
+        out.append(nxt)
+        for i in catalog:
+            if nxt.id in i.depends_on and i.id not in seen:
+                indeg[i.id] -= 1
+                if indeg[i.id] == 0:
+                    ready.append(i)
+        ready.sort(key=lambda x: catalog.index(x))
+    # any cycle / leftover: append in catalog order
+    for i in catalog:
+        if i.id not in seen:
+            out.append(i)
+    return out
+
+
+def _deps_satisfied(inv: Invariant, results: Dict[str, Eval]) -> bool:
+    return all(results.get(d) is not None and results[d].converged for d in inv.depends_on)
+
+
+def evaluate(ctx: Ctx, catalog: List[Invariant], apply_preview: bool = False
+             ) -> Tuple[Dict[str, Eval], List[Invariant]]:
+    """One read-only pass. Blocked deps short-circuit. ``apply_preview`` marks
+    fixable-but-broken Layer-B invariants WOULD_FIX (dry-run) vs MANUAL (verify)."""
+    order = topo_order(catalog)
+    results: Dict[str, Eval] = {}
+    for inv in order:
+        if not _deps_satisfied(inv, results):
+            results[inv.id] = Eval(inv, Outcome.BLOCKED, "dependency unmet")
+            continue
+        probe = inv.detect(ctx)
+        if probe.ok:
+            results[inv.id] = Eval(inv, Outcome.OK, probe.detail)
+        elif inv.layer is Layer.A or inv.remediate is None:
+            hint = inv.manual_hint
+            results[inv.id] = Eval(inv, Outcome.MANUAL, f"{probe.detail} → {hint}")
+        elif apply_preview:
+            results[inv.id] = Eval(inv, Outcome.WOULD_FIX, probe.detail)
+        else:
+            results[inv.id] = Eval(inv, Outcome.FAILED, probe.detail)
+    return results, order
+
+
+def reconcile(ctx: Ctx, catalog: List[Invariant]) -> Tuple[Dict[str, Eval], List[Invariant]]:
+    """Multi-pass apply loop to a fixpoint or a stall. Expensive remediations are
+    skipped structurally (detect() gates remediate())."""
+    order = topo_order(catalog)
+    results: Dict[str, Eval] = {}
+    stalls = 0
+    for _ in range(MAX_PASSES):
+        progress = False
+        for inv in order:
+            prev = results.get(inv.id)
+            if prev is not None and prev.outcome in (Outcome.OK, Outcome.REMEDIATED):
+                continue  # already converged in an earlier pass
+            if not _deps_satisfied(inv, results):
+                results[inv.id] = Eval(inv, Outcome.BLOCKED, "dependency unmet")
+                continue
+            probe = inv.detect(ctx)
+            if probe.ok:
+                results[inv.id] = Eval(inv, Outcome.OK, probe.detail)
+                progress = True
+                continue
+            if inv.layer is Layer.A or inv.remediate is None:
+                # CONSERVATION: never auto-mutate Layer A; hand off to the operator.
+                results[inv.id] = Eval(inv, Outcome.MANUAL, f"{probe.detail} → {inv.manual_hint}")
+                continue
+            cost = " (expensive)" if inv.cost is Cost.EXPENSIVE else ""
+            print(f"  remediating {inv.id}{cost}: {probe.detail}")
+            fix = inv.remediate(ctx)
+            recheck = inv.detect(ctx)
+            if recheck.ok:
+                results[inv.id] = Eval(inv, Outcome.REMEDIATED, fix.detail)
+                progress = True
+            else:
+                results[inv.id] = Eval(inv, Outcome.FAILED, f"{fix.detail}; still: {recheck.detail}")
+                if fix.changed:
+                    # We changed the cluster (e.g. scaled workers); the effect is
+                    # async — keep looping + settling rather than declaring a stall.
+                    progress = True
+        if _all_settled(order, results):
+            break
+        stalls = 0 if progress else stalls + 1
+        if stalls >= STALL_LIMIT:
+            break  # genuine stall: STALL_LIMIT passes with no state change
+        time.sleep(PASS_DELAY)  # let pod termination / rescheduling settle before re-detect
+    return results, order
+
+
+def _all_settled(order: List[Invariant], results: Dict[str, Eval]) -> bool:
+    """Converged or stuck on MANUAL (no further automatic progress possible)."""
+    for inv in order:
+        ev = results.get(inv.id)
+        if ev is None:
+            return False
+        if ev.outcome in (Outcome.OK, Outcome.REMEDIATED, Outcome.MANUAL):
+            continue
+        return False
+    return True
+
+
+def closure_violations(results: Dict[str, Eval]) -> List[Eval]:
+    """Layer-A invariants that are not satisfied — CLOSURE/CONSERVATION failures the
+    operator must resolve (re-transport/re-import); the engine cannot."""
+    return [ev for ev in results.values()
+            if ev.inv.layer is Layer.A and ev.outcome is Outcome.MANUAL]
+
+
+def report(results: Dict[str, Eval], order: List[Invariant]) -> bool:
+    """Print the status table; return True iff fully converged (all OK/REMEDIATED)."""
+    print("\n  TIER  STATUS    INVARIANT")
+    print("  ----  --------  " + "-" * 56)
+    converged = True
+    for inv in order:
+        ev = results.get(inv.id)
+        if ev is None:
+            continue
+        if ev.outcome not in (Outcome.OK, Outcome.REMEDIATED):
+            converged = False
+        print(f"  {inv.tier:<4}  {_SYMBOL[ev.outcome]:<8}  {inv.id}")
+        if ev.outcome not in (Outcome.OK,):
+            print(f"            {ev.detail}")
+
+    cv = closure_violations(results)
+    if cv:
+        print("\n  \033[35m── CLOSURE / CONSERVATION violations (operator action required) ──\033[0m")
+        for ev in cv:
+            print(f"    • {ev.inv.id}: {ev.detail}")
+        print("    These cannot be auto-fixed: a transported (Layer-A) artifact is missing or the")
+        print("    node disk policy is wrong. Resolve, then re-run converge.")
+
+    manual = [ev for ev in results.values()
+              if ev.outcome is Outcome.MANUAL and ev.inv.layer is Layer.B]
+    if manual:
+        print("\n  Manual (engine couldn't act — likely zarf/package not on this host):")
+        for ev in manual:
+            print(f"    • {ev.inv.id}: {ev.detail}")
+
+    print()
+    print("  \033[32m✔ CONVERGED — deployment matches target state\033[0m" if converged
+          else "  \033[33m✖ NOT CONVERGED — see above\033[0m")
+    return converged

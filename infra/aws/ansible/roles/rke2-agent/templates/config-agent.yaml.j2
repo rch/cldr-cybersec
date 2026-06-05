@@ -13,3 +13,10 @@ node-label:
 
 # Data directory for local volumes
 data-dir: /var/lib/rancher/rke2
+
+# --- Air-gap disk discipline (persistent; survives rke2 restarts) — see config-first-server.yaml.j2 ---
+kubelet-arg:
+  - "eviction-hard=imagefs.available<{{ rke2_eviction_imagefs_pct | default(2) }}%,nodefs.available<{{ rke2_eviction_nodefs_pct | default(2) }}%,nodefs.inodesFree<2%,memory.available<100Mi"
+  - "eviction-minimum-reclaim=imagefs.available=1%,nodefs.available=1%"
+  - "image-gc-high-threshold=100"
+  - "image-gc-low-threshold=99"
