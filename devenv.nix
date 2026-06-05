@@ -1456,6 +1456,7 @@ EOF
       BUCKET_NAME=$(tofu output -raw s3_bucket_name 2>/dev/null || echo "")
       AWS_REGION=$(tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"')
       INGRESS_PROVIDER=$(tofu output -json ingress_info 2>/dev/null | jq -r '.provider // "cloudflare"')
+      WORKER_NODE_COUNT=$(tofu output -json worker_private_ips 2>/dev/null | jq 'length' 2>/dev/null || echo "")
       cd "$PROJECT_ROOT"
 
       if [ -z "$BASTION_IP" ] || [ -z "$CONTROL_IP" ]; then
@@ -1658,7 +1659,13 @@ REMOTE_HEREDOC
       # arguments stay reliably attached to the remote command and sudo -n
       # avoids the password prompt.
       echo "🚀 Phase 4: Deploying Zarf package..."
-      WORKER_REPLICAS="''${DASK_WORKER_REPLICAS:-16}"
+      # Default Dask worker replicas to the WORKER-NODE COUNT (~1 worker/node;
+      # each requests 4Gi and an m7i.large fits exactly one), so we never
+      # oversubscribe and strand workers Pending — the failure the convergence
+      # engine otherwise has to reap. The control-plane / headroom node carries
+      # the viz stack. Override with DASK_WORKER_REPLICAS; falls back to 4 (the
+      # package default) when the tofu worker output is unavailable.
+      WORKER_REPLICAS="''${DASK_WORKER_REPLICAS:-''${WORKER_NODE_COUNT:-4}}"
       ssh -i "$SSH_KEY" \
         -o ProxyCommand="ssh -i $SSH_KEY -W %h:%p $SSH_OPTS ec2-user@$BASTION_IP" \
         $SSH_OPTS ec2-user@$CONTROL_IP \
