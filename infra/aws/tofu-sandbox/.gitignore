@@ -1,0 +1,11 @@
+# Per-developer / generated artifacts must NEVER be committed. The harness writes all
+# of these under build/sandbox (also gitignored); these patterns are belt-and-suspenders
+# in case anyone runs tofu directly from this dir.
+sandbox.pem
+sandbox.env
+*.auto.tfvars
+terraform.tfstate
+terraform.tfstate.*
+.terraform/
+.terraform.lock.hcl
+ip
