@@ -130,28 +130,33 @@ def get_aws_bucket_name(project: str, config: Optional[BootstrapConfig] = None) 
 def get_developer_email(config: Optional[BootstrapConfig] = None) -> str:
     """Get the developer email for tagging.
 
+    The LOCAL git identity is authoritative, so every developer's resources are
+    tagged with THEIR own email — a configured (and possibly committed/shared)
+    value can never be inherited by another developer through hardcoding.
+
     Priority order:
-    1. Configured developer_email in config (if set)
-    2. Git email
+    1. Git email (`git config user.email`) — per-developer, authoritative
+    2. Configured developer_email in config (explicit fallback, e.g. CI without git)
     3. "{USER}@local" fallback
 
     Args:
-        config: Optional BootstrapConfig to check for configured email.
+        config: Optional BootstrapConfig with an explicit fallback email.
 
     Returns:
         Developer email string.
     """
-    # Check config first
+    # Git identity first — per-developer, so a configured value never overrides
+    # someone else's git email (the hardcoded-inheritance trap).
+    git_email = get_git_email()
+    if git_email:
+        return git_email
+
+    # Explicit fallback for environments without git (e.g. CI)
     if config is not None:
         email = getattr(config, "developer_email", "")
         if email:
             return email
 
-    # Try git email
-    git_email = get_git_email()
-    if git_email:
-        return git_email
-
-    # Fallback
+    # Last resort
     user = os.environ.get("USER", "unknown")
     return f"{user}@local"

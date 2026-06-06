@@ -99,12 +99,24 @@ class TestGetAwsBucketName:
 class TestGetDeveloperEmail:
     """Tests for get_developer_email function."""
 
-    def test_uses_config_email_if_set(self):
-        """Should use configured email if available."""
+    def test_git_email_is_authoritative(self):
+        """Git identity wins over a configured email — per-developer, so a
+        configured value can't be inherited by another developer (hardcoded trap)."""
         config = MagicMock()
         config.developer_email = "configured@example.com"
-        email = get_developer_email(config)
-        assert email == "configured@example.com"
+        with patch("cybersec.bootstrap.identity.get_git_email") as mock:
+            mock.return_value = "git@example.com"
+            email = get_developer_email(config)
+            assert email == "git@example.com"
+
+    def test_config_email_used_only_without_git(self):
+        """Configured email is a fallback — used only when git is unavailable."""
+        config = MagicMock()
+        config.developer_email = "configured@example.com"
+        with patch("cybersec.bootstrap.identity.get_git_email") as mock:
+            mock.return_value = None
+            email = get_developer_email(config)
+            assert email == "configured@example.com"
 
     def test_uses_git_email_if_config_empty(self):
         """Should use git email if config email is empty."""
