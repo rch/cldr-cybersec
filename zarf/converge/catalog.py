@@ -192,6 +192,30 @@ def _rem_provisioner(ctx: Ctx) -> Fix:
     return _apply_bundled_local_path(ctx)
 
 
+def _det_registry_pv(ctx: Ctx) -> Probe:
+    """RESILIENT default: the Zarf registry binds storage WITHOUT a default
+    StorageClass — a claimRef-prebound hostPath PV satisfies its PVC directly, so the
+    whole SC↔registry chicken-egg (and the provisioner + its bootstrap images) simply
+    don't exist. OK if the registry PVC is already Bound (e.g. a resourced cluster's
+    pre-existing default SC handled it) OR the prebound PV is present so a fresh
+    ``zarf init``'s PVC binds on creation."""
+    if any(p.get("status", {}).get("phase") == "Bound"
+           for p in ctx.items("pvc", ns="zarf")):
+        return Probe(True, "zarf registry PVC already Bound")
+    if ctx.exists("pv", "zarf-registry-pv"):
+        return Probe(True, "claimRef registry PV present (PVC will bind on init)")
+    return Probe(False, "no Bound registry PVC and no prebound registry PV")
+
+
+def _rem_registry_pv(ctx: Ctx) -> Fix:
+    # Apply the claimRef-prebound hostPath PV so the registry PVC binds with NO default
+    # StorageClass. Idempotent; Layer-B (a disposable PV, not a transported artifact).
+    # This is the single move that lets the resilient path skip the provisioner entirely.
+    r = ctx.apply_yaml(REGISTRY_PV_YAML.format(size=ctx.registry_pv_size))
+    return Fix(r.returncode == 0,
+               f"applied claimRef registry PV ({ctx.registry_pv_size}): rc={r.returncode}")
+
+
 # --------------------------------------------------------------------------- #
 # T1 — zarf init / registry
 # --------------------------------------------------------------------------- #
@@ -212,8 +236,12 @@ def _rem_registry_running(ctx: Ctx) -> Fix:
     # this is a harmless no-op. Layer-B throughout; never touches images.
     pvcs = ctx.items("pvc", ns="zarf")
     if any(p.get("status", {}).get("phase") == "Pending" for p in pvcs):
-        # Gentle first: give the Pending PVC a claimRef-prebound PV to bind to.
-        ctx.apply_yaml(REGISTRY_PV_YAML.format(size=ctx.registry_pv_size))
+        # Gentle first: ensure a claimRef-prebound PV exists for the Pending PVC to bind
+        # to (the resilient path; the T0.5.registry-pv invariant normally did this
+        # already — this is defensive). Skip in dynamic-provisioning mode, where the
+        # default StorageClass binds the PVC and a competing claimRef PV would be wrong.
+        if ctx.registry_pvc_enabled and not ctx.dynamic_provisioning:
+            ctx.apply_yaml(REGISTRY_PV_YAML.format(size=ctx.registry_pv_size))
         _force_finalize_ns(ctx, "zarf")
         # Escalate: a still-Pending PVC means the ns is wedged from a prior failed
         # init — delete it for a clean re-init (Phase 2d parity). `zarf init`
@@ -386,58 +414,104 @@ DASK_CRD_KINDS = ["daskclusters", "daskworkergroups", "daskautoscalers", "daskjo
 # The catalog
 # --------------------------------------------------------------------------- #
 
-CATALOG: List[Invariant] = [
-    Invariant("T0.api", "T0", "Kubernetes API reachable", Layer.B, _det_api,
-              manual_hint="RKE2 down — `systemctl status rke2-server` on the control plane"),
-    Invariant("T0.node-ready", "T0", "Nodes Ready and schedulable", Layer.B,
-              _det_node_ready, _rem_node_ready, depends_on=("T0.api",)),
-    Invariant("T0.no-disk-pressure", "T0", "No disk-pressure taint (lenient eviction persisted)",
-              Layer.A, _det_no_disk_pressure, depends_on=("T0.api",),
-              manual_hint="free disk SAFELY (never `crictl rmi --prune`; remove only the package "
-                          "tarball / journald / Failed pods) and ensure the RKE2 lenient-eviction "
-                          "config is applied (infra/aws/ansible/roles/rke2-*/templates)"),
-    Invariant("T0.layer-a-images", "T0", "Bootstrap images present (CLOSURE)", Layer.A,
-              _det_layer_a_images, depends_on=("T0.api",),
-              manual_hint="a bootstrap image (local-path-provisioner/busybox) is missing from the "
-                          "node's containerd. RE-IMPORT it from the package OCI layout or RKE2's "
-                          "bundled-images dir — NEVER pull/prune (it cannot be re-fetched in air-gap)"),
+def build_catalog(dynamic_provisioning: bool = False,
+                  registry_pvc_enabled: bool = True) -> List[Invariant]:
+    """The invariant catalog for the active storage modality.
 
-    Invariant("T0.5.sc-default", "T0.5", "Default StorageClass exists", Layer.B,
-              _det_sc_default, _rem_sc_default,
-              depends_on=("T0.node-ready", "T0.layer-a-images")),
-    Invariant("T0.5.provisioner", "T0.5", "local-path-provisioner Running", Layer.B,
-              _det_provisioner, _rem_provisioner, depends_on=("T0.5.sc-default",)),
+    DEFAULT — RESILIENT AIR-GAP (the only modality public releases target): the single
+    disk-limited node is the baseline. The Zarf registry binds a claimRef hostPath PV
+    (``T0.5.registry-pv``), so NO default StorageClass, NO local-path-provisioner and
+    NO bootstrap images (local-path-provisioner/busybox) are needed — the SC↔registry
+    chicken-egg simply doesn't exist. Worker count is sized to capacity, but behavior
+    never forks on node count.
 
-    Invariant("T1.registry-running", "T1", "Zarf internal registry initialized + Running",
-              Layer.B, _det_registry_running, _rem_registry_running, cost=Cost.EXPENSIVE,
-              depends_on=("T0.5.sc-default",)),
+    ``dynamic_provisioning=True`` — OPT-IN, for a resourced multi-node cluster running
+    workloads that need dynamic PVCs: restores the default-StorageClass tier (the
+    node-preloaded local-path-provisioner + its Layer-A bootstrap-image CLOSURE check)
+    and routes the registry PVC through it.
 
-    Invariant("T2.images-pushed", "T2", "App images pushed to internal registry",
-              Layer.B, _det_images_pushed, _rem_images_pushed, cost=Cost.EXPENSIVE,
-              depends_on=("T1.registry-running",)),
+    The T1→T6 tier (init → registry → images → components) is identical across
+    modalities; only the T0.5 storage tier and ``T1.registry-running``'s dependency
+    differ.
+    """
+    inv: List[Invariant] = [
+        Invariant("T0.api", "T0", "Kubernetes API reachable", Layer.B, _det_api,
+                  manual_hint="RKE2 down — `systemctl status rke2-server` on the control plane"),
+        Invariant("T0.node-ready", "T0", "Nodes Ready and schedulable", Layer.B,
+                  _det_node_ready, _rem_node_ready, depends_on=("T0.api",)),
+        Invariant("T0.no-disk-pressure", "T0", "No disk-pressure taint (lenient eviction persisted)",
+                  Layer.A, _det_no_disk_pressure, depends_on=("T0.api",),
+                  manual_hint="free disk SAFELY (never `crictl rmi --prune`; remove only the package "
+                              "tarball / journald / Failed pods) and ensure the RKE2 lenient-eviction "
+                              "config is applied (infra/aws/ansible/roles/rke2-*/templates)"),
+    ]
 
-    Invariant("T3.dask-operator", "T3", "Dask operator + CRDs", Layer.B,
-              _det_operator, _rem_operator, depends_on=("T2.images-pushed",)),
+    # T0.5 — storage. Resilient (default): the registry binds a claimRef hostPath PV,
+    # no StorageClass. Dynamic (opt-in): the node-preloaded local-path-provisioner
+    # supplies a default StorageClass and the registry PVC binds through it.
+    if dynamic_provisioning:
+        inv += [
+            Invariant("T0.layer-a-images", "T0", "Bootstrap images present (CLOSURE)", Layer.A,
+                      _det_layer_a_images, depends_on=("T0.api",),
+                      manual_hint="a bootstrap image (local-path-provisioner/busybox) is missing from the "
+                                  "node's containerd. RE-IMPORT it from the package OCI layout or RKE2's "
+                                  "bundled-images dir — NEVER pull/prune (it cannot be re-fetched in air-gap)"),
+            Invariant("T0.5.sc-default", "T0.5", "Default StorageClass exists", Layer.B,
+                      _det_sc_default, _rem_sc_default,
+                      depends_on=("T0.node-ready", "T0.layer-a-images")),
+            Invariant("T0.5.provisioner", "T0.5", "local-path-provisioner Running", Layer.B,
+                      _det_provisioner, _rem_provisioner, depends_on=("T0.5.sc-default",)),
+        ]
+        registry_dep = ("T0.5.sc-default",)
+    elif registry_pvc_enabled:
+        inv += [
+            Invariant("T0.5.registry-pv", "T0.5",
+                      "Registry storage prebound (claimRef hostPath PV — no default SC needed)",
+                      Layer.B, _det_registry_pv, _rem_registry_pv, depends_on=("T0.node-ready",)),
+        ]
+        registry_dep = ("T0.5.registry-pv",)
+    else:
+        # --no-registry-pvc: the registry runs on emptyDir — nothing to prebind.
+        registry_dep = ("T0.node-ready",)
 
-    Invariant("T4.scheduler", "T4", "Dask scheduler Ready", Layer.B,
-              _det_scheduler, _rem_scheduler, depends_on=("T3.dask-operator",)),
-    Invariant("T4.workers-capacity", "T4", "Workers fit schedulable capacity (no oversubscription)",
-              Layer.B, _det_workers_capacity, _rem_workers_capacity,
-              depends_on=("T4.scheduler",)),
+    inv += [
+        Invariant("T1.registry-running", "T1", "Zarf internal registry initialized + Running",
+                  Layer.B, _det_registry_running, _rem_registry_running, cost=Cost.EXPENSIVE,
+                  depends_on=registry_dep),
 
-    Invariant("T5.otel-navigator", "T5", "otel-navigator Ready (2/2, fits memory)", Layer.B,
-              _det_otel_navigator, _rem_otel_navigator,
-              depends_on=("T4.scheduler", "T4.workers-capacity")),
-    Invariant("T5.navigator-engine", "T5", "navigator-engine Ready", Layer.B,
-              _det_engine, _rem_engine, depends_on=("T4.scheduler",)),
-    Invariant("T5.jupyterhub", "T5", "JupyterHub hub Ready", Layer.B,
-              _det_jupyterhub, _rem_jupyterhub, depends_on=("T2.images-pushed",)),
-    Invariant("T5.sample-notebooks", "T5", "Sample-notebooks ConfigMap present", Layer.B,
-              _det_sample_notebooks, _rem_sample_notebooks, depends_on=("T2.images-pushed",)),
+        Invariant("T2.images-pushed", "T2", "App images pushed to internal registry",
+                  Layer.B, _det_images_pushed, _rem_images_pushed, cost=Cost.EXPENSIVE,
+                  depends_on=("T1.registry-running",)),
 
-    Invariant("T6.ingress", "T6", "Ingress resources present", Layer.B,
-              _det_ingress, _rem_ingress, depends_on=("T5.otel-navigator",)),
-]
+        Invariant("T3.dask-operator", "T3", "Dask operator + CRDs", Layer.B,
+                  _det_operator, _rem_operator, depends_on=("T2.images-pushed",)),
+
+        Invariant("T4.scheduler", "T4", "Dask scheduler Ready", Layer.B,
+                  _det_scheduler, _rem_scheduler, depends_on=("T3.dask-operator",)),
+        Invariant("T4.workers-capacity", "T4", "Workers fit schedulable capacity (no oversubscription)",
+                  Layer.B, _det_workers_capacity, _rem_workers_capacity,
+                  depends_on=("T4.scheduler",)),
+
+        Invariant("T5.otel-navigator", "T5", "otel-navigator Ready (2/2, fits memory)", Layer.B,
+                  _det_otel_navigator, _rem_otel_navigator,
+                  depends_on=("T4.scheduler", "T4.workers-capacity")),
+        Invariant("T5.navigator-engine", "T5", "navigator-engine Ready", Layer.B,
+                  _det_engine, _rem_engine, depends_on=("T4.scheduler",)),
+        Invariant("T5.jupyterhub", "T5", "JupyterHub hub Ready", Layer.B,
+                  _det_jupyterhub, _rem_jupyterhub, depends_on=("T2.images-pushed",)),
+        Invariant("T5.sample-notebooks", "T5", "Sample-notebooks ConfigMap present", Layer.B,
+                  _det_sample_notebooks, _rem_sample_notebooks, depends_on=("T2.images-pushed",)),
+
+        Invariant("T6.ingress", "T6", "Ingress resources present", Layer.B,
+                  _det_ingress, _rem_ingress, depends_on=("T5.otel-navigator",)),
+    ]
+    return inv
+
+
+# The RESILIENT air-gap modality is the DEFAULT (and the only one public releases
+# target). This module-level catalog is what importers (by_id/layer_a_ids/tests) see;
+# __main__ rebuilds per-run with the active flags (dynamic_provisioning / pvc).
+CATALOG: List[Invariant] = build_catalog()
 
 
 def by_id() -> dict:

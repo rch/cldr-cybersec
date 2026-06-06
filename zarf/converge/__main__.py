@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .catalog import CATALOG
+from .catalog import build_catalog
 from .engine import closure_violations, evaluate, reconcile, report, report_teardown, teardown
 from .kube import Ctx, DEFAULT_MANIFESTS_DIR, load_manifest
 
@@ -48,10 +48,14 @@ def main(argv=None) -> int:
                          "registry-free StorageClass bootstrap")
     ap.add_argument("--zarf", default=_default_zarf(), help="path to the zarf binary")
     ap.add_argument("--package", help="path to the deploy .tar.zst (for component remediations)")
-    ap.add_argument("--topology", choices=["single-tight", "multi-ample", "auto"], default="auto")
     ap.add_argument("--registry-pvc-size", default="5Gi")
     ap.add_argument("--no-registry-pvc", action="store_true",
-                    help="run the internal registry on emptyDir (tight-disk single node)")
+                    help="run the internal registry on emptyDir (no PV — lost on pod restart)")
+    ap.add_argument("--enable-dynamic-provisioning", action="store_true",
+                    help="OPT-IN: restore the default-StorageClass tier (the node-preloaded "
+                         "local-path-provisioner) for a resourced multi-node cluster running "
+                         "workloads that need dynamic PVCs. DEFAULT is the resilient path — the "
+                         "registry binds a claimRef hostPath PV, so no StorageClass is needed.")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VAL",
                     help="S3/zarf variable to pass to component deploys (repeatable)")
     ap.add_argument("--creds-file", help="file of KEY=VALUE lines (e.g. S3_SECRET_KEY=...) "
@@ -83,13 +87,13 @@ def main(argv=None) -> int:
     ctx = Ctx(
         kubectl=kube,
         apply=args.apply,
-        topology=args.topology,
         manifest=load_manifest(args.manifest),
         zarf_bin=args.zarf,
         package_path=args.package,
         manifests_dir=args.manifests_dir,
         registry_pv_size=args.registry_pvc_size,
         registry_pvc_enabled=not args.no_registry_pvc,
+        dynamic_provisioning=args.enable_dynamic_provisioning,
         s3=s3,
         verbose=args.verbose,
     )
@@ -103,16 +107,22 @@ def main(argv=None) -> int:
 
     mode_name = ("apply" if args.apply else "verify" if args.verify
                  else "teardown" if args.teardown else "dry-run")
-    print(f"converge {__version__}  |  topology={ctx.topology_profile()}  |  mode={mode_name}")
+    storage = ("dynamic-SC" if ctx.dynamic_provisioning
+               else "claimRef-PV" if ctx.registry_pvc_enabled else "emptyDir")
+    cap = ctx.node_capacity()
+    print(f"converge {__version__}  |  mode={mode_name}  |  storage={storage}  |  "
+          f"nodes={cap['ready_nodes']} mem={cap['total_mem_gib']}Gi")
 
     if args.teardown:
         attempted, remaining = teardown(ctx)
         return 0 if report_teardown(attempted, remaining) else 1
 
+    catalog = build_catalog(dynamic_provisioning=ctx.dynamic_provisioning,
+                            registry_pvc_enabled=ctx.registry_pvc_enabled)
     if args.apply:
-        results, order = reconcile(ctx, CATALOG)
+        results, order = reconcile(ctx, catalog)
     else:
-        results, order = evaluate(ctx, CATALOG, apply_preview=not args.verify)
+        results, order = evaluate(ctx, catalog, apply_preview=not args.verify)
 
     converged = report(results, order)
 

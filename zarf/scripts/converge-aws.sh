@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Drive the live AWS RKE2 air-gap cluster to TARGET STATE with the convergence
 # engine (zarf/converge). Deterministic + idempotent: discover → diff target →
-# remediate → repeat to a fixpoint. This is the operational front-end for the
-# proven `python3 -m converge` invocation — it stages the engine on the control
-# plane (over the bastion hop) and runs it there, kubectl-only at runtime.
+# remediate → repeat to a fixpoint. This is the AWS TRANSPORT SHIM around the
+# node-local entrypoint `converge-node.sh`: it resolves cluster coordinates from
+# tofu, stages the engine + that script on the control plane over the bastion hop,
+# and runs converge-node.sh there (kubectl-only at runtime). The actual convergence
+# invocation lives in ONE place — converge-node.sh — so the AWS and bare-node paths
+# can't drift.
 #
 # Usage:
 #   zarf/scripts/converge-aws.sh [verify|apply|dry-run|teardown]
@@ -29,10 +32,7 @@ set -euo pipefail
 
 MODE="${1:-verify}"
 case "$MODE" in
-  verify)   MODE_FLAG="--verify" ;;
-  apply)    MODE_FLAG="--apply" ;;
-  dry-run)  MODE_FLAG="--dry-run" ;;
-  teardown) MODE_FLAG="--teardown" ;;
+  verify|apply|dry-run|teardown) ;;   # converge-node.sh maps these to engine flags
   *) echo "usage: $0 [verify|apply|dry-run|teardown]" >&2; exit 2 ;;
 esac
 
@@ -64,32 +64,21 @@ cp_ssh() {
 
 echo "🎯 converge ($MODE)   bastion=$BASTION_IP   control-plane=$CONTROL_IP"
 
-# --- stage the engine on the control plane -----------------------------------
-# User-owned dir + PYTHONDONTWRITEBYTECODE so no root-owned __pycache__ is left
-# behind to block the next restage.
+# --- stage the engine + node entrypoint on the control plane -----------------
+# User-owned dir; converge-node.sh resolves kubectl/zarf/the package node-side and
+# runs the engine with PYTHONDONTWRITEBYTECODE so no root-owned __pycache__ is left
+# behind to block the next restage. The package itself is auto-located from /var/tmp
+# by converge-node.sh (needed only for component-deploy fixes; verify works without).
 STAGE="/home/ec2-user/cybersec-converge"
-cp_ssh "rm -rf $STAGE && mkdir -p $STAGE" </dev/null
+cp_ssh "rm -rf $STAGE && mkdir -p $STAGE/manifests" </dev/null
 scp -q -i "$SSH_KEY" -o ProxyCommand="$PROXY" "${SSH_OPTS[@]}" -r \
-  zarf/converge zarf/artifacts.manifest.json "ec2-user@$CONTROL_IP:$STAGE/" </dev/null
-# Stage the bundled local-path manifest so converge can bootstrap the default
-# StorageClass with kubectl (registry-free, node-preloaded image) — breaks the
-# SC<->registry chicken-egg on a fresh cluster. Matches the engine's default
-# --manifests-dir (<stage>/manifests/).
-cp_ssh "mkdir -p $STAGE/manifests" </dev/null
+  zarf/converge zarf/artifacts.manifest.json zarf/scripts/converge-node.sh \
+  "ec2-user@$CONTROL_IP:$STAGE/" </dev/null
+# The bundled local-path manifest is used only in the OPT-IN dynamic-provisioning
+# mode (CONVERGE_DYNAMIC_PROVISIONING=1); stage it so that path stays self-contained.
+# The resilient default never applies it (the registry binds a claimRef hostPath PV).
 scp -q -i "$SSH_KEY" -o ProxyCommand="$PROXY" "${SSH_OPTS[@]}" \
   zarf/manifests/local-path-provisioner.yaml "ec2-user@$CONTROL_IP:$STAGE/manifests/" </dev/null
-
-# --- locate the transported package (optional) -------------------------------
-# Needed only for component-deploy remediations; --verify and kubectl-only fixes
-# work without it (those invariants degrade to a precise MANUAL hint).
-PKG="$(cp_ssh "ls -t /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst 2>/dev/null | head -1" </dev/null | tr -d '\r' || true)"
-PKG_ARGS=()
-if [ -n "$PKG" ]; then
-  PKG_ARGS=(--zarf /usr/local/bin/zarf --package "$PKG")
-  echo "   package: $PKG"
-else
-  echo "   package: <none on control plane> — component-deploy fixes report MANUAL"
-fi
 
 # --- optional S3 creds → ZARF_VAR_* env, transported over the SSH channel -----
 # Written to tmpfs (RAM, mode 600) and removed after the run, NEVER placed on any
@@ -105,22 +94,17 @@ if [ -n "$CREDS_LINES" ]; then
   echo "   creds: $(printf '%s' "$CREDS_LINES" | grep -c .) S3 var(s) staged to tmpfs (off argv)"
 fi
 
-# --- non-secret zarf vars via --set (deterministic first-deploy sizing) ------
-# DASK_WORKER_REPLICAS isn't a secret, so it rides argv; T4.workers-capacity will
-# still cap to live schedulable capacity, but seeding the dask-cluster deploy with
-# the node count avoids an oversubscribed first pass that then has to be reaped.
-SET_ARGS=()
-[ -n "${DASK_WORKER_REPLICAS:-}" ] && SET_ARGS+=(--set "DASK_WORKER_REPLICAS=${DASK_WORKER_REPLICAS}")
-
-# --- run the engine on the control plane -------------------------------------
-CREDS_ARGS=()
-[ -n "$CREDS_REMOTE" ] && CREDS_ARGS=(--creds-file "$CREDS_REMOTE")
+# --- run the node entrypoint on the control plane (single source of truth) ----
+# converge-node.sh resolves kubectl/zarf/the package + modality itself; we pass the
+# creds-file location + worker count + dynamic-provisioning toggle as ENV (never argv).
+# DASK_WORKER_REPLICAS isn't a secret; the engine still caps to live capacity, but
+# seeding it avoids an oversubscribed first pass that then has to be reaped.
+RUN_ENV="PYTHONDONTWRITEBYTECODE=1"
+[ -n "$CREDS_REMOTE" ] && RUN_ENV="$RUN_ENV CONVERGE_CREDS_FILE=$CREDS_REMOTE"
+[ -n "${DASK_WORKER_REPLICAS:-}" ] && RUN_ENV="$RUN_ENV DASK_WORKER_REPLICAS=$DASK_WORKER_REPLICAS"
+[ -n "${CONVERGE_DYNAMIC_PROVISIONING:-}" ] && RUN_ENV="$RUN_ENV CONVERGE_DYNAMIC_PROVISIONING=$CONVERGE_DYNAMIC_PROVISIONING"
 set +e
-cp_ssh "cd $STAGE && sudo -n env PYTHONDONTWRITEBYTECODE=1 KUBECONFIG=/etc/rancher/rke2/rke2.yaml \
-  python3 -m converge \
-  --kubectl '/var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml' \
-  --manifests-dir $STAGE/manifests \
-  ${PKG_ARGS[*]} ${CREDS_ARGS[*]} ${SET_ARGS[*]} $MODE_FLAG" </dev/null
+cp_ssh "cd $STAGE && sudo -n env $RUN_ENV bash converge-node.sh $MODE" </dev/null
 RC=$?
 set -e
 

@@ -59,12 +59,19 @@ variables:
 
 components:
   # ===========================================================================
-  # Storage Provisioner - ensures a default StorageClass exists
+  # Storage Provisioner - OPT-IN (dynamic provisioning only)
   # ===========================================================================
+  # OFF by default: the resilient air-gap path (the only modality releases target)
+  # needs NO default StorageClass — the Zarf registry binds a claimRef hostPath PV
+  # (convergence invariant T0.5.registry-pv), so single disk-limited nodes "just
+  # work". Enable on a resourced multi-node cluster running workloads that need
+  # dynamic PVCs via `converge --enable-dynamic-provisioning`, which kubectl-applies
+  # this manifest (node-preloaded image). Images stay declared so the package remains
+  # CLOSED for that opt-in path regardless of the default.
   - name: local-path-provisioner
     required: false
-    default: true
-    description: Rancher local-path-provisioner (default StorageClass for bare RKE2)
+    default: false
+    description: Rancher local-path-provisioner (default StorageClass — opt-in, dynamic provisioning only)
     images:
       - rancher/local-path-provisioner:v0.0.30
       - busybox:1.37
@@ -142,32 +149,44 @@ components:
               BUCKET="${ZARF_VAR_S3_BUCKET}"
               ENDPOINT="${ZARF_VAR_S3_ENDPOINT}"
               if [ -z "$BUCKET" ] || [ -z "$ENDPOINT" ]; then
-                echo "S3 not fully configured (BUCKET=$BUCKET ENDPOINT=$ENDPOINT), skipping bucket creation"
+                echo "S3 not fully configured (BUCKET=$BUCKET ENDPOINT=$ENDPOINT), skipping bucket ensure"
                 exit 0
               fi
-              SCHEDULER=$(kubectl get pod -n dask -l dask.org/component=scheduler -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+              SCHEDULER=$(kubectl get pod -n dask -l dask.org/component=scheduler -o jsonpath='{.items[0].metadata.name}')
               if [ -z "$SCHEDULER" ]; then
-                echo "Warning: no Dask scheduler pod found, skipping bucket creation"
+                echo "Warning: no Dask scheduler pod found, skipping bucket ensure"
                 exit 0
               fi
+              # ENSURE the data bucket exists (idempotent). On a real air-gap deploy the
+              # bucket is usually PROVIDED, so the exists-check short-circuits; against a
+              # fresh dev/rehearsal MinIO it is created. Endpoint + creds come from the
+              # scheduler pod's env (templated from ZARF_VAR_S3_*), so no secret rides this
+              # argv. fs.exists() avoids depending on a specific s3fs exception type, and
+              # any failure is PRINTED (not silently swallowed) so it shows in the log.
               kubectl exec -n dask "$SCHEDULER" -- python -c "
-              import s3fs, os
+              import s3fs, os, sys
               fs = s3fs.S3FileSystem(
-                  key=os.environ.get('AWS_ACCESS_KEY_ID', '') or None,
-                  secret=os.environ.get('AWS_SECRET_ACCESS_KEY', '') or None,
-                  token=os.environ.get('AWS_SESSION_TOKEN', '') or None,
-                  client_kwargs={'endpoint_url': os.environ['S3_ENDPOINT']},
-                  config_kwargs={'s3': {'addressing_style': 'path'}, 'signature_version': 's3v4'}
+                  key=os.environ.get('AWS_ACCESS_KEY_ID') or None,
+                  secret=os.environ.get('AWS_SECRET_ACCESS_KEY') or None,
+                  token=os.environ.get('AWS_SESSION_TOKEN') or None,
+                  client_kwargs={'endpoint_url': os.environ.get('S3_ENDPOINT') or None},
+                  config_kwargs={'s3': {'addressing_style': 'path'}, 'signature_version': 's3v4'},
               )
               bucket = '$BUCKET'
+              fs.invalidate_cache()
               try:
-                  fs.ls(bucket)
-                  print(f'S3 bucket already exists: {bucket}')
-              except FileNotFoundError:
-                  fs.mkdir(bucket)
-                  print(f'Created S3 bucket: {bucket}')
-              " || echo "Warning: bucket creation failed (non-fatal, create manually)"
-            description: Create S3 data bucket (if S3 is configured)
+                  if fs.exists(bucket):
+                      print('S3 bucket already exists:', bucket)
+                  else:
+                      fs.mkdir(bucket)
+                      print('Created S3 bucket:', bucket)
+              except Exception as e:
+                  print('ERROR ensuring bucket %r: %s: %s' % (bucket, type(e).__name__, e))
+                  sys.exit(1)
+              "
+              RC=$?
+              [ "$RC" -eq 0 ] || echo "Warning: bucket ensure failed (rc=$RC) — create '$BUCKET' on the S3 endpoint manually"
+            description: Ensure the S3 data bucket exists (if S3 is configured)
 
   # ===========================================================================
   # JupyterHub - optional, on by default

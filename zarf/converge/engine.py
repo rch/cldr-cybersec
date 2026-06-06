@@ -139,8 +139,9 @@ def teardown(ctx: Ctx) -> Tuple[List[str], List[str]]:
     idempotently and hands-off (the inverse of reconcile()). Neutralize Dask CR
     finalizers first so the operator can't deadlock the delete, delete the workload
     namespaces, then force-finalize any stuck Terminating. NEVER touches Layer-A node
-    images or the foundational tier (zarf registry / StorageClass), so a subsequent
-    ``--apply`` redeploys fast from the still-present registry. Returns
+    images or the foundational tier (zarf registry + its claimRef PV / any default
+    StorageClass), so a subsequent ``--apply`` redeploys fast from the still-present
+    registry. Returns
     (attempted, remaining); remaining empty ⇒ clean slate reached."""
     from .catalog import APP_NAMESPACES, DASK_CRD_KINDS, _force_finalize_ns
 
@@ -186,7 +187,7 @@ def teardown(ctx: Ctx) -> Tuple[List[str], List[str]]:
 def report_teardown(attempted: List[str], remaining: List[str]) -> bool:
     """Print the teardown summary; return True iff the clean slate was reached."""
     print("\n  CLEAN-SLATE teardown — Layer-B app stack "
-          "(registry/StorageClass + node images CONSERVED)")
+          "(registry +PV / StorageClass + node images CONSERVED)")
     print("  " + "-" * 60)
     if not attempted:
         print("  \033[90mnothing to remove — app stack already absent\033[0m")

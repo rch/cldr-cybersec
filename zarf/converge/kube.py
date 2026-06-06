@@ -29,13 +29,17 @@ DEFAULT_MANIFESTS_DIR = Path(__file__).resolve().parent.parent / "manifests"
 class Ctx:
     kubectl: List[str]                      # base argv, e.g. ["zarf","tools","kubectl"]
     apply: bool = False                     # actually remediate (vs dry-run/verify)
-    topology: str = "auto"                  # "single-tight" | "multi-ample" | "auto"
     manifest: dict = field(default_factory=dict)
     zarf_bin: Optional[str] = None
     package_path: Optional[str] = None
     manifests_dir: Optional[str] = None      # dir holding bundled manifests (local-path-provisioner.yaml)
     registry_pv_size: str = "5Gi"
     registry_pvc_enabled: bool = True
+    # DEFAULT (resilient air-gap, the only modality public releases target): the Zarf
+    # registry binds a claimRef hostPath PV, so NO default StorageClass / local-path-
+    # provisioner / bootstrap images are needed. Set True only to opt a resourced
+    # multi-node cluster back into dynamic provisioning for workloads that require it.
+    dynamic_provisioning: bool = False
     s3: dict = field(default_factory=dict)
     timeout: int = 90
     verbose: bool = False
@@ -148,7 +152,9 @@ class Ctx:
 
     def node_capacity(self) -> dict:
         """Rough schedulable capacity across Ready, non-tainted-NoSchedule nodes.
-        Used by topology detection and the worker-replica cap."""
+        Used to size workers to capacity (the worker-replica cap) and for the banner.
+        There is NO topology branch — the resilient path runs identically on one node
+        or many; capacity only sizes the worker count, it never forks behavior."""
         if self._cap_cache is not None:
             return self._cap_cache
         nodes = self.items("nodes")
@@ -171,12 +177,6 @@ class Ctx:
                "total_mem_gib": round(total_mem_gib, 1)}
         self._cap_cache = cap
         return cap
-
-    def topology_profile(self) -> str:
-        if self.topology in ("single-tight", "multi-ample"):
-            return self.topology
-        cap = self.node_capacity()
-        return "single-tight" if cap["ready_nodes"] <= 1 else "multi-ample"
 
 
 def _mem_to_gib(v: str) -> float:
