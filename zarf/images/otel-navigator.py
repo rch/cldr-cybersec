@@ -11,8 +11,9 @@ Key architecture:
 
 Environment variables:
 - DASK_SCHEDULER: Dask scheduler address (required)
-- S3_BUCKET: S3 bucket name (default: cybersec-dask-data)
-- OTEL_DATA_PATH: Path to OTEL data (default: s3://{S3_BUCKET}/otel-minimal/)
+- S3_BUCKET: S3 bucket name — REQUIRED, provided at deploy time (never hardcoded)
+- OTEL_DATA_PATH: fallback base only; the active dataset is discovered from
+  s3://{S3_BUCKET}/_active_dataset.json (the dataset name is never baked in)
 - S3_ENDPOINT: S3 endpoint for MinIO (optional)
 - AWS_ACCESS_KEY_ID: S3 access key
 - AWS_SECRET_ACCESS_KEY: S3 secret key
@@ -46,8 +47,13 @@ pn.extension(loading_spinner='dots', loading_color='#0072B5',
 # -------------------------------------------------------------------------
 
 DASK_SCHEDULER = os.environ.get('DASK_SCHEDULER', '')
-S3_BUCKET = os.environ.get('S3_BUCKET', 'cybersec-dask-data')
-OTEL_DATA_PATH = os.environ.get('OTEL_DATA_PATH', f's3://{S3_BUCKET}/otel-minimal/')
+# The S3 bucket is PROVIDED AT DEPLOY TIME (the air-gap operator supplies it) — it is
+# never hardcoded. Empty here means "not provided"; the app surfaces a clear error
+# rather than silently reading a wrong bucket.
+S3_BUCKET = os.environ.get('S3_BUCKET', '')
+# Fallback base only. The active dataset is DISCOVERED from <bucket>/_active_dataset.json
+# (see get_active_dataset) — the dataset name is never baked in here.
+OTEL_DATA_PATH = os.environ.get('OTEL_DATA_PATH', f's3://{S3_BUCKET}/' if S3_BUCKET else '')
 S3_ENDPOINT = os.environ.get('S3_ENDPOINT', '')
 AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
 AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
@@ -141,22 +147,26 @@ def get_active_dataset() -> dict:
         marker_path = f"{bucket}/_active_dataset.json"
         with fs.open(marker_path, 'r') as f:
             marker = json.load(f)
-        dataset = marker.get('dataset', 'otel-minimal')
-        phase = marker.get('phase', 'unknown')
+        dataset = marker.get('dataset')
+        if not dataset:
+            raise ValueError("_active_dataset.json present but has no 'dataset' key")
         return {
             'dataset': dataset,
-            'phase': phase,
+            'phase': marker.get('phase', 'unknown'),
             'path': f"s3://{bucket}/{dataset}/",
             'total_spans': marker.get('total_spans'),
         }
-    except FileNotFoundError:
-        logger.info("No dataset marker found, using default path")
     except Exception as e:
-        logger.warning(f"Error reading dataset marker: {e}")
+        # Do NOT silently fall back to a hardcoded dataset — that masks the real cause,
+        # which is almost always a wrong or unset S3_BUCKET (given at deploy time).
+        logger.error(
+            "Cannot resolve active dataset from s3://%s/_active_dataset.json: %s. "
+            "Verify S3_BUCKET — it is provided at deploy time and never hardcoded.",
+            bucket or "<unset>", e)
 
     return {
-        'dataset': 'otel-minimal',
-        'phase': 'default',
+        'dataset': '(unresolved)',
+        'phase': 'error',
         'path': OTEL_DATA_PATH,
         'total_spans': None,
     }
@@ -348,9 +358,16 @@ class GhosttyTerminal(pn.reactive.ReactiveHTML):
             function initTerminal() {
                 var wsUrl = data.ws_url;
                 if (!wsUrl) {
-                    var pagePort = parseInt(window.location.port) || 80;
-                    var wsPort = (pagePort === 5006) ? 8765 : 30765;
-                    wsUrl = 'ws://' + window.location.hostname + ':' + wsPort;
+                    var pagePort = parseInt(window.location.port) || 0;
+                    if (pagePort === 5006) {
+                        // Local dev: panel serve on 5006, pty-proxy sidecar on 8765.
+                        wsUrl = 'ws://' + window.location.hostname + ':8765';
+                    } else {
+                        // Through ingress (Cloudflare tunnel / Traefik): same-origin,
+                        // scheme-correct, no port. Tunnel routes /ws -> pty-proxy :8765.
+                        var proto = (window.location.protocol === 'https:') ? 'wss://' : 'ws://';
+                        wsUrl = proto + window.location.host + '/ws';
+                    }
                 }
 
                 function setStatus(text, color) {

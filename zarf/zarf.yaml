@@ -35,8 +35,12 @@ variables:
     description: S3-compatible endpoint URL
     default: ""
   - name: S3_BUCKET
-    description: S3 bucket name for OTEL data (notebooks + Panel-Viz)
-    default: "cybersec-dask-data"
+    description: >-
+      S3 bucket name for OTEL data (notebooks + Panel-Viz). PROVIDED AT DEPLOY TIME —
+      in air-gap the operator supplies the given bucket via --set S3_BUCKET=...; never
+      hardcoded. No default, so a missing value fails loud instead of silently using a
+      wrong bucket.
+    default: ""
   - name: S3_REGION
     description: AWS region for S3 access
     default: "us-east-1"

@@ -11,12 +11,13 @@ resource "aws_s3_bucket" "cybersec" {
   })
 }
 
-# Versioning suspended for dev buckets - simplifies cleanup
-# Enable for production by changing status to "Enabled"
+# Versioning ENABLED — this bucket holds the OTEL dataset (1.3+ TB, with object
+# versions present), treated as production data, so we keep version protection.
+# (Matches the live bucket state; config previously said Suspended which drifted.)
 resource "aws_s3_bucket_versioning" "cybersec" {
   bucket = aws_s3_bucket.cybersec.id
   versioning_configuration {
-    status = "Suspended"
+    status = "Enabled"
   }
 }
 

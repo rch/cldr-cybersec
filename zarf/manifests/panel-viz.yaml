@@ -32,10 +32,12 @@ metadata:
     app: otel-navigator
     app.kubernetes.io/managed-by: zarf
 data:
-  # S3 bucket containing OTEL data
+  # S3 bucket containing OTEL data — provided at deploy time (ZARF_VAR_S3_BUCKET),
+  # never hardcoded; in air-gap the operator supplies it via --set S3_BUCKET=...
   S3_BUCKET: "###ZARF_VAR_S3_BUCKET###"
-  # Path to OTEL span data (Parquet files)
-  OTEL_DATA_PATH: "s3://###ZARF_VAR_S3_BUCKET###/otel-minimal/"
+  # Fallback base only. The app discovers the active dataset from
+  # <bucket>/_active_dataset.json — the dataset name (e.g. otel-1t) is NOT baked in here.
+  OTEL_DATA_PATH: "s3://###ZARF_VAR_S3_BUCKET###/"
   # AWS region for S3 access
   AWS_REGION: "###ZARF_VAR_S3_REGION###"
 ---
