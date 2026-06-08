@@ -1,9 +1,10 @@
 from google.protobuf import timestamp_pb2 as _timestamp_pb2
 from google.protobuf import empty_pb2 as _empty_pb2
 from google.protobuf.internal import containers as _containers
+from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -231,3 +232,166 @@ class SubscribeRequest(_message.Message):
     replay_history: bool
     replay_limit: int
     def __init__(self, session_id: _Optional[str] = ..., replay_history: bool = ..., replay_limit: _Optional[int] = ...) -> None: ...
+
+class ClientFrame(_message.Message):
+    __slots__ = ("session_id", "turn_id", "prompt", "permission_response", "fs_response", "cancel")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    TURN_ID_FIELD_NUMBER: _ClassVar[int]
+    PROMPT_FIELD_NUMBER: _ClassVar[int]
+    PERMISSION_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    FS_RESPONSE_FIELD_NUMBER: _ClassVar[int]
+    CANCEL_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    turn_id: str
+    prompt: PromptInput
+    permission_response: PermissionResponse
+    fs_response: FsResponse
+    cancel: CancelTurn
+    def __init__(self, session_id: _Optional[str] = ..., turn_id: _Optional[str] = ..., prompt: _Optional[_Union[PromptInput, _Mapping]] = ..., permission_response: _Optional[_Union[PermissionResponse, _Mapping]] = ..., fs_response: _Optional[_Union[FsResponse, _Mapping]] = ..., cancel: _Optional[_Union[CancelTurn, _Mapping]] = ...) -> None: ...
+
+class PromptInput(_message.Message):
+    __slots__ = ("text", "context")
+    class ContextEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    CONTEXT_FIELD_NUMBER: _ClassVar[int]
+    text: str
+    context: _containers.ScalarMap[str, str]
+    def __init__(self, text: _Optional[str] = ..., context: _Optional[_Mapping[str, str]] = ...) -> None: ...
+
+class CancelTurn(_message.Message):
+    __slots__ = ("reason",)
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    reason: str
+    def __init__(self, reason: _Optional[str] = ...) -> None: ...
+
+class PermissionResponse(_message.Message):
+    __slots__ = ("request_id", "outcome")
+    class Outcome(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+        __slots__ = ()
+        DENY: _ClassVar[PermissionResponse.Outcome]
+        ALLOW_ONCE: _ClassVar[PermissionResponse.Outcome]
+        ALLOW_ALWAYS: _ClassVar[PermissionResponse.Outcome]
+        CANCELLED: _ClassVar[PermissionResponse.Outcome]
+    DENY: PermissionResponse.Outcome
+    ALLOW_ONCE: PermissionResponse.Outcome
+    ALLOW_ALWAYS: PermissionResponse.Outcome
+    CANCELLED: PermissionResponse.Outcome
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    OUTCOME_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    outcome: PermissionResponse.Outcome
+    def __init__(self, request_id: _Optional[str] = ..., outcome: _Optional[_Union[PermissionResponse.Outcome, str]] = ...) -> None: ...
+
+class FsResponse(_message.Message):
+    __slots__ = ("request_id", "ok", "content", "error")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    OK_FIELD_NUMBER: _ClassVar[int]
+    CONTENT_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    ok: bool
+    content: str
+    error: str
+    def __init__(self, request_id: _Optional[str] = ..., ok: bool = ..., content: _Optional[str] = ..., error: _Optional[str] = ...) -> None: ...
+
+class AgentFrame(_message.Message):
+    __slots__ = ("session_id", "turn_id", "timestamp_ms", "assistant_chunk", "tool_call", "tool_call_update", "permission_request", "fs_request", "turn_complete", "error")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    TURN_ID_FIELD_NUMBER: _ClassVar[int]
+    TIMESTAMP_MS_FIELD_NUMBER: _ClassVar[int]
+    ASSISTANT_CHUNK_FIELD_NUMBER: _ClassVar[int]
+    TOOL_CALL_FIELD_NUMBER: _ClassVar[int]
+    TOOL_CALL_UPDATE_FIELD_NUMBER: _ClassVar[int]
+    PERMISSION_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    FS_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    TURN_COMPLETE_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    turn_id: str
+    timestamp_ms: int
+    assistant_chunk: AssistantChunk
+    tool_call: ToolCall
+    tool_call_update: ToolCallUpdate
+    permission_request: PermissionRequest
+    fs_request: FsRequest
+    turn_complete: TurnComplete
+    error: ErrorOutput
+    def __init__(self, session_id: _Optional[str] = ..., turn_id: _Optional[str] = ..., timestamp_ms: _Optional[int] = ..., assistant_chunk: _Optional[_Union[AssistantChunk, _Mapping]] = ..., tool_call: _Optional[_Union[ToolCall, _Mapping]] = ..., tool_call_update: _Optional[_Union[ToolCallUpdate, _Mapping]] = ..., permission_request: _Optional[_Union[PermissionRequest, _Mapping]] = ..., fs_request: _Optional[_Union[FsRequest, _Mapping]] = ..., turn_complete: _Optional[_Union[TurnComplete, _Mapping]] = ..., error: _Optional[_Union[ErrorOutput, _Mapping]] = ...) -> None: ...
+
+class AssistantChunk(_message.Message):
+    __slots__ = ("text", "thinking")
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    THINKING_FIELD_NUMBER: _ClassVar[int]
+    text: str
+    thinking: bool
+    def __init__(self, text: _Optional[str] = ..., thinking: bool = ...) -> None: ...
+
+class ToolCall(_message.Message):
+    __slots__ = ("tool_call_id", "title", "kind", "raw_input")
+    TOOL_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    TITLE_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    RAW_INPUT_FIELD_NUMBER: _ClassVar[int]
+    tool_call_id: str
+    title: str
+    kind: str
+    raw_input: str
+    def __init__(self, tool_call_id: _Optional[str] = ..., title: _Optional[str] = ..., kind: _Optional[str] = ..., raw_input: _Optional[str] = ...) -> None: ...
+
+class ToolCallUpdate(_message.Message):
+    __slots__ = ("tool_call_id", "status", "content_delta")
+    TOOL_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    CONTENT_DELTA_FIELD_NUMBER: _ClassVar[int]
+    tool_call_id: str
+    status: str
+    content_delta: str
+    def __init__(self, tool_call_id: _Optional[str] = ..., status: _Optional[str] = ..., content_delta: _Optional[str] = ...) -> None: ...
+
+class PermissionRequest(_message.Message):
+    __slots__ = ("request_id", "tool_call_id", "title", "kind", "options")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    TOOL_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    TITLE_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    OPTIONS_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    tool_call_id: str
+    title: str
+    kind: str
+    options: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, request_id: _Optional[str] = ..., tool_call_id: _Optional[str] = ..., title: _Optional[str] = ..., kind: _Optional[str] = ..., options: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class FsRequest(_message.Message):
+    __slots__ = ("request_id", "op", "path", "content")
+    class Op(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+        __slots__ = ()
+        READ: _ClassVar[FsRequest.Op]
+        WRITE: _ClassVar[FsRequest.Op]
+    READ: FsRequest.Op
+    WRITE: FsRequest.Op
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    OP_FIELD_NUMBER: _ClassVar[int]
+    PATH_FIELD_NUMBER: _ClassVar[int]
+    CONTENT_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    op: FsRequest.Op
+    path: str
+    content: str
+    def __init__(self, request_id: _Optional[str] = ..., op: _Optional[_Union[FsRequest.Op, str]] = ..., path: _Optional[str] = ..., content: _Optional[str] = ...) -> None: ...
+
+class TurnComplete(_message.Message):
+    __slots__ = ("status", "summary", "duration_ms")
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    SUMMARY_FIELD_NUMBER: _ClassVar[int]
+    DURATION_MS_FIELD_NUMBER: _ClassVar[int]
+    status: str
+    summary: str
+    duration_ms: int
+    def __init__(self, status: _Optional[str] = ..., summary: _Optional[str] = ..., duration_ms: _Optional[int] = ...) -> None: ...

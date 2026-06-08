@@ -63,6 +63,22 @@ COPY cybersec/__init__.py /app/cybersec/__init__.py
 COPY cybersec/engine/ /app/cybersec/engine/
 COPY cybersec/pty_proxy/ /app/cybersec/pty_proxy/
 
+# HOCON config + loader for runtime config (HOCON-at-runtime). The configMap-
+# injected env is the ${?ENV} override layer; secrets are NOT in these files.
+# pyhocon is a SEPARATE layer so the heavy requirements-airgap layer stays cached.
+COPY cybersec/config/ /app/cybersec/config/
+COPY config/ /app/config/
+RUN pip install --no-cache-dir pyhocon
+
+# Optional agent extra (ACP CLIENT). Default AGENT_BACKEND=null imports none of
+# these (lazy), so a slimmer no-agent image may drop these layers entirely.
+COPY zarf/images/requirements-agent.txt /tmp/requirements-agent.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-agent.txt && rm /tmp/requirements-agent.txt
+# mistral-vibe (the vibe-acp agent binary) — best-effort so an unverified package
+# name cannot break the build; the engine still serves the deterministic REPL.
+RUN pip install --no-cache-dir mistral-vibe \
+    || echo "[warn] mistral-vibe unavailable; provision a vibe-acp ACP agent separately to enable AGENT_BACKEND=acp"
+
 # Download ghostty-web for air-gap terminal (baked into image)
 # Extracts all dist/ files: ghostty-web.js, ghostty-vt.wasm, and Vite shims
 ARG GHOSTTY_WEB_VERSION=0.4.0

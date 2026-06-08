@@ -40,6 +40,7 @@
     grpcurl
     imagemagick
     jq
+    just
     k3d
     kubectl
     kubernetes-helm
@@ -2711,15 +2712,20 @@ asyncio.run(main())
       # x86_64 EC2 (m6i/r6i). On Apple Silicon hosts we must force linux/amd64
       # via Rosetta — building for the host arch produces an arm64 image with
       # libstdc++/wheel incompatibilities and an undeployable artifact.
+      # Build BOTH the plain tag AND the localhost:5555/ tag that zarf.yaml +
+      # the manifests reference, so `zarf package create` bundles THIS build.
+      # Previously only cybersec-dask:<tag> was built, leaving the localhost:5555/
+      # tag stale → the package silently shipped the OLD image (2026-06-08 redeploy).
       $BUILDER build \
         --platform linux/amd64 \
-        -t cybersec-dask:2025.2.0 \
+        -t cybersec-dask:2025.2.1 \
+        -t localhost:5555/cybersec-dask:2025.2.1 \
         -f zarf/images/Dockerfile.cybersec-dask \
         --build-arg BASE_IMAGE=ghcr.io/dask/dask:2025.2.0 \
         .
 
       if [ $? -eq 0 ]; then
-        log_success "Image built: cybersec-dask:2025.2.0"
+        log_success "Image built: cybersec-dask:2025.2.1 (+ localhost:5555/ tag)"
         echo ""
         echo "Next: devenv tasks run zarf:package"
       else
@@ -2734,9 +2740,9 @@ asyncio.run(main())
 
       # Check if custom image exists
       if command -v podman &>/dev/null; then
-        IMG=$(podman images -q cybersec-dask:2025.2.0 2>/dev/null)
+        IMG=$(podman images -q cybersec-dask:2025.2.1 2>/dev/null)
       elif command -v docker &>/dev/null; then
-        IMG=$(docker images -q cybersec-dask:2025.2.0 2>/dev/null)
+        IMG=$(docker images -q cybersec-dask:2025.2.1 2>/dev/null)
       fi
 
       if [ -z "$IMG" ]; then

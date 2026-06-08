@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -17,6 +18,13 @@ from cybersec.engine.commands.param import handle_set_param
 from cybersec.engine.commands.dataset import handle_load_dataset
 from cybersec.engine.commands.query import handle_query
 from cybersec.engine.commands.export import handle_export
+from cybersec.engine.agent import (
+    make_agent_session,
+    AgentSession,
+    CancelToken,
+    ClientCallbacks,
+    agent_frame,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +53,14 @@ Examples:
 class NavigatorEngineServicer(navigator_pb2_grpc.NavigatorEngineServicer):
     """gRPC servicer that dispatches commands to handlers."""
 
-    def __init__(self, dask_backend: DaskBackend | None = None):
+    def __init__(self, dask_backend: DaskBackend | None = None,
+                 agent: "AgentSession | None" = None):
         self._broadcast = BroadcastQueue()
         self._dask = dask_backend or DaskBackend()
         self._active_commands: dict[str, bool] = {}  # command_id → cancelled
+        # OPTIONAL agent backend. Defaults to NullAgentSession (off) — the
+        # deterministic REPL is unaffected and imports no ACP code.
+        self._agent = agent if agent is not None else make_agent_session()
 
     async def Execute(self, request: pb.CommandRequest, context: grpc.aio.ServicerContext):
         """Execute a command and stream EngineEvents back."""
@@ -73,6 +85,8 @@ class NavigatorEngineServicer(navigator_pb2_grpc.NavigatorEngineServicer):
                 handler = self._handle_status(command_id)
             elif verb == "help":
                 handler = self._handle_help(command_id)
+            elif verb in ("ask", "/ai"):
+                handler = self._handle_agent(command_id, _strip_prompt(request.text))
             else:
                 handler = self._handle_unknown(command_id, request.text)
 
@@ -135,6 +149,63 @@ class NavigatorEngineServicer(navigator_pb2_grpc.NavigatorEngineServicer):
             except Exception:
                 break
 
+    async def AgentSession(self, request_iterator, context: grpc.aio.ServicerContext):
+        """Federated ACP agent session (bidirectional). Reads the opening prompt
+        ClientFrame, runs the agent turn, and streams AgentFrames. Subsequent
+        ClientFrames (cancel / permission_response / fs_response) are drained by a
+        background task. With the default null backend this yields a single
+        turn_complete{status="disabled"} and returns — the deterministic REPL is
+        never affected."""
+        session_id = ""
+        turn_id = ""
+        prompt_text = None
+        async for cf in request_iterator:
+            session_id = cf.session_id or session_id
+            turn_id = cf.turn_id or turn_id
+            if cf.WhichOneof("frame") == "prompt":
+                prompt_text = cf.prompt.text
+                break
+        if prompt_text is None:
+            return  # client closed without sending a prompt
+
+        tid = turn_id or str(uuid.uuid4())[:8]
+        self._active_commands[tid] = False
+        cancel = CancelToken(is_cancelled=lambda: self._active_commands.get(tid, False))
+        callbacks = ClientCallbacks()  # v1: engine-side policy (P3); null ignores
+
+        async def _drain():
+            try:
+                async for cf in request_iterator:
+                    if cf.WhichOneof("frame") == "cancel":
+                        self._active_commands[tid] = True
+                    # permission_response / fs_response wire to callbacks in P3
+            except Exception:
+                pass
+
+        drain_task = asyncio.create_task(_drain())
+        try:
+            async for af in self._agent.run_turn(
+                prompt_text, turn_id=tid, client_callbacks=callbacks, cancel_token=cancel,
+            ):
+                af.session_id = session_id
+                yield af
+        except Exception as e:
+            logger.warning("AgentSession turn failed: %s", e)
+            yield agent_frame(tid, error=pb.ErrorOutput(
+                message=f"agent error: {e}", code="AGENT_ERROR",
+                suggestion="the model endpoint may be unavailable"))
+            yield agent_frame(tid, turn_complete=pb.TurnComplete(status="error"))
+        finally:
+            drain_task.cancel()
+            self._active_commands.pop(tid, None)
+
+    async def aclose(self) -> None:
+        """Release the agent backend (subprocess, channels). Idempotent."""
+        try:
+            await self._agent.aclose()
+        except Exception:
+            logger.debug("agent aclose error", exc_info=True)
+
     # ── Built-in command handlers ──────────────────────────────────────
 
     async def _handle_status(self, command_id: str):
@@ -175,6 +246,32 @@ class NavigatorEngineServicer(navigator_pb2_grpc.NavigatorEngineServicer):
         ))
         yield _event(command_id, command_complete=pb.CommandComplete(status="error"))
 
+    async def _handle_agent(self, command_id: str, prompt: str):
+        """Run the OPTIONAL agent and adapt its AgentFrames to EngineEvents so it
+        streams over the EXISTING Execute server-stream (zero client change). With
+        the default null backend this prints the friendly 'agent disabled' line."""
+        prompt = (prompt or "").strip()
+        if not prompt:
+            yield _event(command_id, error=pb.ErrorOutput(
+                message="usage: ask <question>", code="AGENT_USAGE",
+                suggestion="e.g. ask which spans had errors in the last hour"))
+            yield _event(command_id, command_complete=pb.CommandComplete(status="error"))
+            return
+        cancel = CancelToken(is_cancelled=lambda: self._active_commands.get(command_id, False))
+        callbacks = ClientCallbacks()
+        try:
+            async for af in self._agent.run_turn(
+                prompt, turn_id=command_id, client_callbacks=callbacks, cancel_token=cancel,
+            ):
+                for ev in _agentframe_to_events(af, command_id):
+                    yield ev
+        except Exception as e:
+            logger.warning("agent turn failed: %s", e)
+            yield _event(command_id, error=pb.ErrorOutput(
+                message=f"agent error: {e}", code="AGENT_ERROR",
+                suggestion="the model endpoint may be unavailable"))
+            yield _event(command_id, command_complete=pb.CommandComplete(status="error"))
+
 
 def _event(command_id: str, **kwargs) -> pb.EngineEvent:
     return pb.EngineEvent(
@@ -183,3 +280,43 @@ def _event(command_id: str, **kwargs) -> pb.EngineEvent:
         timestamp_ms=int(time.time() * 1000),
         **kwargs,
     )
+
+
+def _strip_prompt(text: str) -> str:
+    """Drop the leading verb (``ask`` / ``/ai``) and return the remaining prompt."""
+    parts = text.strip().split(None, 1)
+    return parts[1] if len(parts) > 1 else ""
+
+
+def _agentframe_to_events(af: pb.AgentFrame, command_id: str) -> list:
+    """Adapt an AgentFrame to EngineEvent(s) for the Execute-adapter path, so the
+    agent streams over the existing server-stream before the native AgentSession
+    RPC client exists. Maps onto the EngineEvent oneof the REPL already renders."""
+    which = af.WhichOneof("frame")
+    out = []
+    if which == "assistant_chunk":
+        ac = af.assistant_chunk
+        out.append(_event(command_id, text_output=pb.TextOutput(
+            text=ac.text, style="dim" if ac.thinking else "")))
+    elif which == "tool_call":
+        out.append(_event(command_id, text_output=pb.TextOutput(
+            text=f"⚙ {af.tool_call.title}\n", style="dim")))
+    elif which == "tool_call_update":
+        if af.tool_call_update.content_delta:
+            out.append(_event(command_id, text_output=pb.TextOutput(
+                text=af.tool_call_update.content_delta, style="dim")))
+    elif which == "error":
+        out.append(_event(command_id, error=af.error))
+    elif which in ("permission_request", "fs_request"):
+        title = (af.permission_request.title if which == "permission_request"
+                 else af.fs_request.path)
+        out.append(_event(command_id, text_output=pb.TextOutput(text=f"… {title}\n", style="dim")))
+    elif which == "turn_complete":
+        tc = af.turn_complete
+        if tc.summary:
+            style = "info" if tc.status in ("ok", "disabled") else "warning"
+            out.append(_event(command_id, text_output=pb.TextOutput(text=tc.summary + "\n", style=style)))
+        out.append(_event(command_id, command_complete=pb.CommandComplete(
+            status=("ok" if tc.status == "disabled" else tc.status),
+            duration_ms=tc.duration_ms)))
+    return out

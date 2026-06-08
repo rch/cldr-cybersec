@@ -1,0 +1,22 @@
+# OPTIONAL agent extra for the cybersec-dask engine image.
+#
+# Installed so the OPTIONAL ACP agent backend (AGENT_BACKEND=acp) can run. The
+# DEFAULT (AGENT_BACKEND=null) imports NONE of these (lazy imports in
+# cybersec/engine/agent/acp.py), so a slimmer no-agent image may omit this file
+# entirely and the engine still comes up + serves the deterministic REPL.
+#
+# Model WEIGHTS are NOT here — they are fetched externally (HuggingFace / Cloudera
+# model registry) at deploy time and are excluded from the Zarf package + SBOM.
+
+# Agent Client Protocol client SDK (vendor-neutral, stdio JSON-RPC). Validated
+# against 0.10.1; API used: spawn_agent_process / ClientSideConnection.
+# {initialize,new_session,prompt} + acp.Client callbacks.
+agent-client-protocol>=0.10,<1.0.0
+
+# HTTP client the agent uses to reach the local model endpoint.
+httpx>=0.27.0,<1.0.0
+
+# NOTE: mistral-vibe (the `vibe-acp` ACP agent entrypoint, Apache-2.0, httpx-only)
+# is installed BEST-EFFORT in the Dockerfile (its exact upstream package name is
+# unverified) so a bad pin can't break the image build. The ACP CLIENT side above
+# is what the engine needs; any vibe-acp-compatible ACP agent works.

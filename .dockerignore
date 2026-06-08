@@ -1,0 +1,36 @@
+# Build-context exclusions for the cybersec-dask image.
+# The Dockerfile (zarf/images/Dockerfile.cybersec-dask) only needs cybersec/,
+# config/, and zarf/images/. Excluding the heavy/irrelevant trees keeps the
+# build context tiny (tens of MB instead of many GB) so `podman build` is fast.
+.git
+.gitmodules
+.devenv
+.direnv
+.venv
+venv
+# JVM toolkit submodules (Flink/Iceberg/NiFi/Polaris) — not used by the Python image
+thirdparty
+flink-cyber
+# Infra, docs, prior build artifacts
+infra
+docs
+build
+node_modules
+zarf/cybersec-dask
+# Large / irrelevant files
+*.png
+*.jpg
+*.pem
+*.tar
+*.tar.gz
+*.tar.zst
+*.json.bak
+# Python + tool caches
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.cybersec
+.envrc

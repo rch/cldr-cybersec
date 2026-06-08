@@ -57,6 +57,21 @@ variables:
     default: ""
     sensitive: true
 
+  # Optional AI agent (ACP) — OFF by default; the deterministic terminal works
+  # with no model. Set AGENT_BACKEND=acp + AGENT_MODEL_BASE_URL to enable.
+  - name: AGENT_BACKEND
+    description: Agent backend — "null" (off) or "acp"
+    default: "null"
+  - name: AGENT_ACP_COMMAND
+    description: Command that launches the ACP agent subprocess
+    default: "vibe-acp"
+  - name: AGENT_MODEL_BASE_URL
+    description: OpenAI-compatible model endpoint (llama.cpp / vLLM)
+    default: ""
+  - name: AGENT_MODEL
+    description: Model name the agent requests
+    default: "mistral"
+
 components:
   # ===========================================================================
   # Storage Provisioner - OPT-IN (dynamic provisioning only)
@@ -100,7 +115,7 @@ components:
     images:
       # Custom Dask image with pre-baked Python dependencies (Panel, HoloViews, etc.)
       # Note: Use localhost:5555 for local builds, will be rewritten by Zarf during deploy
-      - localhost:5555/cybersec-dask:2025.2.0
+      - localhost:5555/cybersec-dask:2025.2.1
       # Dask Kubernetes Operator
       - ghcr.io/dask/dask-kubernetes-operator:2024.1.0
 
@@ -199,7 +214,7 @@ components:
       - quay.io/jupyterhub/k8s-hub:4.0.0
       - quay.io/jupyterhub/configurable-http-proxy:4.5.5
       # User notebook environment uses the custom cybersec-dask image
-      - localhost:5555/cybersec-dask:2025.2.0
+      - localhost:5555/cybersec-dask:2025.2.1
     charts:
       - name: jupyterhub
         namespace: jupyterhub

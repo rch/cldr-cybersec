@@ -15,13 +15,16 @@ import grpc
 
 from cybersec.engine.generated import navigator_pb2_grpc
 from cybersec.engine.service import NavigatorEngineServicer
+from cybersec.engine.agent.authz import AuthzInterceptor
 
 logger = logging.getLogger(__name__)
 
 
 async def serve(port: int = 50051) -> None:
     """Start the gRPC server."""
-    server = grpc.aio.server()
+    # The authz interceptor is scoped to ONLY the agent RPC (the Atlas/Ranger
+    # seam); Execute/Status/Subscribe/Cancel pass through untouched.
+    server = grpc.aio.server(interceptors=[AuthzInterceptor()])
     servicer = NavigatorEngineServicer()
     navigator_pb2_grpc.add_NavigatorEngineServicer_to_server(servicer, server)
     listen_addr = f"[::]:{port}"
@@ -44,6 +47,7 @@ async def serve(port: int = 50051) -> None:
     await stop_event.wait()
     logger.info("Shutting down gracefully (5s grace)...")
     await server.stop(grace=5)
+    await servicer.aclose()
     logger.info("Server stopped.")
 
 

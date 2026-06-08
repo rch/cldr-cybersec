@@ -62,6 +62,11 @@ class NavigatorEngineStub(object):
                 request_serializer=navigator__pb2.SubscribeRequest.SerializeToString,
                 response_deserializer=navigator__pb2.EngineEvent.FromString,
                 _registered_method=True)
+        self.AgentSession = channel.stream_stream(
+                '/cybersec.engine.NavigatorEngine/AgentSession',
+                request_serializer=navigator__pb2.ClientFrame.SerializeToString,
+                response_deserializer=navigator__pb2.AgentFrame.FromString,
+                _registered_method=True)
 
 
 class NavigatorEngineServicer(object):
@@ -98,6 +103,17 @@ class NavigatorEngineServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def AgentSession(self, request_iterator, context):
+        """Federated ACP agent session — OPTIONAL. Bidirectional so the client can
+        answer mid-turn permission/fs callbacks the agent raises (a server stream
+        cannot carry those back). When the engine is built with the null backend
+        (the default), the first AgentFrame is turn_complete{status="disabled"} and
+        the stream closes — the deterministic REPL is never affected.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_NavigatorEngineServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -120,6 +136,11 @@ def add_NavigatorEngineServicer_to_server(servicer, server):
                     servicer.Subscribe,
                     request_deserializer=navigator__pb2.SubscribeRequest.FromString,
                     response_serializer=navigator__pb2.EngineEvent.SerializeToString,
+            ),
+            'AgentSession': grpc.stream_stream_rpc_method_handler(
+                    servicer.AgentSession,
+                    request_deserializer=navigator__pb2.ClientFrame.FromString,
+                    response_serializer=navigator__pb2.AgentFrame.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -232,6 +253,33 @@ class NavigatorEngine(object):
             '/cybersec.engine.NavigatorEngine/Subscribe',
             navigator__pb2.SubscribeRequest.SerializeToString,
             navigator__pb2.EngineEvent.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AgentSession(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_stream(
+            request_iterator,
+            target,
+            '/cybersec.engine.NavigatorEngine/AgentSession',
+            navigator__pb2.ClientFrame.SerializeToString,
+            navigator__pb2.AgentFrame.FromString,
             options,
             channel_credentials,
             insecure,

@@ -20,6 +20,13 @@ service NavigatorEngine {
   // Subscribe to engine-initiated events (dataset changes, Dask alerts).
   // Long-lived server stream — one per PTY proxy session.
   rpc Subscribe(SubscribeRequest) returns (stream EngineEvent);
+
+  // Federated ACP agent session — OPTIONAL. Bidirectional so the client can
+  // answer mid-turn permission/fs callbacks the agent raises (a server stream
+  // cannot carry those back). When the engine is built with the null backend
+  // (the default), the first AgentFrame is turn_complete{status="disabled"} and
+  // the stream closes — the deterministic REPL is never affected.
+  rpc AgentSession(stream ClientFrame) returns (stream AgentFrame);
 }
 
 // ─── Command Grammar ────────────────────────────────────────────────────────
@@ -186,4 +193,100 @@ message SubscribeRequest {
   string session_id = 1;
   bool replay_history = 2;      // If true, replay recent events before live stream
   int32 replay_limit = 3;       // Max events to replay (default: 50)
+}
+
+// ─── Agent Federation (OPTIONAL) ──────────────────────────────────────────────
+//
+// Federates an Agent Client Protocol (ACP) agent over gRPC. The engine is the
+// stable internal contract; it bridges this bidirectional gRPC stream to an ACP
+// agent subprocess over stdio. The gRPC boundary is where Cloudera Atlas/Ranger
+// authorization and any distributed-deployment routing attach. OFF by default
+// (null backend) — the deterministic REPL works with no model.
+
+// client → engine
+message ClientFrame {
+  string session_id = 1;
+  string turn_id = 2;                 // correlates a prompt with its callbacks
+  oneof frame {
+    PromptInput prompt = 10;                  // start/continue a turn
+    PermissionResponse permission_response = 11;  // answer a PermissionRequest
+    FsResponse fs_response = 12;                  // answer an FsRequest
+    CancelTurn cancel = 13;                        // mid-turn cancel (Ctrl-C)
+  }
+}
+
+message PromptInput {
+  string text = 1;
+  map<string, string> context = 2;    // optional terminal/session context
+}
+
+message CancelTurn { string reason = 1; }
+
+message PermissionResponse {
+  string request_id = 1;              // echoes PermissionRequest.request_id
+  enum Outcome { DENY = 0; ALLOW_ONCE = 1; ALLOW_ALWAYS = 2; CANCELLED = 3; }
+  Outcome outcome = 2;
+}
+
+message FsResponse {
+  string request_id = 1;              // echoes FsRequest.request_id
+  bool ok = 2;
+  string content = 3;                 // for read; empty on write-ack
+  string error = 4;                   // populated when ok=false
+}
+
+// engine → client
+message AgentFrame {
+  string session_id = 1;
+  string turn_id = 2;
+  int64 timestamp_ms = 3;
+  oneof frame {
+    AssistantChunk assistant_chunk = 10;   // streamed assistant text
+    ToolCall tool_call = 11;               // a tool invocation began
+    ToolCallUpdate tool_call_update = 12;  // status/output of a tool call
+    PermissionRequest permission_request = 13;  // CLIENT must answer (v2)
+    FsRequest fs_request = 14;                   // CLIENT must answer (v2)
+    TurnComplete turn_complete = 15;             // turn ended
+    ErrorOutput error = 16;            // REUSE the existing ErrorOutput message
+  }
+}
+
+message AssistantChunk {
+  string text = 1;
+  bool thinking = 2;                  // true = reasoning trace, render dim
+}
+
+message ToolCall {
+  string tool_call_id = 1;
+  string title = 2;                   // "Read otel-1t/spans"
+  string kind = 3;                    // "read"|"edit"|"execute"|"fetch"|...
+  string raw_input = 4;               // JSON
+}
+
+message ToolCallUpdate {
+  string tool_call_id = 1;
+  string status = 2;                  // "pending"|"in_progress"|"completed"|"failed"
+  string content_delta = 3;           // human-readable output chunk
+}
+
+message PermissionRequest {
+  string request_id = 1;
+  string tool_call_id = 2;
+  string title = 3;                   // "Agent wants to write /sandbox/out.csv"
+  string kind = 4;                    // "read"|"edit"|"execute"|"fetch"
+  repeated string options = 5;        // allowed PermissionResponse.Outcome names
+}
+
+message FsRequest {
+  string request_id = 1;
+  enum Op { READ = 0; WRITE = 1; }
+  Op op = 2;
+  string path = 3;
+  string content = 4;                 // for WRITE
+}
+
+message TurnComplete {
+  string status = 1;                  // "ok"|"error"|"cancelled"|"disabled"
+  string summary = 2;
+  int64 duration_ms = 3;
 }

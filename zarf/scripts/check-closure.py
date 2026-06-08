@@ -149,12 +149,21 @@ def main() -> int:
                 print(f"  [WARN] transport artifact not staged: {name}{hint}")
             transport.append({"file": name, "present": False, "critical": bool(b.get("critical"))})
 
+    # --- 3b. external artifacts (declared for provenance; NOT bundled, NOT gated) ---
+    ext_models = manifest.get("external_artifacts", {}).get("models", [])
+    if ext_models:
+        print(f"  [INFO] {len(ext_models)} external artifact(s) declared — fetched at deploy, "
+              "NOT in package/SBOM:")
+        for m in ext_models:
+            print(f"         - {m.get('name', '?')}: {m.get('role', '')} (source: {m.get('source', '?')})")
+
     # --- 4. emit realized manifest (provenance) ---
     realized = {
         "package": os.path.basename(pkg),
         "size_bytes": size,
         "image_listing_present": bool(listing),
         "transport_artifacts": transport,
+        "external_artifacts": [m.get("name") for m in ext_models],
     }
     Path(pkg + ".closure.json").write_text(json.dumps(realized, indent=2))
 

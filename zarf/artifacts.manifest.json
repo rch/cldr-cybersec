@@ -31,7 +31,7 @@
   "package_images": {
     "_note": "Layer-A images carried INSIDE the Zarf package and pushed to the internal registry during deploy. The CI gate verifies the built .tar.zst declares all of these (Zarf rewrites localhost:5555 refs to the internal registry on deploy).",
     "images": [
-      { "ref": "localhost:5555/cybersec-dask:2025.2.0", "role": "Dask + Panel/HoloViews/Datashader + cybersec app (the ~2 GB image)", "layer": "A", "expensive_push": true },
+      { "ref": "localhost:5555/cybersec-dask:2025.2.1", "role": "Dask + Panel/HoloViews/Datashader + cybersec app (the ~2 GB image)", "layer": "A", "expensive_push": true },
       { "ref": "ghcr.io/dask/dask-kubernetes-operator:2024.1.0", "role": "Dask Kubernetes operator", "layer": "A" },
       { "ref": "quay.io/jupyterhub/k8s-hub:4.0.0", "role": "JupyterHub hub", "layer": "A" },
       { "ref": "quay.io/jupyterhub/configurable-http-proxy:4.5.5", "role": "JupyterHub proxy", "layer": "A" }
@@ -42,6 +42,28 @@
     "items": [
       { "name": "zarf", "version": "v0.70.1", "role": "deploy engine (bundles `zarf tools kubectl`)", "layer": "A" },
       { "name": "zarf-init", "version": "v0.70.1", "file": "zarf-init-amd64-v0.70.1.tar.zst", "role": "registry/agent/injector seed package — REQUIRED for air-gapped `zarf init`; the Layer-A artifact partial procedures most often lack", "critical": true, "layer": "A", "source": "https://github.com/zarf-dev/zarf/releases/download/v0.70.1/zarf-init-amd64-v0.70.1.tar.zst" }
+    ]
+  },
+  "external_artifacts": {
+    "_note": [
+      "Layer-A LOGICAL artifacts the air-gap deployment MAY need but that are fetched",
+      "EXTERNALLY — NOT bundled in the Zarf package, NOT in the SBOM, NOT closure-gated.",
+      "The OPTIONAL AI agent's model weights are downloaded from HuggingFace or the Cloudera",
+      "model registry at provisioning time and served by a local OpenAI-compatible endpoint",
+      "(llama.cpp / vLLM). Declared here for provenance only; the agent is OFF by default and",
+      "the deterministic terminal needs none of this. The agent CLIENT (agent-client-protocol)",
+      "and vibe-acp ride INSIDE the cybersec-dask image, so they are covered by package_images."
+    ],
+    "models": [
+      {
+        "name": "agent-inference-model",
+        "role": "optional ACP agent model weights (e.g. a Devstral/Mistral GGUF or an HF repo)",
+        "source": "huggingface | cloudera-model-registry (operator-provided)",
+        "in_package": false,
+        "in_sbom": false,
+        "required": false,
+        "layer": "external"
+      }
     ]
   },
   "charts": [
