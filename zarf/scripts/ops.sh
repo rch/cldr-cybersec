@@ -87,10 +87,66 @@ do_package() {
   python3 zarf/scripts/check-closure.py "$pkg"
 }
 
+do_redeploy() {
+  # Reliable path: transport the package (skipped if unchanged) + converge apply
+  # (now image-drift-aware, so it rolls the content tag without a forced deploy).
+  # The FAST path (image-delta push to the live registry NodePort + `kubectl set
+  # image`, moving only the ~MB app layer) is the next optimization — see #30.
+  local tag; tag="$(current_tag)"
+  echo "[redeploy] target image tag: ${IMG}:${tag}"
+  local BASTION CP BUCKET REGION
+  pushd infra/aws/tofu >/dev/null
+  BASTION="$(tofu output -raw bastion_public_ip 2>/dev/null || true)"
+  CP="$(tofu output -json control_plane_private_ips 2>/dev/null | jq -r '.[0] // empty' || true)"
+  BUCKET="$(tofu output -raw s3_bucket_name 2>/dev/null || true)"
+  REGION="$(tofu output -json cluster_info 2>/dev/null | jq -r '.region // "us-east-1"' 2>/dev/null || echo us-east-1)"
+  popd >/dev/null
+  [ -n "$BASTION" ] && [ -n "$CP" ] || { echo "[redeploy] cluster not provisioned (no tofu coords)"; exit 1; }
+  local want="${AWS_ACCOUNT:-050330818249}" acct
+  acct="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)"
+  [ "$acct" = "$want" ] || { echo "[redeploy] WRONG ACCOUNT $acct (want $want) — abort"; exit 1; }
+  echo "[redeploy] account=$acct bastion=$BASTION cp=$CP bucket=$BUCKET region=$REGION"
+
+  local SSH_KEY="${SSH_KEY:-$HOME/.ssh/cybersec-dask.pem}" SG="${BASTION_SG:-sg-06ec172a5360ee1c0}"
+  local MYIP; MYIP="$(curl -s --max-time 10 https://checkip.amazonaws.com)/32"
+  trap "aws ec2 revoke-security-group-ingress --group-id $SG --protocol tcp --port 22 --cidr $MYIP >/dev/null 2>&1 && echo '[redeploy][sg] revoked'" EXIT
+  aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "$MYIP" >/dev/null 2>&1 \
+    && echo "[redeploy][sg] authorized $MYIP"
+  sleep 8
+
+  local O=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=25 -o ServerAliveInterval=15 -o ServerAliveCountMax=10 -o GSSAPIAuthentication=no)
+  local PROXY="ssh -i $SSH_KEY -W %h:%p ${O[*]} ec2-user@$BASTION"
+  cp_ssh() { ssh -i "$SSH_KEY" -o ProxyCommand="$PROXY" "${O[@]}" ec2-user@"$CP" "$@"; }
+  local PKG; PKG="$(ls -t zarf/zarf-package-${IMG}-amd64-*.tar.zst 2>/dev/null | head -1)"
+  [ -n "$PKG" ] || { echo "[redeploy] no package — run: just package"; exit 1; }
+  local PN; PN="$(basename "$PKG")"
+
+  scp -i "$SSH_KEY" "${O[@]}" "$SSH_KEY" "ec2-user@$BASTION:/home/ec2-user/.ssh/$(basename "$SSH_KEY")" >/dev/null
+  ssh -i "$SSH_KEY" "${O[@]}" ec2-user@"$BASTION" "chmod 600 ~/.ssh/$(basename "$SSH_KEY")"
+  local lmd5 rmd5
+  lmd5="$( (md5 -q "$PKG" 2>/dev/null || md5sum "$PKG" | cut -d' ' -f1) )"
+  rmd5="$(cp_ssh "md5sum /var/tmp/$PN 2>/dev/null | cut -d' ' -f1" || true)"
+  if [ -n "$rmd5" ] && [ "$lmd5" = "$rmd5" ]; then
+    echo "[redeploy] package already on CP (md5 match) — skipping the 1.3G transport"
+  else
+    echo "[redeploy] transporting package ($(du -h "$PKG"|cut -f1)) laptop->bastion->CP (slow hop)..."
+    scp -i "$SSH_KEY" "${O[@]}" "$PKG" "ec2-user@$BASTION:/var/tmp/$PN"
+    ssh -i "$SSH_KEY" "${O[@]}" ec2-user@"$BASTION" \
+      "scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/$(basename "$SSH_KEY") /var/tmp/$PN ec2-user@$CP:/var/tmp/$PN"
+  fi
+
+  echo "[redeploy] converge apply (drift detect rolls ${tag})..."
+  export S3_ENDPOINT="" S3_BUCKET="$BUCKET" S3_REGION="$REGION"
+  bash zarf/scripts/converge-aws.sh apply
+
+  echo "[redeploy] verify:"
+  cp_ssh 'K="sudo -n /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml -n panel-viz"; $K get pods -o wide | grep -E "navigator-engine|otel-navigator"; echo -n "  image: "; $K get pod -l app=otel-navigator -o jsonpath="{.items[0].spec.containers[0].image}"; echo'
+}
+
 case "${1:-}" in
   tag)      content_tag ;;
   image)    do_image ;;
   package)  do_package ;;
-  redeploy) echo "redeploy: not yet implemented (increment 2 — image-delta push + drift-aware roll)"; exit 2 ;;
+  redeploy) do_redeploy ;;
   *) echo "usage: ops.sh {tag|image|package|redeploy}" >&2; exit 2 ;;
 esac
