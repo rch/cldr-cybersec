@@ -344,6 +344,45 @@ def _rem_workers_capacity(ctx: Ctx) -> Fix:
                            f"reaped {reaped} orphaned/excess worker deployment(s)")
 
 
+# --- image-drift detection (so `apply` rolls a content/tag change) ----------
+# converge's workload detects are otherwise readiness-based, so they no-op on a
+# code change. These compare the RUNNING pod's cybersec-dask tag vs the TARGET tag
+# in artifacts.manifest: a mismatch is drift -> re-deploy. Paired with a per-build
+# tag (content-derived; the build flow's job) this makes a redeploy a single
+# idempotent `converge apply`, retiring the manual forced component deploy.
+
+def _image_tag(ref: str) -> str:
+    """Original tag from a (possibly zarf-rewritten) image ref:
+    '<reg>/cybersec-dask:2025.2.1-zarf-HASH' -> '2025.2.1'; digest-only -> ''."""
+    ref = ref.split("@", 1)[0]
+    last = ref.rsplit("/", 1)[-1]
+    tag = ref.rsplit(":", 1)[-1] if ":" in last else ""
+    return tag.split("-zarf-", 1)[0]
+
+
+def _target_cybersec_tag(ctx: Ctx) -> str:
+    for img in ctx.manifest.get("package_images", {}).get("images", []):
+        if "cybersec-dask" in img.get("ref", ""):
+            return _image_tag(img["ref"])
+    return ""
+
+
+def _image_drift(ctx: Ctx, ns: str, selector: str) -> "str | None":
+    """A drift message if the running cybersec-dask pod isn't on the target tag,
+    else None. Conservative: unknown target / no image -> no drift (never blocks)."""
+    target = _target_cybersec_tag(ctx)
+    if not target:
+        return None
+    for p in ctx.items("pods", ns=ns, selector=selector):
+        for c in p.get("spec", {}).get("containers", []):
+            img = c.get("image", "")
+            if "cybersec-dask" in img:
+                running = _image_tag(img)
+                if running and running != target:
+                    return f"image drift: running {running}, target {target}"
+    return None
+
+
 def _det_otel_navigator(ctx: Ctx) -> Probe:
     pods = ctx.items("pods", ns="panel-viz", selector="app=otel-navigator")
     if not pods:
@@ -353,20 +392,30 @@ def _det_otel_navigator(ctx: Ctx) -> Probe:
     ready, total = ctx.pods_ready("panel-viz", "app=otel-navigator")
     if phase == "Pending":
         return Probe(False, "otel-navigator Pending (capacity?) — needs a node with its memory request free")
+    if ready >= 1:
+        drift = _image_drift(ctx, "panel-viz", "app=otel-navigator")
+        if drift:
+            return Probe(False, f"otel-navigator {drift}")
     return Probe(ready >= 1, f"otel-navigator ready {ready}/{total}")
 
 
 def _rem_otel_navigator(ctx: Ctx) -> Fix:
-    return _zarf_deploy_components(ctx, "panel-viz")
+    # cybersec-images too, so the target image is pushed before the rollout (the
+    # push is idempotent; a tag-drift redeploy needs the new image in the registry).
+    return _zarf_deploy_components(ctx, "cybersec-images,panel-viz")
 
 
 def _det_engine(ctx: Ctx) -> Probe:
     ready, total = ctx.pods_ready("panel-viz", "app=navigator-engine")
+    if ready >= 1:
+        drift = _image_drift(ctx, "panel-viz", "app=navigator-engine")
+        if drift:
+            return Probe(False, f"navigator-engine {drift}")
     return Probe(ready >= 1, f"navigator-engine ready {ready}/{total}")
 
 
 def _rem_engine(ctx: Ctx) -> Fix:
-    return _zarf_deploy_components(ctx, "navigator-engine")
+    return _zarf_deploy_components(ctx, "cybersec-images,navigator-engine")
 
 
 def _det_jupyterhub(ctx: Ctx) -> Probe:
