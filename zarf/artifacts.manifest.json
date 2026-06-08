@@ -10,7 +10,7 @@
   ],
   "package": {
     "name": "cybersec-dask",
-    "version": "1.4.0",
+    "version": "1.5.0",
     "size_budget_bytes": 2147483648,
     "size_warn_bytes": 1879048192,
     "_note": "GitHub release-asset hard limit is 2 GiB (2147483648). Warn at ~1.75 GiB so we slim before hitting it."
@@ -38,10 +38,10 @@
     ]
   },
   "binaries": {
-    "_note": "Carried alongside the package for fully-offline init; pinned to avoid archive-format skew.",
+    "_note": "Carried ALONGSIDE the package for fully-offline init (Layer A; pinned to avoid archive-format skew). Items with a `file` are verified by the closure gate (check-closure.py) as staged for transport; set CLOSURE_REQUIRE_TRANSPORT=1 to make a missing critical one fail a release build.",
     "items": [
       { "name": "zarf", "version": "v0.70.1", "role": "deploy engine (bundles `zarf tools kubectl`)", "layer": "A" },
-      { "name": "zarf-init", "version": "v0.70.1", "file": "zarf-init-amd64-v0.70.1.tar.zst", "role": "registry/injector seed package", "layer": "A" }
+      { "name": "zarf-init", "version": "v0.70.1", "file": "zarf-init-amd64-v0.70.1.tar.zst", "role": "registry/agent/injector seed package — REQUIRED for air-gapped `zarf init`; the Layer-A artifact partial procedures most often lack", "critical": true, "layer": "A", "source": "https://github.com/zarf-dev/zarf/releases/download/v0.70.1/zarf-init-amd64-v0.70.1.tar.zst" }
     ]
   },
   "charts": [

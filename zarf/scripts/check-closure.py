@@ -49,6 +49,29 @@ def declared_images(manifest: dict) -> list[str]:
     return out
 
 
+def declared_transport_files(manifest: dict) -> list[dict]:
+    """Layer-A files carried ALONGSIDE the package (e.g. the zarf-init package) — declared
+    in the `binaries` group with a `file`. They are NOT inside the .tar.zst, so the gate
+    verifies them by PRESENCE in the transport staging area, not by package inspection."""
+    return [b for b in manifest.get("binaries", {}).get("items", []) if b.get("file")]
+
+
+def find_transport_file(name: str, pkg_dir: str) -> "str | None":
+    """Search the likely staging locations for a transport artifact (beside the package,
+    the release build dir, $RELEASE_DIR, the zarf cache, /tmp)."""
+    candidates = [
+        pkg_dir,
+        os.path.join(pkg_dir, "..", "build", "release"),
+        os.environ.get("RELEASE_DIR", ""),
+        os.path.expanduser("~/.zarf-cache"),
+        "/tmp",
+    ]
+    for d in candidates:
+        if d and os.path.isfile(os.path.join(d, name)):
+            return os.path.normpath(os.path.join(d, name))
+    return None
+
+
 def package_images(pkg: str) -> str:
     """Return the package's image listing as text (best-effort across zarf CLI
     forms). We substring-match against it rather than parse a fixed schema."""
@@ -104,11 +127,34 @@ def main() -> int:
             else:
                 failures.append(f"declared image MISSING from package: {ref}")
 
-    # --- 3. emit realized manifest (provenance) ---
+    # --- 3. transport artifacts carried ALONGSIDE the package (the zarf-init package) ---
+    # Layer A, but NOT inside the .tar.zst — verify they're staged for transport. Advisory by
+    # default (they're fetched/staged separately from `zarf package create`); set
+    # CLOSURE_REQUIRE_TRANSPORT=1 for a RELEASE build that must bundle every Layer-A artifact.
+    require_transport = os.environ.get("CLOSURE_REQUIRE_TRANSPORT", "").lower() in ("1", "true", "yes")
+    pkg_dir = os.path.dirname(os.path.abspath(pkg))
+    transport: list[dict] = []
+    for b in declared_transport_files(manifest):
+        name = b["file"]
+        found = find_transport_file(name, pkg_dir)
+        if found:
+            print(f"  [ OK ] transport artifact staged: {name}")
+            transport.append({"file": name, "present": True})
+        else:
+            hint = " — fetch + stage it beside the package (Layer A)" + (
+                f"; source: {b['source']}" if b.get("source") else "")
+            if b.get("critical") and require_transport:
+                failures.append(f"transport artifact NOT staged: {name}{hint}")
+            else:
+                print(f"  [WARN] transport artifact not staged: {name}{hint}")
+            transport.append({"file": name, "present": False, "critical": bool(b.get("critical"))})
+
+    # --- 4. emit realized manifest (provenance) ---
     realized = {
         "package": os.path.basename(pkg),
         "size_bytes": size,
         "image_listing_present": bool(listing),
+        "transport_artifacts": transport,
     }
     Path(pkg + ".closure.json").write_text(json.dumps(realized, indent=2))
 
@@ -116,7 +162,8 @@ def main() -> int:
         print("\n=== CLOSURE GATE FAILED ===")
         for f in failures:
             print(f"  [FAIL] {f}")
-        print("\nFix: ensure every artifacts.manifest.json image is in the build, or slim the bundle.")
+        print("\nFix: ensure every declared image is in the build (or slim the bundle), "
+              "and every Layer-A transport artifact is staged beside the package.")
         return 1
     print("\n=== CLOSURE GATE PASSED — bundle is complete and within budget ===")
     return 0
