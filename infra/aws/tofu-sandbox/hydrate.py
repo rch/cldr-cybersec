@@ -52,7 +52,11 @@ def main() -> int:
         cidr = f"{ip}/32"
 
     if not pkg:
-        pkg = str(root / "zarf" / "zarf-package-cybersec-dask-amd64-1.4.0.tar.zst")
+        cands = sorted(
+            (root / "zarf").glob("zarf-package-cybersec-dask-amd64-*.tar.zst"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        pkg = str(cands[-1]) if cands else str(root / "zarf" / "zarf-package-cybersec-dask-amd64-1.5.0.tar.zst")
     if not init_pkg:
         init_pkg = str(build_dir / f"zarf-init-amd64-{zarf_ver}.tar.zst")
 
