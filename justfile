@@ -72,3 +72,26 @@ sandbox-status:
 # Print the node public IP
 sandbox-ip:
     {{_sb}} ip
+
+# ----------------------------------------------------------------------------
+# cybersec-dask IMAGE / PACKAGE / REDEPLOY — content-tagged, registry-pushed,
+# converge-drift-aware. Replaces the devenv zarf:image / zarf:package tasks; a
+# content-derived tag means every image change is a new tag the drift detect rolls.
+# ----------------------------------------------------------------------------
+_ops := _root / "zarf/scripts/ops.sh"
+
+# Print the content-derived image tag (BASE-<hash of the image build inputs>)
+image-tag:
+    @bash {{_ops}} tag
+
+# Build the image (content tag), bump the tag in the manifests, push to the local registry
+image:
+    bash {{_ops}} image
+
+# Create the Zarf package (pulls the fresh image from the local registry) + closure gate
+package:
+    bash {{_ops}} package
+
+# Redeploy to the live AWS cluster (image-delta push + drift-aware converge roll)
+redeploy:
+    bash {{_ops}} redeploy
