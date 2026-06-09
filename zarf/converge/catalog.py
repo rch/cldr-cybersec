@@ -256,7 +256,40 @@ def _det_registry_running(ctx: Ctx) -> Probe:
     return Probe(ready >= 1, f"zarf-docker-registry ready {ready}/{total}")
 
 
+def _pre_init_cleanup(ctx: Ctx) -> None:
+    """Heal split-brain registry residue that makes ``zarf init`` fail rc=1 forever.
+
+    A partial teardown (or a manual ``kubectl delete ns zarf``) can strand the cluster
+    with the ``zarf`` namespace gone/Terminating while the claimRef registry PV is left
+    bound to a now-dead PVC (``Released``, or still ``Bound`` to a vanished namespace).
+    A Retain PV in that state will NOT rebind to ``zarf init``'s fresh PVC — its claimRef
+    still pins the old PVC — so the PVC hangs Pending, the registry never starts, and
+    init keeps returning rc=1 with no progress (the "still-running registry but namespace
+    absent" symptom).
+
+    Idempotent + CONSERVATION-safe: only clears namespace finalizers and the stale PV
+    binding — it NEVER deletes the PV or its hostPath data, so the pushed images survive
+    and the registry comes back on the same storage."""
+    # 1. zarf ns wedged in Terminating → release it so init can recreate it cleanly.
+    ns = ctx.get("namespace", "zarf")
+    if ns and ns.get("status", {}).get("phase") == "Terminating":
+        _force_finalize_ns(ctx, "zarf")
+    # 2. claimRef registry PV pinned to a dead PVC → clear the stale claimRef so it
+    #    returns to Available and binds the fresh registry PVC (data is retained). Self-
+    #    guards: absent in dynamic-provisioning mode (no such PV), so this is a no-op.
+    pv = ctx.get("pv", "zarf-registry-pv")
+    if pv:
+        phase = pv.get("status", {}).get("phase")
+        if phase in ("Released", "Failed") or (
+                phase == "Bound" and not ctx.exists("namespace", "zarf")):
+            ctx.k(["patch", "pv", "zarf-registry-pv", "--type=merge",
+                   "-p", '{"spec":{"claimRef":null}}'])
+
+
 def _rem_registry_running(ctx: Ctx) -> Fix:
+    # Heal split-brain residue from a partial teardown FIRST, so `zarf init` isn't
+    # retried forever against a Terminating ns / a stranded Released registry PV.
+    _pre_init_cleanup(ctx)
     # If a registry PVC is stuck Pending (nothing to bind to), provide a
     # claimRef-prebound PV (the zarf-init-recovery pattern) and clear the wedged
     # zarf ns, then init. If the PVC instead binds via the default StorageClass,
