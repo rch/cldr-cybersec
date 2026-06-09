@@ -59,9 +59,10 @@ def _force_finalize_ns(ctx: Ctx, ns: str) -> bool:
 
 # S3/deploy variables that are SECRET — delivered via ZARF_VAR_* ENV only (kept off
 # argv / the process table). Everything else (bucket, region, endpoint, replica count)
-# is non-sensitive config and goes on --set, the RELIABLE substitution path. A bare
-# ZARF_VAR_* env did NOT reach the rendered configMap in practice (live S3_BUCKET came
-# out ""), so OTEL_DATA_PATH rendered "s3:///" → runtime "Invalid bucket name 's3:'".
+# is non-sensitive config and goes on --set-variables, the RELIABLE substitution path
+# (--set is its deprecated alias on zarf ≥0.70). A bare ZARF_VAR_* env did NOT reach the
+# rendered configMap in practice (live S3_BUCKET came out ""), so OTEL_DATA_PATH rendered
+# "s3:///" → runtime "Invalid bucket name 's3:'".
 _S3_SECRET_KEYS = {"S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_SESSION_TOKEN"}
 # Components whose manifests template a non-empty S3_BUCKET into a configMap. Deploying
 # them with a blank bucket silently bricks the app at runtime, so we refuse instead.
@@ -80,12 +81,13 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
                    f"MANUAL: refusing to deploy {components} — S3_BUCKET not provided to "
                    "converge (would render OTEL_DATA_PATH=s3:/// → runtime 'Invalid bucket "
                    "name s3:'). Re-run with S3_BUCKET set (export it before converge-aws.sh, "
-                   "or pass --set S3_BUCKET=… / --creds-file).")
+                   "or pass --set-variables S3_BUCKET=… / --creds-file).")
     args = ["package", "deploy", ctx.package_path, "--confirm",
             f"--components={components}", "--retries", "10"]
     if not ctx.registry_pvc_enabled:
-        args.append("--set=REGISTRY_PVC_ENABLED=false")
-    # Non-sensitive vars → --set (reliable); secrets → ZARF_VAR_* env (off argv/ps).
+        args.append("--set-variables=REGISTRY_PVC_ENABLED=false")
+    # Non-sensitive vars → --set-variables (reliable; --set is its deprecated alias on
+    # zarf ≥0.70); secrets → ZARF_VAR_* env (off argv/ps).
     env = {}
     for k, v in ctx.s3.items():
         if not v:
@@ -93,7 +95,7 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
         if k.upper() in _S3_SECRET_KEYS:
             env[f"ZARF_VAR_{k.upper()}"] = v
         else:
-            args.append(f"--set={k.upper()}={v}")
+            args.append(f"--set-variables={k.upper()}={v}")
     r = ctx.zarf(args, env=env)
     return Fix(r.returncode == 0,
                f"zarf deploy {components}: rc={r.returncode}")
