@@ -92,6 +92,10 @@ image:
 package:
     bash {{_ops}} package
 
-# Redeploy to the live AWS cluster (image-delta push + drift-aware converge roll)
+# Redeploy to the live AWS cluster (package transport + drift-aware converge apply)
 redeploy:
     bash {{_ops}} redeploy
+
+# EXPERIMENTAL fast redeploy (image-delta push) — WIP: podman-VM tunnel obstacle; see ops.sh
+redeploy-fast:
+    bash {{_ops}} redeploy-fast
