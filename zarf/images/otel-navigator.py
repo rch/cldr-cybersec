@@ -547,6 +547,9 @@ class SpanExplorer(param.Parameterized):
     # the `switch` command (a ParamUpdate), so a human — or, later, the agent
     # running in the engine — can dynamically swap the visualization.
     active_view = param.Selector(default='explorer', objects=['explorer', 'tap'])
+    # Bumped when the tap view's density grid finishes computing in a background
+    # thread; viz_view depends on it so the spinner swaps for the linked curve.
+    tap_grid_token = param.Integer(default=0)
 
     # State
     phase = param.String(default='Initializing...')
@@ -565,9 +568,10 @@ class SpanExplorer(param.Parameterized):
         self._ddf = None
         # Cached datashader density grid (time-bin × duration-bin counts) for the
         # tap view's instant cross-sections. Keyed by (dataset, ddf identity) so a
-        # dataset reload invalidates it; see _density_grid().
+        # dataset reload invalidates it; see _ensure_grid() (background compute).
         self._grid_cache = None
         self._grid_cache_key = None
+        self._grid_thread = None
         self._poll_thread = None
         self._dataset_thread = None
         self._stop_polling = False
@@ -795,7 +799,7 @@ class SpanExplorer(param.Parameterized):
             sizing_mode='stretch_width',
         )
 
-    @param.depends('active_view', 'ready', 'cmap', 'spread_enabled', 'time_preset')
+    @param.depends('active_view', 'ready', 'cmap', 'spread_enabled', 'time_preset', 'tap_grid_token')
     def viz_view(self):
         """Active visualization — dispatches on active_view, which the engine's
         `switch` command drives via a ParamUpdate. The shared error/loading guards
@@ -860,60 +864,97 @@ class SpanExplorer(param.Parameterized):
             logger.exception("Render failed")
             return _wrap_canvas(pn.pane.Alert(f"Render error: {e}", alert_type='warning'))
 
-    def _density_grid(self):
-        """Materialize a small datashader density grid (time-bins × duration-bins
-        of span counts) for the tap view's cross-sections.
-
-        Computed ONCE per (dataset, ddf) via a single Dask reduction and cached,
-        so (a) the heatmap and every tapped slice come from the SAME datashader
-        aggregation — datashader integration is preserved on both panes — and
-        (b) taps are instant (no per-tap Dask compute). Returns an xarray
-        DataArray with dims (duration_ms, timestamp_s)."""
-        import datashader as ds
-
+    def _ensure_grid(self):
+        """Compute the datashader density grid (time-bins × duration-bins of span
+        counts) in a BACKGROUND thread — never on the Bokeh event loop, where a
+        full-dataset aggregation would freeze the UI (the symptom that made `switch`
+        appear to hang on the old heatmap). One reduction per (dataset, ddf), cached;
+        bumps tap_grid_token on completion so viz_view swaps the spinner for the
+        linked curve. The heatmap and every tapped slice then come from the SAME
+        datashader aggregate, and taps are instant (no per-tap Dask compute)."""
         key = (self.current_dataset, id(self._ddf))
         if self._grid_cache is not None and self._grid_cache_key == key:
-            return self._grid_cache
+            return
+        if self._grid_thread is not None and self._grid_thread.is_alive():
+            return  # already computing
+        ddf = self._ddf
 
-        # 240 × 160 bins ≈ 38k cells — trivially small in memory, smooth to slice.
-        cvs = ds.Canvas(plot_width=240, plot_height=160)
-        agg = cvs.points(self._ddf, 'timestamp_s', 'duration_ms', ds.count())
-        # datashader computes Dask input eagerly, but force materialization if a
-        # lazy (dask-backed) array slips through, so taps never trigger a compute.
-        if hasattr(getattr(agg, 'data', None), 'compute'):
-            agg = agg.compute()
-        self._grid_cache = agg
-        self._grid_cache_key = key
-        return agg
+        def _bg():
+            import datashader as _ds
+            import panel as _pn_bg
+            try:
+                # 240 × 160 bins ≈ 38k cells — trivially small in memory to slice.
+                cvs = _ds.Canvas(plot_width=240, plot_height=160)
+                agg = cvs.points(ddf, 'timestamp_s', 'duration_ms', _ds.count())
+                if hasattr(getattr(agg, 'data', None), 'compute'):
+                    agg = agg.compute()  # materialize off the event loop
+                self._grid_cache = agg
+                self._grid_cache_key = key
+
+                def _bump():
+                    self.tap_grid_token = self.tap_grid_token + 1
+                try:
+                    _pn_bg.state.execute(_bump)  # schedule on the Bokeh loop
+                except Exception:
+                    self.tap_grid_token = self.tap_grid_token + 1
+            except Exception:
+                logger.exception("tap density-grid compute failed")
+
+        self._grid_thread = threading.Thread(target=_bg, daemon=True)
+        self._grid_thread.start()
 
     def _tap_component(self):
         """The "more sophisticated" view (Holoviews Tap stream): a datashaded
-        density heatmap on the left and, on the right, a latency-spectrum curve —
+        density heatmap on the LEFT and, on the RIGHT, a latency-spectrum curve —
         a vertical cross-section of the SAME datashader aggregate at the tapped
         time. Tap a moment in the heatmap → see the distribution of span durations
-        at that moment. (Tapping selects a time column; to instead show a single
-        latency band's volume over time, slice the grid on duration_ms — a
-        one-line change.)"""
+        then. The cross-section grid is computed in a background thread, so the
+        switch is instant: the heatmap + a spinner paint immediately and the linked
+        curve appears once the grid is ready (tap_grid_token bump re-renders).
+        (Tapping selects a time column; to instead show a latency band's volume
+        over time, slice the grid on duration_ms — a one-line change.)"""
         try:
-            points = hv.Points(self._ddf, kdims=['timestamp_s', 'duration_ms']).opts(
-                width=CANVAS_WIDTH, height=CANVAS_HEIGHT,
-            )
+            # Heatmap: lazy rasterize (viewport-driven, NON-blocking), tap-enabled.
+            points = hv.Points(self._ddf, kdims=['timestamp_s', 'duration_ms'])
             rasterized = rasterize(points, aggregator='count', dynamic=True).opts(
                 cmap=self._cmap(),
                 cnorm='eq_hist',
                 colorbar=True,
                 xlabel='Time (Unix seconds)',
                 ylabel='Duration (ms)',
-                title='Span Latency — tap to inspect',
+                title='Span Latency — tap a moment to inspect',
                 tools=['tap', 'hover', 'box_zoom', 'wheel_zoom', 'pan', 'reset'],
                 active_tools=['box_zoom'],
-                width=480, height=CANVAS_HEIGHT,
+                width=480,
+                height=CANVAS_HEIGHT,
             )
-            # The Tap stream must source the EXACT plotted element, so resolve the
-            # heatmap object first (dynspread-wrapped iff spread is on) and tap it.
+            # The Tap stream must source the EXACT plotted element (dynspread-wrapped
+            # iff spread is on), so resolve it before building the stream.
             heatmap = dynspread(rasterized, max_px=3) if self.spread_enabled else rasterized
 
-            agg = self._density_grid()
+            key = (self.current_dataset, id(self._ddf))
+            grid_ready = self._grid_cache is not None and self._grid_cache_key == key
+
+            if not grid_ready:
+                # Background compute; paint the heatmap + a spinner immediately so the
+                # switch is visibly instant (no event-loop block).
+                self._ensure_grid()
+                spinner = pn.Column(
+                    pn.indicators.LoadingSpinner(value=True, size=40, color='primary'),
+                    pn.pane.Markdown('**Computing latency spectrum…**'),
+                    width=320, height=CANVAS_HEIGHT,
+                    styles={'display': 'flex', 'flex-direction': 'column',
+                            'justify-content': 'center', 'align-items': 'center'},
+                )
+                return _wrap_canvas(pn.Row(
+                    pn.pane.HoloViews(heatmap, min_height=CANVAS_HEIGHT),
+                    spinner, sizing_mode='stretch_width', min_height=CANVAS_HEIGHT,
+                ))
+
+            # Grid ready → a single linked HoloViews Layout (heatmap + curve in ONE
+            # pane), so the Tap stream is guaranteed to link them (cross-pane linking
+            # is not relied on). Every tapped slice reads the cached datashader grid.
+            agg = self._grid_cache
             times = agg.coords['timestamp_s'].values
             durs = agg.coords['duration_ms'].values
             x0 = float(times[len(times) // 2]) if len(times) else 0.0
@@ -921,10 +962,10 @@ class SpanExplorer(param.Parameterized):
             def latency_spectrum(x, y):
                 xx = x0 if x is None else x
                 col = agg.sel(timestamp_s=xx, method='nearest')
-                when = datetime.fromtimestamp(float(xx), tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                when = datetime.fromtimestamp(float(xx), tz=timezone.utc).strftime('%H:%M:%S')
                 return hv.Curve((durs, col.values), kdims='Duration (ms)', vdims='Span count').opts(
                     framewise=True,
-                    width=300, height=CANVAS_HEIGHT,
+                    width=320, height=CANVAS_HEIGHT,
                     color='#0072B5',
                     title=f'Latency spectrum @ {when} UTC',
                     tools=['hover'],
@@ -933,15 +974,11 @@ class SpanExplorer(param.Parameterized):
 
             tap = hv.streams.Tap(source=heatmap, x=x0)
             spectrum = hv.DynamicMap(latency_spectrum, streams=[tap])
-
-            return _wrap_canvas(
-                pn.pane.HoloViews(
-                    heatmap + spectrum,
-                    sizing_mode='stretch_width',
-                    min_height=CANVAS_HEIGHT,
-                    height=CANVAS_HEIGHT,
-                )
-            )
+            return _wrap_canvas(pn.pane.HoloViews(
+                heatmap + spectrum,
+                sizing_mode='stretch_width',
+                min_height=CANVAS_HEIGHT,
+            ))
 
         except Exception as e:
             logger.exception("Tap view render failed")
