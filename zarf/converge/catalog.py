@@ -34,7 +34,7 @@ spec:
     storage: {size}
   accessModes: [ReadWriteOnce]
   persistentVolumeReclaimPolicy: Retain
-  storageClassName: ""
+  storageClassName: "{sc}"
   hostPath:
     path: /var/lib/zarf-registry
     type: DirectoryOrCreate
@@ -42,6 +42,13 @@ spec:
     namespace: zarf
     name: zarf-docker-registry
 """
+
+
+def _registry_pv_yaml(ctx: Ctx, storage_class: str = "") -> str:
+    """The static claimRef hostPath registry PV, with storageClassName set to match the
+    class the registry PVC requests ("" by default — the resilient no-default-SC path).
+    Setting it to the PVC's actual class lets the PV bind statically with NO provisioner."""
+    return REGISTRY_PV_YAML.format(size=ctx.registry_pv_size, sc=storage_class)
 
 
 def _force_finalize_ns(ctx: Ctx, ns: str) -> bool:
@@ -97,8 +104,15 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
         else:
             args.append(f"--set-variables={k.upper()}={v}")
     r = ctx.zarf(args, env=env)
-    return Fix(r.returncode == 0,
-               f"zarf deploy {components}: rc={r.returncode}")
+    if r.returncode == 0:
+        return Fix(True, f"zarf deploy {components}: rc=0")
+    # Surface the actual zarf/Helm error tail, not a bare rc=1 — the deploy failures
+    # (dask-operator/jupyterhub) only showed "rc=1" all afternoon. Last lines tend to
+    # carry the cause (chart timeout, image pull, CRD hook); S3 secrets ride env, not
+    # stdout, so this stays clean.
+    tail = (r.stderr or r.stdout or "").strip().splitlines()[-3:]
+    suffix = f" — {' / '.join(s.strip() for s in tail)}" if tail else ""
+    return Fix(False, f"zarf deploy {components}: rc={r.returncode}{suffix}")
 
 
 def _ensure_default_sc(ctx: Ctx, sc: str = "local-path") -> bool:
@@ -238,7 +252,7 @@ def _rem_registry_pv(ctx: Ctx) -> Fix:
     # Apply the claimRef-prebound hostPath PV so the registry PVC binds with NO default
     # StorageClass. Idempotent; Layer-B (a disposable PV, not a transported artifact).
     # This is the single move that lets the resilient path skip the provisioner entirely.
-    r = ctx.apply_yaml(REGISTRY_PV_YAML.format(size=ctx.registry_pv_size))
+    r = ctx.apply_yaml(_registry_pv_yaml(ctx))
     return Fix(r.returncode == 0,
                f"applied claimRef registry PV ({ctx.registry_pv_size}): rc={r.returncode}")
 
@@ -256,68 +270,137 @@ def _det_registry_running(ctx: Ctx) -> Probe:
     return Probe(ready >= 1, f"zarf-docker-registry ready {ready}/{total}")
 
 
-def _pre_init_cleanup(ctx: Ctx) -> None:
-    """Heal split-brain registry residue that makes ``zarf init`` fail rc=1 forever.
+def _default_storage_classes(ctx: Ctx) -> List[str]:
+    """Names of StorageClasses currently marked cluster-default."""
+    obj = ctx.kjson(["get", "storageclass"]) or {}
+    out = []
+    for sc in obj.get("items", []):
+        ann = sc.get("metadata", {}).get("annotations") or {}
+        if ann.get("storageclass.kubernetes.io/is-default-class") == "true":
+            name = sc.get("metadata", {}).get("name")
+            if name:
+                out.append(name)
+    return out
 
-    A partial teardown (or a manual ``kubectl delete ns zarf``) can strand the cluster
-    with the ``zarf`` namespace gone/Terminating while the claimRef registry PV is left
-    bound to a now-dead PVC (``Released``, or still ``Bound`` to a vanished namespace).
-    A Retain PV in that state will NOT rebind to ``zarf init``'s fresh PVC — its claimRef
-    still pins the old PVC — so the PVC hangs Pending, the registry never starts, and
-    init keeps returning rc=1 with no progress (the "still-running registry but namespace
-    absent" symptom).
 
-    Idempotent + CONSERVATION-safe: only clears namespace finalizers and the stale PV
-    binding — it NEVER deletes the PV or its hostPath data, so the pushed images survive
-    and the registry comes back on the same storage."""
-    # 1. zarf ns wedged in Terminating → release it so init can recreate it cleanly.
+def _undefault_sc(ctx: Ctx, name: str) -> bool:
+    """Strip the default-class annotation from a StorageClass — the inverse of
+    _ensure_default_sc — so a PVC that omits a class falls through to "" instead of
+    waiting on this SC's provisioner."""
+    r = ctx.k(["patch", "storageclass", name, "-p",
+               '{"metadata":{"annotations":'
+               '{"storageclass.kubernetes.io/is-default-class":"false"}}}'])
+    return r.returncode == 0
+
+
+def _pre_init_cleanup(ctx: Ctx) -> List[str]:
+    """Exhaustively unwind every registry/storage state that makes ``zarf init`` loop at
+    rc=1, so a plain init can succeed. Returns the actions taken (for the report).
+    Idempotent + CONSERVATION-safe: force-finalizes namespaces, neutralizes StorageClass
+    capture, and recreates the registry PV OBJECT to match the PVC — it NEVER deletes the
+    PV's hostPath DATA (Retain), so the pushed images survive and the registry rebinds.
+
+    Permutations handled (all surfaced in the field):
+      • zarf ns wedged Terminating                → force-finalize it
+      • a default StorageClass captures the registry PVC into dynamic provisioning whose
+        provisioner is absent/dead in the air-gap (PVC stuck ExternalProvisioning)
+                                                   → un-default it (PVC falls through to "")
+      • the static claimRef PV is stale (Released/Failed, stale claimRef-uid) OR its class
+        no longer matches the registry PVC's class → reset it to match (binds with NO
+        provisioner), conserving the hostPath data
+      • a fresh deploy with no PVC yet            → ensure a "" static PV is present
+    """
+    actions: List[str] = []
+    # A. zarf ns wedged Terminating → release it so init can recreate it cleanly.
     ns = ctx.get("namespace", "zarf")
     if ns and ns.get("status", {}).get("phase") == "Terminating":
-        _force_finalize_ns(ctx, "zarf")
-    # 2. claimRef registry PV pinned to a dead PVC → clear the stale claimRef so it
-    #    returns to Available and binds the fresh registry PVC (data is retained). Self-
-    #    guards: absent in dynamic-provisioning mode (no such PV), so this is a no-op.
+        if _force_finalize_ns(ctx, "zarf"):
+            actions.append("force-finalized Terminating zarf ns")
+
+    # The storage unwind belongs to the RESILIENT path (a static claimRef PV, no
+    # provisioner). Dynamic-provisioning mode deliberately relies on a default SC.
+    if not (ctx.registry_pvc_enabled and not ctx.dynamic_provisioning):
+        return actions
+
+    # B. Neutralize StorageClass capture: a default SC makes the registry PVC wait on a
+    #    provisioner that may be absent in the air-gap (the registry hangs in
+    #    ExternalProvisioning forever). Drop the default annotation so a fresh PVC falls
+    #    through to "" and binds the static PV instead. Idempotent.
+    for sc in _default_storage_classes(ctx):
+        if _undefault_sc(ctx, sc):
+            actions.append(f"un-defaulted StorageClass {sc!r}")
+
+    # C. Ensure the static claimRef hostPath PV exists AND matches whatever storageClass
+    #    the registry PVC requests, so it binds with NO provisioner. The PV's class tracks
+    #    the (possibly wedged) registry PVC's class — "" when fresh/un-defaulted, or the
+    #    class zarf pins. Reset a stale/mis-classed PV (Released/Failed, stale claimRef-uid,
+    #    class drift) but NEVER a healthily Bound one. Deleting the PV OBJECT conserves the
+    #    images: the hostPath (Retain) survives and re-binds.
+    pvc = ctx.get("pvc", "zarf-docker-registry", ns="zarf")
+    want_sc = ((pvc or {}).get("spec", {}) or {}).get("storageClassName") or ""
     pv = ctx.get("pv", "zarf-registry-pv")
-    if pv:
+    if pv is None:
+        ctx.apply_yaml(_registry_pv_yaml(ctx, want_sc))
+        actions.append(f"created static registry PV (storageClass={want_sc!r})")
+    elif pv.get("status", {}).get("phase") != "Bound":
         phase = pv.get("status", {}).get("phase")
-        if phase in ("Released", "Failed") or (
-                phase == "Bound" and not ctx.exists("namespace", "zarf")):
-            ctx.k(["patch", "pv", "zarf-registry-pv", "--type=merge",
-                   "-p", '{"spec":{"claimRef":null}}'])
+        cur_sc = (pv.get("spec", {}) or {}).get("storageClassName") or ""
+        claim = (pv.get("spec", {}) or {}).get("claimRef") or {}
+        if phase in ("Released", "Failed") or claim.get("uid") or cur_sc != want_sc:
+            ctx.k(["delete", "pv", "zarf-registry-pv", "--ignore-not-found"])
+            ctx.apply_yaml(_registry_pv_yaml(ctx, want_sc))
+            actions.append(f"reset static registry PV → storageClass={want_sc!r} "
+                           f"(was phase={phase} storageClass={cur_sc!r})")
+    return actions
+
+
+def _diagnose_registry(ctx: Ctx) -> str:
+    """Inspect the live registry/storage state so a failed ``zarf init`` reports WHY it
+    failed, not a bare rc=1 — the difference between an afternoon of guessing and a fix."""
+    bits: List[str] = []
+    if not ctx.exists("namespace", "zarf"):
+        bits.append("zarf ns absent (init created nothing or rolled back)")
+    pvc = ctx.get("pvc", "zarf-docker-registry", ns="zarf")
+    if pvc:
+        sc = (pvc.get("spec", {}) or {}).get("storageClassName")
+        sc = "" if sc is None else sc
+        phase = pvc.get("status", {}).get("phase", "?")
+        bits.append(f"registry PVC {phase} storageClass={sc!r}")
+        if phase == "Pending":
+            pv = ctx.get("pv", "zarf-registry-pv")
+            if pv is None:
+                bits.append("no static registry PV present to bind it")
+            else:
+                pvsc = (pv.get("spec", {}) or {}).get("storageClassName") or ""
+                pvp = pv.get("status", {}).get("phase", "?")
+                bits.append(f"static PV {pvp} storageClass={pvsc!r}"
+                            + ("" if pvsc == sc else f" (≠ PVC's {sc!r} → won't bind)"))
+    defs = _default_storage_classes(ctx)
+    if defs:
+        bits.append(f"default StorageClass {defs} present — its PVCs wait on a provisioner "
+                    "that may be absent in the air-gap; the resilient path wants none")
+    if ctx.pod_image_missing("zarf", "app=docker-registry"):
+        bits.append("registry pod cannot pull its image (absent in the closed world)")
+    return "; ".join(bits) or "registry not Ready (inspect `kubectl -n zarf get pvc,pv,pods` + events)"
 
 
 def _rem_registry_running(ctx: Ctx) -> Fix:
-    # Heal split-brain residue from a partial teardown FIRST, so `zarf init` isn't
-    # retried forever against a Terminating ns / a stranded Released registry PV.
-    _pre_init_cleanup(ctx)
-    # If a registry PVC is stuck Pending (nothing to bind to), provide a
-    # claimRef-prebound PV (the zarf-init-recovery pattern) and clear the wedged
-    # zarf ns, then init. If the PVC instead binds via the default StorageClass,
-    # this is a harmless no-op. Layer-B throughout; never touches images.
-    pvcs = ctx.items("pvc", ns="zarf")
-    if any(p.get("status", {}).get("phase") == "Pending" for p in pvcs):
-        # Gentle first: ensure a claimRef-prebound PV exists for the Pending PVC to bind
-        # to (the resilient path; the T0.5.registry-pv invariant normally did this
-        # already — this is defensive). Skip in dynamic-provisioning mode, where the
-        # default StorageClass binds the PVC and a competing claimRef PV would be wrong.
-        if ctx.registry_pvc_enabled and not ctx.dynamic_provisioning:
-            ctx.apply_yaml(REGISTRY_PV_YAML.format(size=ctx.registry_pv_size))
-        _force_finalize_ns(ctx, "zarf")
-        # Escalate: a still-Pending PVC means the ns is wedged from a prior failed
-        # init — delete it for a clean re-init (Phase 2d parity). `zarf init`
-        # recreates everything, so even a racing delete is harmless. The delete can
-        # itself hang on a finalizer, so force-finalize after it.
-        if any(p.get("status", {}).get("phase") == "Pending"
-               for p in ctx.items("pvc", ns="zarf")):
-            ctx.k(["delete", "namespace", "zarf", "--wait=false"])
-            _force_finalize_ns(ctx, "zarf")
+    # Exhaustively unwind the registry/storage state so a plain `zarf init` can succeed,
+    # rather than retrying it forever against a wedged ns / a captured PVC / a mis-classed
+    # PV. Layer-B throughout; never deletes a transported image.
+    actions = _pre_init_cleanup(ctx)
     if not ctx.have_zarf():
         return Fix(False, "MANUAL: zarf init --confirm (zarf binary not available here)")
     args = ["init", "--confirm", f"--set=REGISTRY_PVC_SIZE={ctx.registry_pv_size}"]
     if not ctx.registry_pvc_enabled:
         args.append("--set=REGISTRY_PVC_ENABLED=false")
     r = ctx.zarf(args)
-    return Fix(r.returncode == 0, f"zarf init: rc={r.returncode}")
+    tail = f"  [unwound: {'; '.join(actions)}]" if actions else ""
+    if r.returncode == 0:
+        return Fix(True, f"zarf init: rc=0{tail}")
+    # Precise diagnosis instead of a bare rc=1, so the loop's stall report (or the
+    # operator) knows exactly which state is still unmet.
+    return Fix(False, f"zarf init rc={r.returncode}: {_diagnose_registry(ctx)}{tail}")
 
 
 # --------------------------------------------------------------------------- #
