@@ -37,7 +37,7 @@ spec:
       containers:
         - name: scheduler
           # Image will be rewritten by Zarf to use internal registry
-          image: localhost:5555/cybersec-dask:2025.2.0-8830107cf3
+          image: localhost:5555/cybersec-dask:2025.2.0-e66f38622f
           imagePullPolicy: IfNotPresent
           args:
             - dask-scheduler
@@ -94,7 +94,7 @@ spec:
       containers:
         - name: worker
           # Image will be rewritten by Zarf to use internal registry
-          image: localhost:5555/cybersec-dask:2025.2.0-8830107cf3
+          image: localhost:5555/cybersec-dask:2025.2.0-e66f38622f
           imagePullPolicy: IfNotPresent
           args:
             - dask-worker

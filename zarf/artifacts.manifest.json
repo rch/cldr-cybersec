@@ -31,7 +31,7 @@
   "package_images": {
     "_note": "Layer-A images carried INSIDE the Zarf package and pushed to the internal registry during deploy. The CI gate verifies the built .tar.zst declares all of these (Zarf rewrites localhost:5555 refs to the internal registry on deploy).",
     "images": [
-      { "ref": "localhost:5555/cybersec-dask:2025.2.0-8830107cf3", "role": "Dask + Panel/HoloViews/Datashader + cybersec app (the ~2 GB image)", "layer": "A", "expensive_push": true },
+      { "ref": "localhost:5555/cybersec-dask:2025.2.0-e66f38622f", "role": "Dask + Panel/HoloViews/Datashader + cybersec app (the ~2 GB image)", "layer": "A", "expensive_push": true },
       { "ref": "ghcr.io/dask/dask-kubernetes-operator:2024.1.0", "role": "Dask Kubernetes operator", "layer": "A" },
       { "ref": "quay.io/jupyterhub/k8s-hub:4.0.0", "role": "JupyterHub hub", "layer": "A" },
       { "ref": "quay.io/jupyterhub/configurable-http-proxy:4.5.5", "role": "JupyterHub proxy", "layer": "A" }
