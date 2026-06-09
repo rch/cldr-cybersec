@@ -115,7 +115,7 @@ components:
     images:
       # Custom Dask image with pre-baked Python dependencies (Panel, HoloViews, etc.)
       # Note: Use localhost:5555 for local builds, will be rewritten by Zarf during deploy
-      - localhost:5555/cybersec-dask:2025.2.0-6d9c6f81d1
+      - localhost:5555/cybersec-dask:2025.2.0-8830107cf3
       # Dask Kubernetes Operator
       - ghcr.io/dask/dask-kubernetes-operator:2024.1.0
 
@@ -214,7 +214,7 @@ components:
       - quay.io/jupyterhub/k8s-hub:4.0.0
       - quay.io/jupyterhub/configurable-http-proxy:4.5.5
       # User notebook environment uses the custom cybersec-dask image
-      - localhost:5555/cybersec-dask:2025.2.0-6d9c6f81d1
+      - localhost:5555/cybersec-dask:2025.2.0-8830107cf3
     charts:
       - name: jupyterhub
         namespace: jupyterhub
