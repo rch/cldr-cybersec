@@ -37,6 +37,7 @@ HELP_TEXT = """\
   \x1b[36mstatus\x1b[0m                         Show Dask cluster & dataset status
   \x1b[36mset\x1b[0m <param> <value>             Set a visualization param
       params: cmap, spread_enabled, time_preset
+  \x1b[36mswitch\x1b[0m [tap|explorer]            Toggle the active viz component
   \x1b[36mload\x1b[0m <dataset>                  Load a dataset (e.g. otel-minimal, otel-1t)
   \x1b[36mquery\x1b[0m <expression> [last Xh]    Filter spans (pandas query syntax)
   \x1b[36mexport\x1b[0m <csv|parquet|json> [dst]  Export data to S3
@@ -44,6 +45,7 @@ HELP_TEXT = """\
 
 Examples:
   set cmap viridis
+  switch tap
   load otel-1t
   query duration_ms > 500 last 1h
   export csv
@@ -85,6 +87,8 @@ class NavigatorEngineServicer(navigator_pb2_grpc.NavigatorEngineServicer):
                 handler = self._handle_status(command_id)
             elif verb == "help":
                 handler = self._handle_help(command_id)
+            elif verb == "switch":
+                handler = self._handle_switch(command_id, request.text)
             elif verb in ("ask", "/ai"):
                 handler = self._handle_agent(command_id, _strip_prompt(request.text))
             else:
@@ -237,6 +241,54 @@ class NavigatorEngineServicer(navigator_pb2_grpc.NavigatorEngineServicer):
     async def _handle_help(self, command_id: str):
         yield _event(command_id, text_output=pb.TextOutput(text=HELP_TEXT, style="info"))
         yield _event(command_id, command_complete=pb.CommandComplete(status="ok"))
+
+    # Canonical viz components + the arg aliases `switch` accepts. The empty arg
+    # (bare `switch`) emits the sentinel "toggle" so the FLIP happens per-session
+    # in the browser (Panel's _on_engine_update) — the engine stays stateless,
+    # which is correct when several browsers share one engine. `switch tap` /
+    # `switch explorer` set explicitly. This verb is the engine-driven-viz seam:
+    # the optional agent runs in THIS process (AgentSession), so a future agent
+    # tool-call can drive the exact same ParamUpdate a human's `switch` does.
+    _VIZ_VIEWS = {
+        "": "toggle", "toggle": "toggle",
+        "tap": "tap", "linked": "tap", "latency": "tap", "inspect": "tap",
+        "explorer": "explorer", "explore": "explorer",
+        "heatmap": "explorer", "density": "explorer",
+    }
+    _VIZ_LABEL = {
+        "toggle": "toggled component",
+        "tap": "linked latency-spectrum view (tap the heatmap)",
+        "explorer": "density explorer",
+    }
+
+    async def _handle_switch(self, command_id: str, text: str):
+        """Toggle (or set) the active Panel viz component via a ParamUpdate.
+
+        Drives the SpanExplorer.active_view param through the SAME engine →
+        ParamUpdate → PTY proxy → Panel round-trip that `set cmap` uses; Panel's
+        _on_engine_update applies it (and resolves the "toggle" sentinel)."""
+        t0 = time.monotonic()
+        parts = text.strip().split()
+        arg = parts[1].lower() if len(parts) > 1 else ""
+        value = self._VIZ_VIEWS.get(arg)
+        if value is None:
+            yield _event(command_id, error=pb.ErrorOutput(
+                message=f"Unknown view: {arg}",
+                code="INVALID_VIEW",
+                suggestion="usage: switch [tap|explorer]  (no arg toggles)",
+            ))
+            yield _event(command_id, command_complete=pb.CommandComplete(status="error"))
+            return
+
+        yield _event(command_id, param_update=pb.ParamUpdate(
+            param_name="active_view", value=value, source="engine"))
+        yield _event(command_id, text_output=pb.TextOutput(
+            text=f"viz: {self._VIZ_LABEL[value]}\n", style="success"))
+        yield _event(command_id, command_complete=pb.CommandComplete(
+            status="ok",
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            summary=f"active_view={value}",
+        ))
 
     async def _handle_unknown(self, command_id: str, text: str):
         yield _event(command_id, error=pb.ErrorOutput(

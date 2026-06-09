@@ -517,6 +517,20 @@ class GhosttyTerminal(pn.reactive.ReactiveHTML):
 # Main App
 # -------------------------------------------------------------------------
 
+def _wrap_canvas(content):
+    """Wrap viz content in a fixed-height column so the canvas never collapses."""
+    return pn.Column(
+        content,
+        min_height=CANVAS_HEIGHT,
+        height=CANVAS_HEIGHT,
+        sizing_mode='stretch_width',
+        styles={
+            'min-height': f'{CANVAS_HEIGHT}px',
+            'height': f'{CANVAS_HEIGHT}px',
+        },
+    )
+
+
 class SpanExplorer(param.Parameterized):
     """Auto-loading span explorer with live Dask status and dataset auto-swap."""
 
@@ -527,6 +541,12 @@ class SpanExplorer(param.Parameterized):
     )
     cmap = param.Selector(default='fire', objects=['fire', 'viridis', 'plasma', 'inferno', 'blues'])
     spread_enabled = param.Boolean(default=True)
+    # Which viz component is shown. 'explorer' = the datashaded density heatmap
+    # (the original view). 'tap' = a datashaded heatmap + a tap-linked latency-
+    # spectrum cross-section (Holoviews Tap stream). Driven from the engine via
+    # the `switch` command (a ParamUpdate), so a human — or, later, the agent
+    # running in the engine — can dynamically swap the visualization.
+    active_view = param.Selector(default='explorer', objects=['explorer', 'tap'])
 
     # State
     phase = param.String(default='Initializing...')
@@ -543,6 +563,11 @@ class SpanExplorer(param.Parameterized):
     def __init__(self, **params):
         super().__init__(**params)
         self._ddf = None
+        # Cached datashader density grid (time-bin × duration-bin counts) for the
+        # tap view's instant cross-sections. Keyed by (dataset, ddf identity) so a
+        # dataset reload invalidates it; see _density_grid().
+        self._grid_cache = None
+        self._grid_cache_key = None
         self._poll_thread = None
         self._dataset_thread = None
         self._stop_polling = False
@@ -591,6 +616,16 @@ class SpanExplorer(param.Parameterized):
 
         if not param_name or param_name not in self.param:
             return
+
+        # active_view: the engine sends the sentinel "toggle" (no concrete value)
+        # for a bare `switch`, so the flip resolves HERE — per browser session —
+        # keeping the engine stateless when several browsers share one engine.
+        # An explicit `switch tap`/`switch explorer` sends a concrete view name.
+        if param_name == 'active_view':
+            objs = list(self.param.active_view.objects)
+            if value not in objs:
+                cur = self.active_view
+                value = objs[(objs.index(cur) + 1) % len(objs)] if cur in objs else objs[0]
 
         # Type coercion
         p = self.param[param_name]
@@ -656,6 +691,7 @@ class SpanExplorer(param.Parameterized):
                     _file_list_cache.clear()
                     # Clear cached data to force full reload
                     self._ddf = None
+                    self._grid_cache = None  # tap view's density grid is now stale
                     self.ready = False
                     self.phase = f"Switched to {new_dataset}, reloading..."
                     self.load_data()
@@ -759,32 +795,16 @@ class SpanExplorer(param.Parameterized):
             sizing_mode='stretch_width',
         )
 
-    @param.depends('ready', 'cmap', 'spread_enabled', 'time_preset')
-    def heatmap_view(self):
-        """Heatmap using rasterize(dynamic=True) for native viewport re-rasterization.
-
-        With dynamic=True, HoloViews/Datashader handles viewport-driven
-        re-rasterization natively via Bokeh callbacks. No manual DynamicMap
-        or RangeXY plumbing needed — datashader automatically renders only
-        what's visible in the current viewport.
-        """
-        def wrap_content(content):
-            return pn.Column(
-                content,
-                min_height=CANVAS_HEIGHT,
-                height=CANVAS_HEIGHT,
-                sizing_mode='stretch_width',
-                styles={
-                    'min-height': f'{CANVAS_HEIGHT}px',
-                    'height': f'{CANVAS_HEIGHT}px',
-                },
-            )
-
+    @param.depends('active_view', 'ready', 'cmap', 'spread_enabled', 'time_preset')
+    def viz_view(self):
+        """Active visualization — dispatches on active_view, which the engine's
+        `switch` command drives via a ParamUpdate. The shared error/loading guards
+        live here so both components can assume a ready DataFrame."""
         if self.error:
-            return wrap_content(pn.pane.Alert(f"Error: {self.error}", alert_type='danger'))
+            return _wrap_canvas(pn.pane.Alert(f"Error: {self.error}", alert_type='danger'))
 
         if not self.ready or self._ddf is None:
-            return wrap_content(
+            return _wrap_canvas(
                 pn.Column(
                     pn.indicators.LoadingSpinner(value=True, size=50, color='primary'),
                     pn.pane.Markdown(f"**{self.phase}**", align='center'),
@@ -793,20 +813,28 @@ class SpanExplorer(param.Parameterized):
                 )
             )
 
-        try:
-            cmap_lookup = {
-                'fire': cc.fire, 'viridis': 'viridis',
-                'plasma': 'plasma', 'inferno': 'inferno', 'blues': cc.blues,
-            }
-            selected_cmap = cmap_lookup.get(self.cmap, cc.fire)
-            spread = self.spread_enabled
+        if self.active_view == 'tap':
+            return self._tap_component()
+        return self._explorer_component()
 
+    def _cmap(self):
+        """Resolve the selected colormap name to a colorcet / named map."""
+        return {
+            'fire': cc.fire, 'viridis': 'viridis',
+            'plasma': 'plasma', 'inferno': 'inferno', 'blues': cc.blues,
+        }.get(self.cmap, cc.fire)
+
+    def _explorer_component(self):
+        """The original datashaded density heatmap: rasterize(dynamic=True) for
+        native viewport-driven re-rasterization (no manual DynamicMap / RangeXY —
+        datashader renders only what's visible in the current viewport)."""
+        try:
             points = hv.Points(self._ddf, kdims=['timestamp_s', 'duration_ms']).opts(
                 width=CANVAS_WIDTH, height=CANVAS_HEIGHT,
             )
 
             rasterized = rasterize(points, aggregator='count', dynamic=True).opts(
-                cmap=selected_cmap,
+                cmap=self._cmap(),
                 cnorm='eq_hist',
                 colorbar=True,
                 xlabel='Time (Unix seconds)',
@@ -817,9 +845,9 @@ class SpanExplorer(param.Parameterized):
                 responsive=True,
             )
 
-            result = dynspread(rasterized, max_px=3) if spread else rasterized
+            result = dynspread(rasterized, max_px=3) if self.spread_enabled else rasterized
 
-            return wrap_content(
+            return _wrap_canvas(
                 pn.pane.HoloViews(
                     result,
                     sizing_mode='stretch_width',
@@ -830,7 +858,107 @@ class SpanExplorer(param.Parameterized):
 
         except Exception as e:
             logger.exception("Render failed")
-            return wrap_content(pn.pane.Alert(f"Render error: {e}", alert_type='warning'))
+            return _wrap_canvas(pn.pane.Alert(f"Render error: {e}", alert_type='warning'))
+
+    def _density_grid(self):
+        """Materialize a small datashader density grid (time-bins × duration-bins
+        of span counts) for the tap view's cross-sections.
+
+        Computed ONCE per (dataset, ddf) via a single Dask reduction and cached,
+        so (a) the heatmap and every tapped slice come from the SAME datashader
+        aggregation — datashader integration is preserved on both panes — and
+        (b) taps are instant (no per-tap Dask compute). Returns an xarray
+        DataArray with dims (duration_ms, timestamp_s)."""
+        import datashader as ds
+
+        key = (self.current_dataset, id(self._ddf))
+        if self._grid_cache is not None and self._grid_cache_key == key:
+            return self._grid_cache
+
+        # 240 × 160 bins ≈ 38k cells — trivially small in memory, smooth to slice.
+        cvs = ds.Canvas(plot_width=240, plot_height=160)
+        agg = cvs.points(self._ddf, 'timestamp_s', 'duration_ms', ds.count())
+        # datashader computes Dask input eagerly, but force materialization if a
+        # lazy (dask-backed) array slips through, so taps never trigger a compute.
+        if hasattr(getattr(agg, 'data', None), 'compute'):
+            agg = agg.compute()
+        self._grid_cache = agg
+        self._grid_cache_key = key
+        return agg
+
+    def _tap_component(self):
+        """The "more sophisticated" view (Holoviews Tap stream): a datashaded
+        density heatmap on the left and, on the right, a latency-spectrum curve —
+        a vertical cross-section of the SAME datashader aggregate at the tapped
+        time. Tap a moment in the heatmap → see the distribution of span durations
+        at that moment. (Tapping selects a time column; to instead show a single
+        latency band's volume over time, slice the grid on duration_ms — a
+        one-line change.)"""
+        try:
+            points = hv.Points(self._ddf, kdims=['timestamp_s', 'duration_ms']).opts(
+                width=CANVAS_WIDTH, height=CANVAS_HEIGHT,
+            )
+            rasterized = rasterize(points, aggregator='count', dynamic=True).opts(
+                cmap=self._cmap(),
+                cnorm='eq_hist',
+                colorbar=True,
+                xlabel='Time (Unix seconds)',
+                ylabel='Duration (ms)',
+                title='Span Latency — tap to inspect',
+                tools=['tap', 'hover', 'box_zoom', 'wheel_zoom', 'pan', 'reset'],
+                active_tools=['box_zoom'],
+                width=480, height=CANVAS_HEIGHT,
+            )
+            # The Tap stream must source the EXACT plotted element, so resolve the
+            # heatmap object first (dynspread-wrapped iff spread is on) and tap it.
+            heatmap = dynspread(rasterized, max_px=3) if self.spread_enabled else rasterized
+
+            agg = self._density_grid()
+            times = agg.coords['timestamp_s'].values
+            durs = agg.coords['duration_ms'].values
+            x0 = float(times[len(times) // 2]) if len(times) else 0.0
+
+            def latency_spectrum(x, y):
+                xx = x0 if x is None else x
+                col = agg.sel(timestamp_s=xx, method='nearest')
+                when = datetime.fromtimestamp(float(xx), tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                return hv.Curve((durs, col.values), kdims='Duration (ms)', vdims='Span count').opts(
+                    framewise=True,
+                    width=300, height=CANVAS_HEIGHT,
+                    color='#0072B5',
+                    title=f'Latency spectrum @ {when} UTC',
+                    tools=['hover'],
+                    yaxis='right',
+                )
+
+            tap = hv.streams.Tap(source=heatmap, x=x0)
+            spectrum = hv.DynamicMap(latency_spectrum, streams=[tap])
+
+            return _wrap_canvas(
+                pn.pane.HoloViews(
+                    heatmap + spectrum,
+                    sizing_mode='stretch_width',
+                    min_height=CANVAS_HEIGHT,
+                    height=CANVAS_HEIGHT,
+                )
+            )
+
+        except Exception as e:
+            logger.exception("Tap view render failed")
+            return _wrap_canvas(pn.pane.Alert(f"Render error: {e}", alert_type='warning'))
+
+    @param.depends('active_view')
+    def _view_badge(self):
+        """Reactive indicator of the active viz component + the `switch` hint."""
+        label = {
+            'explorer': '◆ Density explorer',
+            'tap': '◆ Linked latency spectrum',
+        }.get(self.active_view, self.active_view)
+        return pn.pane.HTML(
+            f"<div style='font-size:11px;color:#0072B5;font-weight:600;'>{label}</div>"
+            f"<div style='font-size:10px;color:#6c757d;'>type <code>switch</code> in the terminal to toggle</div>",
+            margin=(2, 0, 0, 0),
+        )
 
     def sidebar(self):
         """Sidebar with status and controls."""
@@ -845,6 +973,7 @@ class SpanExplorer(param.Parameterized):
             pn.pane.Markdown("### Visualization"),
             pn.widgets.Select.from_param(self.param.cmap, name='Colormap', sizing_mode='stretch_width'),
             pn.widgets.Checkbox.from_param(self.param.spread_enabled, name='Spread'),
+            self._view_badge,
             pn.layout.Divider(),
             pn.pane.Markdown(f"""
 **Dask**: `{scheduler_short}`
@@ -854,9 +983,9 @@ class SpanExplorer(param.Parameterized):
         )
 
     def main_view(self):
-        """Main content: heatmap + engine terminal."""
+        """Main content: active visualization + engine terminal."""
         return pn.Column(
-            self.heatmap_view,
+            self.viz_view,
             pn.layout.Divider(),
             self._terminal_pane,
             sizing_mode='stretch_both',
