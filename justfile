@@ -73,6 +73,13 @@ sandbox-status:
 sandbox-ip:
     {{_sb}} ip
 
+# Validate the T1 registry/storage FSM on a throwaway air-gap node: induce each wedged
+# state (default-SC capture, Released PV, class-drift, …), converge, assert recovery.
+# Prereq: just sandbox-up sandbox-transport sandbox-airgap (or `just sandbox`).
+# `--keep` skips the final destroy (auto-kept on any failure for inspection).
+sandbox-test-fsm *args:
+    bash {{_root}}/infra/aws/tofu-sandbox/test-fsm.sh {{args}}
+
 # ----------------------------------------------------------------------------
 # cybersec-dask IMAGE / PACKAGE / REDEPLOY — content-tagged, registry-pushed,
 # converge-drift-aware. Replaces the devenv zarf:image / zarf:package tasks; a
