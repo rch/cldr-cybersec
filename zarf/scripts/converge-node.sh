@@ -108,6 +108,13 @@ fi
 # --- S3 creds → tmpfs creds file (off argv); the engine forwards as ZARF_VAR_* -
 CREDS_FILE="${CONVERGE_CREDS_FILE:-}"
 OWN_CREDS=""   # set only if WE created it (a caller-provided file is the caller's to remove)
+# Fallback: converge-aws.sh stages creds at this fixed tmpfs path and exports
+# CONVERGE_CREDS_FILE — but that env can be dropped crossing `sudo -n env`, which
+# silently strips S3 vars from the deploy (empty S3_BUCKET → "s3:" bucket errors).
+# Pick the file up by its known path so a lost env var can't lose the creds.
+if [ -z "$CREDS_FILE" ] && [ -f /dev/shm/.converge-creds ]; then
+  CREDS_FILE="/dev/shm/.converge-creds"
+fi
 if [ -z "$CREDS_FILE" ]; then
   CREDS_LINES=""
   for v in S3_ENDPOINT S3_BUCKET S3_REGION S3_ACCESS_KEY S3_SECRET_KEY S3_SESSION_TOKEN; do
