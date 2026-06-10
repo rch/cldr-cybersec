@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Exhaustive live validation of the T1 registry/storage FSM (catalog.py
-# _pre_init_cleanup / _rem_registry_running) against a REAL throwaway air-gap RKE2 node.
+# ONE-command, end-to-end live validation of the T1 registry/storage FSM (catalog.py
+# _pre_init_cleanup / _rem_registry_running).
 #
-# For each registry/storage permutation it INDUCES the wedged state on the node, runs
-# converge, and asserts T1.registry-running recovers to [ok]/[fixed] — reporting the
-# FSM's own unwind action. This is the live validation the unit tests can't give
-# (real PVC↔PV binding, real StorageClass capture, real conservation of the hostPath
-# images across a PV reset).
+# Drives the COMPLETE sequence itself — provision a throwaway air-gap RKE2 node,
+# transport THIS repo's engine, cut egress — then for each wedged registry/storage
+# permutation it INDUCES the state, converges, and asserts T1.registry-running recovers
+# to [ok]/[fixed], reporting the FSM's own unwind. Destroys the node on success (kept on
+# --keep, or on any failure for inspection). This is the live validation the unit tests
+# can't give: real PVC↔PV binding, real StorageClass capture, real conservation of the
+# registry images across a PV reset.
 #
-# Prereqs (provision once):  just sandbox-up && just sandbox-transport && just sandbox-airgap
-#                            (or `just sandbox`, which also runs an initial converge)
-# Run:                       just sandbox-test-fsm            (destroys the node at the end)
-#                            just sandbox-test-fsm --keep     (keep the node for inspection)
+#   just sandbox-test-fsm           # full cycle → destroy
+#   just sandbox-test-fsm --keep    # full cycle → keep the node
 #
-# Tests THIS repo's engine: it re-stages zarf/converge before the matrix.
+# (The `just` recipe runs sandbox-config first to hydrate build/sandbox/.)
 set -uo pipefail   # NOT -e: the matrix must continue past a failing case.
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,25 +28,36 @@ source "$ENV_FILE"   # KEY, S3_*, ...
 KEEP=0; [ "${1:-}" = "--keep" ] && KEEP=1
 SSH_OPTS=(-i "$KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15)
 KCTL="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
-IP="$(bash "$SB" ip 2>/dev/null)"
-[ -n "$IP" ] && [ "$IP" != "None" ] || { echo "❌ no running sandbox node — run 'just sandbox-up' first" >&2; exit 2; }
-on_node() { ssh "${SSH_OPTS[@]}" "ec2-user@$IP" "$@"; }
-
-echo "▶ T1 registry-FSM validation against sandbox node $IP"
-on_node "ls /var/tmp/zarf-package-cybersec-dask-*.tar.zst >/dev/null 2>&1" \
-  || { echo "❌ deploy package not on the node — run 'just sandbox-transport' first" >&2; exit 2; }
-
-# Re-stage THIS repo's engine so we test the current catalog.py (not whatever was there).
-echo "→ re-staging engine (zarf/converge + converge-node.sh)"
-on_node "mkdir -p ~/cybersec-converge/manifests"
-scp -q "${SSH_OPTS[@]}" -r "$REPO_ROOT/zarf/converge" "$REPO_ROOT/zarf/artifacts.manifest.json" \
-    "$REPO_ROOT/zarf/scripts/converge-node.sh" "ec2-user@$IP:/home/ec2-user/cybersec-converge/"
-scp -q "${SSH_OPTS[@]}" "$REPO_ROOT/zarf/manifests/local-path-provisioner.yaml" \
-    "ec2-user@$IP:/home/ec2-user/cybersec-converge/manifests/" 2>/dev/null || true
-on_node "rm -rf ~/cybersec-converge/converge/__pycache__"
-
+IP=""
 PASS=0; FAIL=0; FAILED_CASES=()
+on_node() { ssh "${SSH_OPTS[@]}" "ec2-user@$IP" "$@"; }
 _strip() { perl -pe 's/\e\[[0-9;]*[a-zA-Z]//g' 2>/dev/null || cat; }
+
+finish() {
+  local code="${1:-0}"
+  if [ "$KEEP" = 1 ]; then
+    echo "→ node KEPT (--keep)${IP:+ ($IP)} — 'just sandbox-destroy' when done."
+  elif [ "$code" -eq 0 ]; then
+    echo "→ all green — destroying the sandbox"; bash "$SB" destroy || true
+  else
+    echo "→ failure/abort — node KEPT${IP:+ ($IP)} for inspection. 'just sandbox-destroy' when done."
+  fi
+  exit "$code"
+}
+
+# ── full lifecycle (the one-command sequence) ─────────────────────────────────
+echo "▶ End-to-end FSM validation: provision → transport → air-gap → matrix"
+echo "── provision (egress ON) + wait for RKE2 Ready ──"
+bash "$SB" up        || { echo "❌ provision (up) failed"; finish 1; }
+echo "── transport packages + stage THIS repo's engine + MinIO (egress ON) ──"
+bash "$SB" transport || { echo "❌ transport failed"; finish 1; }
+echo "── cut egress (closed world) ──"
+bash "$SB" airgap    || { echo "❌ airgap failed"; finish 1; }
+
+IP="$(bash "$SB" ip 2>/dev/null)"
+[ -n "$IP" ] && [ "$IP" != "None" ] || { echo "❌ node IP unresolved after up"; finish 1; }
+on_node "rm -rf ~/cybersec-converge/converge/__pycache__" 2>/dev/null || true
+echo "✓ node $IP up, air-gapped, engine staged — running the matrix"
 
 # induce → converge → assert T1.registry-running recovered.
 run_case() {
@@ -73,7 +84,7 @@ run_case() {
   fi
 }
 
-# ── inducers ────────────────────────────────────────────────────────────────
+# ── inducers ──────────────────────────────────────────────────────────────────
 # Deleting the zarf ns tears down ONLY the registry; the app survives in its own
 # namespaces and the pushed images survive on the Retain hostPath — so each converge
 # re-inits T1 fast (T2 images stay [ok]). That image survival also validates CONSERVATION.
@@ -115,23 +126,14 @@ spec:
 Y
 }
 
-# ── the permutation matrix ──────────────────────────────────────────────────
+# ── the permutation matrix ────────────────────────────────────────────────────
 run_case "baseline (idempotent converge stays green)" induce_baseline
 run_case "default StorageClass capture (the field bug)" induce_default_sc
 run_case "Released registry PV (PVC deleted)"           induce_released_pv
 run_case "class-drifted static PV"                      induce_class_drift
 
-# tidy the test-only objects (harmless if destroying)
 on_node "$KCTL delete storageclass sb-fsm-default --ignore-not-found" >/dev/null 2>&1 || true
 
 echo; echo "════════════ FSM validation: ${PASS} passed, ${FAIL} failed ════════════"
 [ "$FAIL" -gt 0 ] && printf '   failed: %s\n' "${FAILED_CASES[*]}"
-
-if [ "$KEEP" = 1 ]; then
-  echo "→ node KEPT ($IP) — inspect with 'just sandbox-ssh \"…\"'; 'just sandbox-destroy' when done"
-elif [ "$FAIL" -gt 0 ]; then
-  echo "→ failures present — node KEPT for inspection ($IP). 'just sandbox-destroy' when done."
-else
-  echo "→ all passed — destroying the sandbox"; bash "$SB" destroy
-fi
-exit "$FAIL"
+finish "$FAIL"

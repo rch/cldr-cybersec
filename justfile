@@ -73,11 +73,10 @@ sandbox-status:
 sandbox-ip:
     {{_sb}} ip
 
-# Validate the T1 registry/storage FSM on a throwaway air-gap node: induce each wedged
-# state (default-SC capture, Released PV, class-drift, …), converge, assert recovery.
-# Prereq: just sandbox-up sandbox-transport sandbox-airgap (or `just sandbox`).
-# `--keep` skips the final destroy (auto-kept on any failure for inspection).
-sandbox-test-fsm *args:
+# One-command end-to-end FSM validation: provision → transport → air-gap → induce each
+# wedged registry/storage state (default-SC capture, Released PV, class-drift, …) →
+# converge → assert recovery → destroy. `--keep` skips the destroy (auto-kept on failure).
+sandbox-test-fsm *args: sandbox-config
     bash {{_root}}/infra/aws/tofu-sandbox/test-fsm.sh {{args}}
 
 # ----------------------------------------------------------------------------
