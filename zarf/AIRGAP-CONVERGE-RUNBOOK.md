@@ -1,4 +1,4 @@
-# Air-Gap Convergent Deploy — Operator Runbook (v1.5.0)
+# Air-Gap Convergent Deploy — Operator Runbook (v1.6.0)
 
 **Audience.** You have a single-node, air-gapped Kubernetes (RKE2) and need to stand up the
 cybersec-dask / OTEL Navigator stack with **no internet**. The node may already be carrying a
@@ -22,7 +22,7 @@ workloads → ingress). It is **idempotent** (`verify` is a clean no-op once at 
 It **picks up wherever your procedure stalled**: already-good tiers detect `[ok]` and are
 skipped; only the broken ones are remediated.
 
-**New in v1.5.0 — the registry/storage tier (T1) now self-heals the states that previously
+**New in v1.6.0 — the registry/storage tier (T1) now self-heals the states that previously
 needed manual `kubectl`/`zarf destroy`:** an interfering default StorageClass, a dead
 provisioner, a stranded or mis-classed registry PV, a wedged namespace. And when it *can't*
 self-heal, it prints a **precise diagnosis** of which storage condition is unmet — not a bare
@@ -62,17 +62,17 @@ Verify integrity first (`sha256sum -c SHA256SUMS`), then place each asset:
 
 | Asset | Destination |
 |-------|-------------|
-| `zarf-package-cybersec-dask-amd64-1.5.0.tar.zst` | `/var/tmp/` |
+| `zarf-package-cybersec-dask-amd64-1.6.0.tar.zst` | `/var/tmp/` |
 | `zarf-init-amd64-v0.70.1.tar.zst` *(Layer A — the piece partial procedures most often lack)* | `/var/tmp/` (beside the deploy package) |
 | `zarf` *(the v0.70.1 binary)* | `/usr/local/bin/zarf` (`chmod +x`) |
-| `cybersec-converge-1.5.0.tar.gz` *(the convergence engine)* | unpack to a working dir of your choice |
+| `cybersec-converge-1.6.0.tar.gz` *(the convergence engine)* | unpack to a working dir of your choice |
 
 ```bash
 sha256sum -c SHA256SUMS
 install -m0755 zarf /usr/local/bin/zarf
-mv zarf-package-cybersec-dask-amd64-1.5.0.tar.zst zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
+mv zarf-package-cybersec-dask-amd64-1.6.0.tar.zst zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
 
-mkdir -p ~/cybersec-converge && tar xzf cybersec-converge-1.5.0.tar.gz -C ~/cybersec-converge
+mkdir -p ~/cybersec-converge && tar xzf cybersec-converge-1.6.0.tar.gz -C ~/cybersec-converge
 ```
 
 > The engine bundle is **self-locating** — `converge-node.sh` resolves the engine, the manifests,
@@ -153,7 +153,7 @@ tail. (S3 secrets ride the environment, never `stdout`, so these diagnoses stay 
 
 ## Recovery — the engine self-heals; reserve `zarf destroy` for true corruption
 
-Earlier guidance was "do **not** iterate a wedged `zarf init` — run `zarf destroy`." With v1.5.0 the
+Earlier guidance was "do **not** iterate a wedged `zarf init` — run `zarf destroy`." With v1.6.0 the
 engine **unwinds** the storage/registry wedge states itself (Terminating ns, stranded/mis-classed
 PV, default-SC capture), so a plain re-run of `converge-node.sh apply` is the right move — it makes
 forward progress each pass to a fixpoint. **Only** if the engine's diagnosis points at damage below
