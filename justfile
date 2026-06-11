@@ -105,3 +105,13 @@ redeploy:
 # EXPERIMENTAL fast redeploy (image-delta push) — WIP: podman-VM tunnel obstacle; see ops.sh
 redeploy-fast:
     bash {{_ops}} redeploy-fast
+
+# ----------------------------------------------------------------------------
+# AIR-GAP RELEASE — assemble the complete convergent-deploy bundle for GitHub.
+# ----------------------------------------------------------------------------
+
+# Assemble build/release/: convergence-engine tarball + zarf-init pkg + zarf binary +
+# runbook + SHA256SUMS (the 1.3 GB deploy package is referenced in place at zarf/).
+# Then cut the GitHub release from those + the deploy package.
+release-bundle:
+    bash {{_root}}/zarf/scripts/release-bundle.sh
