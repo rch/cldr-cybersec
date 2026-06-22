@@ -74,6 +74,16 @@ run_case() {
   if printf '%s' "$t1" | grep -qiE '\[ *(ok|fixed) *\]'; then
     echo "  ✓ T1 recovered:${t1#*registry-running}"
     [ -n "$act" ] && echo "    ↳ FSM unwind: $act"
+    # PROOF of the mechanism: the bound registry PVC must be on storageClassName "" (the
+    # static claimRef PV), NOT a captured class. This is what --storage-class - guarantees.
+    local pvc_sc
+    pvc_sc="$(on_node "$KCTL -n zarf get pvc zarf-docker-registry -o jsonpath='{.spec.storageClassName}'" 2>/dev/null)"
+    if [ -z "$pvc_sc" ]; then
+      echo "    ↳ registry PVC storageClassName=\"\" (bound the static PV — no default-SC capture) ✓"
+    else
+      echo "    ✗ registry PVC storageClassName=$pvc_sc (expected \"\" — capture not prevented)"
+      FAIL=$((FAIL + 1)); FAILED_CASES+=("$name [PVC on '$pvc_sc' not '']"); return
+    fi
     PASS=$((PASS + 1))
   else
     echo "  ✗ T1 did NOT recover"
@@ -91,7 +101,9 @@ run_case() {
 
 induce_baseline() { :; }   # a plain converge must stay green
 
-induce_default_sc() {      # THE field bug: a default SC captures the fresh registry PVC
+# A default StorageClass faithful to RKE2's local-path: WaitForFirstConsumer + a
+# provisioner that does NOT exist in the closed world (so dynamic provisioning hangs).
+_apply_hostile_default_sc() {
   cat <<'Y' | on_node "$KCTL apply -f -" >/dev/null 2>&1 || true
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -100,8 +112,32 @@ metadata:
   annotations:
     storageclass.kubernetes.io/is-default-class: "true"
 provisioner: example.com/sb-nonexistent-provisioner
+volumeBindingMode: WaitForFirstConsumer
 Y
+}
+
+induce_default_sc() {      # THE field bug: a default SC captures the fresh registry PVC
+  _apply_hostile_default_sc
   on_node "$KCTL delete ns zarf --wait=false" >/dev/null 2>&1 || true
+}
+
+induce_vestigial_pvc() {   # THE artifact: a prior attempt left a zarf-docker-registry PVC
+  # already CAPTURED onto the default class (immutable). zarf init reuses it by name, so
+  # un-defaulting can't help — converge must DELETE it and re-init on "". This is the exact
+  # state the live node was wedged in (PVC Pending storageClass='local-path').
+  _apply_hostile_default_sc
+  on_node "$KCTL delete ns zarf --wait=false" >/dev/null 2>&1 || true
+  on_node "$KCTL create ns zarf" >/dev/null 2>&1 || true
+  cat <<'Y' | on_node "$KCTL apply -f -" >/dev/null 2>&1 || true
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zarf-docker-registry
+  namespace: zarf
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 5Gi}}
+Y
 }
 
 induce_released_pv() {     # delete the PVC out from under the Retain PV → Released
@@ -127,10 +163,11 @@ Y
 }
 
 # ── the permutation matrix ────────────────────────────────────────────────────
-run_case "baseline (idempotent converge stays green)" induce_baseline
-run_case "default StorageClass capture (the field bug)" induce_default_sc
-run_case "Released registry PV (PVC deleted)"           induce_released_pv
-run_case "class-drifted static PV"                      induce_class_drift
+run_case "baseline (idempotent converge stays green)"   induce_baseline
+run_case "default StorageClass capture (the field bug)"  induce_default_sc
+run_case "vestigial captured PVC (init reuses 'local-path')" induce_vestigial_pvc
+run_case "Released registry PV (PVC deleted)"            induce_released_pv
+run_case "class-drifted static PV"                       induce_class_drift
 
 on_node "$KCTL delete storageclass sb-fsm-default --ignore-not-found" >/dev/null 2>&1 || true
 

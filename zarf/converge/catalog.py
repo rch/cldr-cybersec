@@ -64,6 +64,19 @@ def _force_finalize_ns(ctx: Ctx, ns: str) -> bool:
     return r.returncode == 0
 
 
+def _force_delete_pvc(ctx: Ctx, ns: str, name: str) -> bool:
+    """Delete a PVC and, if it lingers on the kubernetes.io/pvc-protection finalizer,
+    clear the finalizer so it actually goes. A PVC's storageClassName is IMMUTABLE, so a
+    registry PVC the cluster-default SC captured onto a dead provisioner can never be
+    salvaged in place — it must be removed so `zarf init` recreates it clean. Layer-B:
+    the registry's hostPath DATA is conserved by the Retain PV, so images survive."""
+    ctx.k(["delete", "pvc", name, "-n", ns, "--ignore-not-found", "--wait=false"])
+    if ctx.get("pvc", name, ns=ns):                      # stuck Terminating on a finalizer
+        ctx.k(["patch", "pvc", name, "-n", ns, "--type=merge",
+               "-p", '{"metadata":{"finalizers":null}}'])
+    return ctx.get("pvc", name, ns=ns) is None
+
+
 # S3/deploy variables that are SECRET — delivered via ZARF_VAR_* ENV only (kept off
 # argv / the process table). Everything else (bucket, region, endpoint, replica count)
 # is non-sensitive config and goes on --set-variables, the RELIABLE substitution path
@@ -302,13 +315,19 @@ def _pre_init_cleanup(ctx: Ctx) -> List[str]:
 
     Permutations handled (all surfaced in the field):
       • zarf ns wedged Terminating                → force-finalize it
-      • a default StorageClass captures the registry PVC into dynamic provisioning whose
-        provisioner is absent/dead in the air-gap (PVC stuck ExternalProvisioning)
-                                                   → un-default it (PVC falls through to "")
-      • the static claimRef PV is stale (Released/Failed, stale claimRef-uid) OR its class
-        no longer matches the registry PVC's class → reset it to match (binds with NO
+      • a cluster-default StorageClass present    → un-default it (hygiene; the registry
+        no longer depends on it once init runs with --storage-class -)
+      • the registry PVC captured onto a non-"" class (the chart omits storageClassName on
+        an empty value, so the default SC — RKE2 local-path, WFFC + dead provisioner —
+        gets stamped on; the class is IMMUTABLE and init reuses it by name)
+                                                   → delete it so init recreates it on ""
+      • the static claimRef PV is stale (Released/Failed, stale claimRef-uid) or its class
+        drifted off ""                            → reset it to "" (binds with NO
         provisioner), conserving the hostPath data
-      • a fresh deploy with no PVC yet            → ensure a "" static PV is present
+      • a fresh deploy with no PVC/PV yet         → ensure a "" static PV is present
+    Pairs with `zarf init --storage-class -` in `_rem_registry_running` (the "-" sentinel
+    renders the registry PVC's storageClassName:"" EXPLICITLY → binds the static PV, never
+    the cluster default).
     """
     actions: List[str] = []
     # A. zarf ns wedged Terminating → release it so init can recreate it cleanly.
@@ -322,34 +341,50 @@ def _pre_init_cleanup(ctx: Ctx) -> List[str]:
     if not (ctx.registry_pvc_enabled and not ctx.dynamic_provisioning):
         return actions
 
-    # B. Neutralize StorageClass capture: a default SC makes the registry PVC wait on a
-    #    provisioner that may be absent in the air-gap (the registry hangs in
-    #    ExternalProvisioning forever). Drop the default annotation so a fresh PVC falls
-    #    through to "" and binds the static PV instead. Idempotent.
+    # B. Un-default any cluster-default StorageClass (hygiene). With `zarf init
+    #    --storage-class -` the registry PVC is pinned to "" and no longer depends on this,
+    #    but a lingering default SC whose provisioner is dead in the air-gap would still
+    #    capture any OTHER class-omitting PVC, so drop the default annotation. Idempotent.
     for sc in _default_storage_classes(ctx):
         if _undefault_sc(ctx, sc):
             actions.append(f"un-defaulted StorageClass {sc!r}")
 
-    # C. Ensure the static claimRef hostPath PV exists AND matches whatever storageClass
-    #    the registry PVC requests, so it binds with NO provisioner. The PV's class tracks
-    #    the (possibly wedged) registry PVC's class — "" when fresh/un-defaulted, or the
-    #    class zarf pins. Reset a stale/mis-classed PV (Released/Failed, stale claimRef-uid,
-    #    class drift) but NEVER a healthily Bound one. Deleting the PV OBJECT conserves the
-    #    images: the hostPath (Retain) survives and re-binds.
+    # C. Delete a vestigial/captured registry PVC so init recreates it clean. The
+    #    docker-registry chart OMITS storageClassName when its value is empty, so the
+    #    cluster default (RKE2 local-path: WaitForFirstConsumer + a provisioner that's
+    #    absent air-gapped) gets stamped onto the registry PVC → Pending forever. That
+    #    class is IMMUTABLE, and `zarf init` reuses an existing PVC by name, so the only
+    #    way forward is to remove it. `_rem_registry_running` then re-inits with
+    #    --storage-class - (explicit ""), which binds the static PV below. Skip a healthily
+    #    Bound "" PVC (already correct). Layer-B; the Retain PV conserves the images.
     pvc = ctx.get("pvc", "zarf-docker-registry", ns="zarf")
-    want_sc = ((pvc or {}).get("spec", {}) or {}).get("storageClassName") or ""
+    if pvc is not None:
+        phase = pvc.get("status", {}).get("phase")
+        cur = (pvc.get("spec", {}) or {}).get("storageClassName")
+        cur = "" if cur is None else cur
+        if phase != "Bound" or cur != "":
+            if _force_delete_pvc(ctx, "zarf", "zarf-docker-registry"):
+                actions.append(f"deleted captured registry PVC "
+                               f"(was phase={phase} storageClass={cur!r})")
+
+    # D. Ensure the static claimRef hostPath PV exists, is storageClassName:"" and is
+    #    bindable (Available, no stale claimRef uid). The resilient target class is ALWAYS
+    #    "" — NEVER adopt a captured class (a 'local-path' PV can't bind under WFFC + the
+    #    PVC's dynamic-provisioner annotation anyway). Reset a stale/mis-classed/Released
+    #    PV but never a healthily Bound one; deleting the PV OBJECT conserves the hostPath
+    #    images (Retain) and re-binds.
     pv = ctx.get("pv", "zarf-registry-pv")
     if pv is None:
-        ctx.apply_yaml(_registry_pv_yaml(ctx, want_sc))
-        actions.append(f"created static registry PV (storageClass={want_sc!r})")
+        ctx.apply_yaml(_registry_pv_yaml(ctx, ""))
+        actions.append('created static registry PV (storageClass="")')
     elif pv.get("status", {}).get("phase") != "Bound":
         phase = pv.get("status", {}).get("phase")
         cur_sc = (pv.get("spec", {}) or {}).get("storageClassName") or ""
         claim = (pv.get("spec", {}) or {}).get("claimRef") or {}
-        if phase in ("Released", "Failed") or claim.get("uid") or cur_sc != want_sc:
+        if phase in ("Released", "Failed") or claim.get("uid") or cur_sc != "":
             ctx.k(["delete", "pv", "zarf-registry-pv", "--ignore-not-found"])
-            ctx.apply_yaml(_registry_pv_yaml(ctx, want_sc))
-            actions.append(f"reset static registry PV → storageClass={want_sc!r} "
+            ctx.apply_yaml(_registry_pv_yaml(ctx, ""))
+            actions.append(f'reset static registry PV → storageClass="" '
                            f"(was phase={phase} storageClass={cur_sc!r})")
     return actions
 
@@ -366,6 +401,10 @@ def _diagnose_registry(ctx: Ctx) -> str:
         sc = "" if sc is None else sc
         phase = pvc.get("status", {}).get("phase", "?")
         bits.append(f"registry PVC {phase} storageClass={sc!r}")
+        if sc != "":
+            bits.append(f"registry PVC is on {sc!r}, not '' — the cluster-default SC "
+                        "captured it (immutable); delete it so init recreates it on '' "
+                        "(init must pass --storage-class -)")
         if phase == "Pending":
             pv = ctx.get("pv", "zarf-registry-pv")
             if pv is None:
@@ -392,7 +431,14 @@ def _rem_registry_running(ctx: Ctx) -> Fix:
     if not ctx.have_zarf():
         return Fix(False, "MANUAL: zarf init --confirm (zarf binary not available here)")
     args = ["init", "--confirm", f"--set=REGISTRY_PVC_SIZE={ctx.registry_pv_size}"]
-    if not ctx.registry_pvc_enabled:
+    if ctx.registry_pvc_enabled:
+        # Pin the registry PVC to storageClassName:"" via the docker-registry chart's "-"
+        # sentinel. Without this, zarf's empty default makes the chart OMIT the field, so
+        # Kubernetes stamps the cluster-default SC (RKE2 local-path: WaitForFirstConsumer +
+        # a provisioner that's dead air-gapped) → PVC Pending forever. "" binds the static
+        # claimRef hostPath PV directly — no provisioner, no default-SC race.
+        args += ["--storage-class=-"]
+    else:
         args.append("--set=REGISTRY_PVC_ENABLED=false")
     r = ctx.zarf(args)
     tail = f"  [unwound: {'; '.join(actions)}]" if actions else ""
