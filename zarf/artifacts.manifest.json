@@ -10,7 +10,7 @@
   ],
   "package": {
     "name": "cybersec-dask",
-    "version": "1.6.0",
+    "version": "1.6.1",
     "size_budget_bytes": 2147483648,
     "size_warn_bytes": 1879048192,
     "_note": "GitHub release-asset hard limit is 2 GiB (2147483648). Warn at ~1.75 GiB so we slim before hitting it."
