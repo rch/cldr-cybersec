@@ -78,8 +78,24 @@ case "$ACTION" in
         "https://github.com/zarf-dev/zarf/releases/download/$ZARF_VERSION/zarf-init-amd64-$ZARF_VERSION.tar.zst"
     fi
     echo "→ Layer-A packages to /var/tmp (deploy + zarf-init)"
-    scp "${SSH_OPTS[@]}" "$PACKAGE" "ec2-user@$IP:/var/tmp/"
-    scp "${SSH_OPTS[@]}" "$INIT_PACKAGE" "ec2-user@$IP:/var/tmp/"
+    # The GB-scale hop is where a transient reset hurts most (a mid-transfer
+    # "Connection reset by peer" aborted a full validation run) — retry each big
+    # scp up to 3×; a md5 pre-check skips files the node already has intact.
+    xfer() {  # xfer <local-file>  → /var/tmp/ on the node, retried, skip-if-identical
+      local f="$1" base sum have
+      base="$(basename "$f")"
+      sum="$(md5 -q "$f" 2>/dev/null || md5sum "$f" | cut -d' ' -f1)"
+      have="$(on_node "md5sum /var/tmp/$base 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)"
+      [ -n "$sum" ] && [ "$sum" = "$have" ] && { echo "   $base already on node (md5 match) — skip"; return 0; }
+      local try
+      for try in 1 2 3; do
+        scp "${SSH_OPTS[@]}" "$f" "ec2-user@$IP:/var/tmp/" && return 0
+        echo "   ⚠ scp $base failed (attempt $try/3) — retrying in 10s"; sleep 10
+      done
+      echo "❌ scp $base failed after 3 attempts" >&2; return 1
+    }
+    xfer "$PACKAGE"      || exit 1
+    xfer "$INIT_PACKAGE" || exit 1
     echo "→ stage the convergence engine"
     on_node "mkdir -p ~/cybersec-converge/manifests"
     scp "${SSH_OPTS[@]}" -r "$REPO_ROOT/zarf/converge" "$REPO_ROOT/zarf/artifacts.manifest.json" \
