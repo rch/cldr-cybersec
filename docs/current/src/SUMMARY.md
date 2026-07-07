@@ -28,6 +28,7 @@
 - [System Architecture](./architecture/overview.md)
     - [Data Flow](./architecture/data-flow.md)
     - [Storage Strategy](./architecture/storage.md)
+    - [HDF5 ↔ Iceberg Metadata Plane](./architecture/hdf5-iceberg-metadata-plane.md)
 - [AWS Integration](./architecture/aws.md)
     - [CloudTrail Ingestion](./architecture/aws/cloudtrail.md)
     - [S3 Table Buckets](./architecture/aws/s3-tables.md)
