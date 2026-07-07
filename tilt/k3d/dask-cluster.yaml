@@ -1,0 +1,116 @@
+# DaskCluster for the laptop k3d dev stack. Tokens (__UPPER__) are substituted
+# by scripts/dev-k3d.sh from env (with dev defaults) before `kubectl apply`.
+# Mirrors zarf/manifests/dask-cluster.yaml but with concrete dev values:
+#   - image pinned to the k3d-registry in-cluster ref (Dask pods are NOT
+#     Tilt-managed, so they need a real pushed tag — `just dev-image`)
+#   - emptyDir spill (no host pollution) instead of a hostPath
+#   - S3 env points at the laptop's devenv MinIO via host.k3d.internal
+---
+apiVersion: kubernetes.dask.org/v1
+kind: DaskCluster
+metadata:
+  name: cybersec-dask
+  namespace: dask
+  labels:
+    app.kubernetes.io/name: cybersec-dask
+    app.kubernetes.io/component: cluster
+    app.kubernetes.io/managed-by: tilt
+    app.kubernetes.io/part-of: cybersec
+spec:
+  scheduler:
+    service:
+      type: NodePort
+      selector:
+        dask.org/cluster-name: cybersec-dask
+        dask.org/component: scheduler
+      ports:
+        - name: tcp-comm
+          port: 8786
+          targetPort: tcp-comm
+          nodePort: 30086
+        - name: tcp-dashboard
+          port: 8787
+          targetPort: tcp-dashboard
+          nodePort: 30087
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: scheduler
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          args:
+            - dask-scheduler
+          ports:
+            - containerPort: 8786
+              name: tcp-comm
+            - containerPort: 8787
+              name: tcp-dashboard
+          env:
+            - name: S3_ENDPOINT
+              value: "__S3_ENDPOINT__"
+            - name: AWS_REGION
+              value: "__AWS_REGION__"
+            - name: AWS_ACCESS_KEY_ID
+              value: "__AWS_KEY__"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "__AWS_SECRET__"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: tcp-dashboard
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: tcp-dashboard
+            initialDelaySeconds: 15
+            periodSeconds: 30
+  worker:
+    replicas: __WORKERS__
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: worker
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          args:
+            - dask-worker
+            - --nthreads
+            - "2"
+            - --memory-limit
+            - 2Gi
+            - --local-directory
+            - /dask-spill
+          env:
+            - name: DASK_DASHBOARD_ADDRESS
+              value: ":8787"
+            - name: S3_ENDPOINT
+              value: "__S3_ENDPOINT__"
+            - name: AWS_REGION
+              value: "__AWS_REGION__"
+            - name: AWS_ACCESS_KEY_ID
+              value: "__AWS_KEY__"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "__AWS_SECRET__"
+          volumeMounts:
+            - name: dask-spill
+              mountPath: /dask-spill
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+      volumes:
+        - name: dask-spill
+          emptyDir:
+            sizeLimit: 8Gi

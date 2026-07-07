@@ -21,6 +21,10 @@ metadata:
     app.kubernetes.io/part-of: cybersec
 spec:
   replicas: 1
+  # Recreate (not RollingUpdate): on a tight laptop VM, surging a second pod
+  # before killing the old one overcommits memory and deadlocks the rollout.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: otel-navigator
@@ -41,8 +45,8 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: otel-navigator
-          image: 127.0.0.1:31999/cybersec-dask
-          imagePullPolicy: Always
+          image: cybersec-dask
+          imagePullPolicy: IfNotPresent
           command:
             - panel
             - serve
@@ -60,20 +64,25 @@ spec:
           env:
             - name: DASK_SCHEDULER
               value: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
+            # k3d dev has no ingress, and the browser hits Panel via :15006/:30506
+            # (not :5006), so the app's auto-detect can't find the terminal WS.
+            # Point it at the pty-proxy NodePort host-map (absolute, always mapped).
             - name: PTY_PROXY_WS
-              value: ""
+              value: "ws://localhost:30765"
           envFrom:
             - configMapRef:
                 name: otel-navigator-config
             - secretRef:
                 name: otel-navigator-credentials
           resources:
+            # Laptop dev profile (fits an 8 GiB podman VM); production sizing
+            # lives in zarf/manifests/panel-viz.yaml, not here.
             requests:
-              cpu: 500m
-              memory: 4Gi
+              cpu: 250m
+              memory: 1536Mi
             limits:
               cpu: 2
-              memory: 8Gi
+              memory: 3Gi
           readinessProbe:
             tcpSocket:
               port: 5006
@@ -88,8 +97,8 @@ spec:
             failureThreshold: 5
         # PTY proxy sidecar: bridges terminal WebSocket to gRPC engine
         - name: pty-proxy
-          image: 127.0.0.1:31999/cybersec-dask
-          imagePullPolicy: Always
+          image: cybersec-dask
+          imagePullPolicy: IfNotPresent
           command:
             - python
             - -m
@@ -106,8 +115,8 @@ spec:
               value: /app
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
+              cpu: 50m
+              memory: 128Mi
             limits:
               cpu: 500m
               memory: 512Mi

@@ -1,0 +1,19 @@
+# Namespaces for the laptop k3d dev stack (manifest-direct mirror of the Zarf
+# deploy — see scripts/dev-k3d.sh / `just dev-up`). On the real air-gap deploy
+# Zarf creates these; here we apply them directly.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dask
+  labels:
+    app.kubernetes.io/managed-by: tilt
+    app.kubernetes.io/part-of: cybersec
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: panel-viz
+  labels:
+    app.kubernetes.io/managed-by: tilt
+    app.kubernetes.io/part-of: cybersec

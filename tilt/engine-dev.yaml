@@ -19,6 +19,9 @@ metadata:
     app.kubernetes.io/part-of: cybersec
 spec:
   replicas: 1
+  # Recreate: kill-then-start on the tight laptop VM (avoids surge overcommit).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: navigator-engine
@@ -39,8 +42,8 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: navigator-engine
-          image: 127.0.0.1:31999/cybersec-dask
-          imagePullPolicy: Always
+          image: cybersec-dask
+          imagePullPolicy: IfNotPresent
           command:
             - python
             - -m
@@ -61,12 +64,14 @@ spec:
             - secretRef:
                 name: otel-navigator-credentials
           resources:
+            # Laptop dev profile (fits an 8 GiB podman VM); production sizing
+            # lives in zarf/manifests/engine.yaml, not here.
             requests:
-              cpu: 500m
-              memory: 2Gi
+              cpu: 250m
+              memory: 768Mi
             limits:
               cpu: 2
-              memory: 4Gi
+              memory: 2Gi
           readinessProbe:
             tcpSocket:
               port: 50051

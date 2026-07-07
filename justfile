@@ -115,3 +115,43 @@ redeploy-fast:
 # Then cut the GitHub release from those + the deploy package.
 release-bundle:
     bash {{_root}}/zarf/scripts/release-bundle.sh
+
+# ----------------------------------------------------------------------------
+# LAPTOP DEV — zarf-style stack on a local k3d cluster with Tilt live-reload.
+# The "laptop local" (k3d), distinct from the "workstation local" (RKE2 on a GPU
+# box) and the air-gap Zarf deploy. Manifest-direct (no `zarf init`); reuses the
+# devenv MinIO (run `devenv up` first). Guide: docs/.../laptop-dev/k3d-tilt.md
+# ----------------------------------------------------------------------------
+_dev := "bash " + (_root / "scripts/dev-k3d.sh")
+
+# Stand up the whole zarf-style stack on k3d + Tilt (cluster->image->deploy->seed->tilt up)
+dev-up:
+    {{_dev}} up
+
+# Create the k3d cluster + managed registry (idempotent)
+dev-cluster:
+    {{_dev}} cluster
+
+# Build the cybersec-dask image + import it into k3d (Dask baseline; one-time/slow)
+dev-image:
+    {{_dev}} image
+
+# Apply the base resources (namespaces, config/secret, Dask operator + cluster, services)
+dev-deploy:
+    {{_dev}} deploy
+
+# Seed OTEL parquet (mode=minimal) into the devenv MinIO bucket
+dev-seed:
+    {{_dev}} seed
+
+# Start Tilt against the running k3d cluster (live-reload the two app Deployments)
+dev-tilt:
+    {{_dev}} tilt
+
+# Pods/services across the dev namespaces
+dev-status:
+    {{_dev}} status
+
+# Delete the k3d cluster + registry (devenv MinIO + its data are left intact)
+dev-down:
+    {{_dev}} down

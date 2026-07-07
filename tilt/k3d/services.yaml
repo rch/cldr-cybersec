@@ -1,0 +1,48 @@
+# Services the Tilt overlays deliberately omit (on the real deploy these
+# "persist from the original Zarf deployment" — see tilt/engine-dev.yaml and
+# tilt/panel-viz-dev.yaml). On laptop k3d there is no prior Zarf deploy, so we
+# apply them here. The Deployments themselves are owned by Tilt (live-reload).
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: navigator-engine
+  namespace: panel-viz
+  labels:
+    app: navigator-engine
+    app.kubernetes.io/name: navigator-engine
+    app.kubernetes.io/managed-by: tilt
+spec:
+  type: ClusterIP
+  selector:
+    app: navigator-engine
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-navigator
+  namespace: panel-viz
+  labels:
+    app: otel-navigator
+    app.kubernetes.io/name: otel-navigator
+    app.kubernetes.io/managed-by: tilt
+spec:
+  # NodePort so the browser can reach Panel (5006) + the terminal WS (8765)
+  # through the k3d host port-map, matching the air-gap NodePorts. Tilt also
+  # port-forwards these, so either access path works.
+  type: NodePort
+  selector:
+    app: otel-navigator
+  ports:
+    - name: http
+      port: 5006
+      targetPort: 5006
+      nodePort: 30506
+    - name: ws
+      port: 8765
+      targetPort: 8765
+      nodePort: 30765
