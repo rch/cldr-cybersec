@@ -77,6 +77,59 @@ def _force_delete_pvc(ctx: Ctx, ns: str, name: str) -> bool:
     return ctx.get("pvc", name, ns=ns) is None
 
 
+_HELM_PENDING = ("pending-install", "pending-upgrade", "pending-rollback")
+
+
+def _unwedge_pending_helm(ctx: Ctx) -> List[str]:
+    """A converge/zarf killed mid-deploy leaves its Helm release pending-install/
+    pending-upgrade — after which EVERY retry of that chart fails with 'another
+    operation (install/upgrade/rollback) is in progress'. Deleting the LATEST
+    (pending) release secret reverts Helm's view to the previous deployed revision so
+    the next deploy proceeds. Only the newest revision per release matters (Helm reads
+    release status from it); older secrets are history and are left alone. Layer-B —
+    pure Helm bookkeeping, no workload/image is touched."""
+    obj = ctx.kjson(["get", "secrets", "-A", "-l", "owner=helm"]) or {}
+    latest: dict = {}   # (ns, release) -> (version, secret_name, status)
+    for s in obj.get("items", []):
+        md = s.get("metadata", {}) or {}
+        lab = md.get("labels", {}) or {}
+        try:
+            ver = int(lab.get("version", 0))
+        except (TypeError, ValueError):
+            continue
+        key = (md.get("namespace"), lab.get("name"))
+        if key not in latest or ver > latest[key][0]:
+            latest[key] = (ver, md.get("name"), lab.get("status"))
+    actions: List[str] = []
+    for (ns, rel), (ver, name, status) in latest.items():
+        if status in _HELM_PENDING and ns and name:
+            if ctx.k(["delete", "secret", name, "-n", ns]).returncode == 0:
+                actions.append(f"unwedged pending Helm release {ns}/{rel} "
+                               f"(deleted stuck rev {ver}: {status})")
+    return actions
+
+
+def _unwedge_terminating_app_ns(ctx: Ctx) -> List[str]:
+    """An app namespace stuck Terminating makes its component deploy fail with
+    'namespace ... is being terminated'. Clear its pods FIRST (force-finalizing a
+    namespace with live pods ORPHANS them — the teardown lesson), then force-finalize
+    once empty. If pods linger this pass, the finalize simply happens on the next
+    reconcile pass (the loop settles between passes). Layer-B only."""
+    actions: List[str] = []
+    for ns in APP_NAMESPACES:
+        obj = ctx.get("namespace", ns)
+        if not obj or obj.get("status", {}).get("phase") != "Terminating":
+            continue
+        ctx.k(["delete", "pods", "--all", "-n", ns,
+               "--force", "--grace-period=0", "--wait=false"])
+        if not ctx.items("pods", ns=ns):
+            if _force_finalize_ns(ctx, ns):
+                actions.append(f"force-finalized Terminating ns {ns}")
+        else:
+            actions.append(f"cleared pods in Terminating ns {ns} (finalize next pass)")
+    return actions
+
+
 # S3/deploy variables that are SECRET — delivered via ZARF_VAR_* ENV only (kept off
 # argv / the process table). Everything else (bucket, region, endpoint, replica count)
 # is non-sensitive config and goes on --set-variables, the RELIABLE substitution path
@@ -102,6 +155,12 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
                    "converge (would render OTEL_DATA_PATH=s3:/// → runtime 'Invalid bucket "
                    "name s3:'). Re-run with S3_BUCKET set (export it before converge-aws.sh, "
                    "or pass --set-variables S3_BUCKET=… / --creds-file).")
+    # Unwind the two deploy-blocking wedge states BEFORE invoking zarf, so a plain
+    # deploy can succeed: a Helm release left pending-* by a killed prior deploy
+    # ("another operation is in progress"), and an app namespace stuck Terminating
+    # ("namespace is being terminated"). Both are Layer-B bookkeeping/state.
+    unwound = _unwedge_pending_helm(ctx) + _unwedge_terminating_app_ns(ctx)
+    pre = f"  [unwound: {'; '.join(unwound)}]" if unwound else ""
     args = ["package", "deploy", ctx.package_path, "--confirm",
             f"--components={components}", "--retries", "10"]
     if not ctx.registry_pvc_enabled:
@@ -118,14 +177,14 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
             args.append(f"--set-variables={k.upper()}={v}")
     r = ctx.zarf(args, env=env)
     if r.returncode == 0:
-        return Fix(True, f"zarf deploy {components}: rc=0")
+        return Fix(True, f"zarf deploy {components}: rc=0{pre}")
     # Surface the actual zarf/Helm error tail, not a bare rc=1 — the deploy failures
     # (dask-operator/jupyterhub) only showed "rc=1" all afternoon. Last lines tend to
     # carry the cause (chart timeout, image pull, CRD hook); S3 secrets ride env, not
     # stdout, so this stays clean.
     tail = (r.stderr or r.stdout or "").strip().splitlines()[-3:]
     suffix = f" — {' / '.join(s.strip() for s in tail)}" if tail else ""
-    return Fix(False, f"zarf deploy {components}: rc={r.returncode}{suffix}")
+    return Fix(False, f"zarf deploy {components}: rc={r.returncode}{suffix}{pre}")
 
 
 def _ensure_default_sc(ctx: Ctx, sc: str = "local-path") -> bool:
@@ -280,7 +339,26 @@ def _det_registry_running(ctx: Ctx) -> Probe:
     ready, total = ctx.pods_ready("zarf", "app=docker-registry")
     if ready < 1 and total == 0:
         ready, total = ctx.pods_ready("zarf", "app.kubernetes.io/name=zarf-docker-registry")
-    return Probe(ready >= 1, f"zarf-docker-registry ready {ready}/{total}")
+    if ready < 1:
+        return Probe(False, f"zarf-docker-registry ready {ready}/{total}")
+    # A Running registry is NOT a completed init. The agent-hook mutating webhook
+    # rewrites image refs to the internal registry at admission — with it dead or
+    # absent (e.g. a partial init, or a force-finalized ns that took the agent with
+    # it), every later deploy's pods ImagePullBackOff against ghcr.io/quay.io and the
+    # loop stalls WITHOUT naming the cause. Same remediation either way: re-run
+    # `zarf init` (idempotent — redeploys agent + webhook). Matched by pod-name
+    # prefix, not a label guess.
+    agents = [p for p in ctx.items("pods", ns="zarf")
+              if p.get("metadata", {}).get("name", "").startswith("agent-hook")]
+    a_ready = sum(
+        1 for p in agents
+        if {c["type"]: c["status"]
+            for c in p.get("status", {}).get("conditions", [])}.get("Ready") == "True")
+    if a_ready < 1:
+        return Probe(False,
+                     f"registry Ready but zarf agent-hook {a_ready}/{len(agents)} — init "
+                     "incomplete (image refs won't be rewritten); re-init required")
+    return Probe(True, f"registry ready {ready}/{total}, agent-hook {a_ready}/{len(agents)}")
 
 
 def _default_storage_classes(ctx: Ctx) -> List[str]:
@@ -335,6 +413,11 @@ def _pre_init_cleanup(ctx: Ctx) -> List[str]:
     if ns and ns.get("status", {}).get("phase") == "Terminating":
         if _force_finalize_ns(ctx, "zarf"):
             actions.append("force-finalized Terminating zarf ns")
+
+    # A2. A KILLED prior init/deploy leaves its Helm release pending-* — after which
+    #     zarf's own helm upgrade of that chart fails "another operation is in
+    #     progress" forever. Unwind before init (all modalities).
+    actions += _unwedge_pending_helm(ctx)
 
     # The storage unwind belongs to the RESILIENT path (a static claimRef PV, no
     # provisioner). Dynamic-provisioning mode deliberately relies on a default SC.
@@ -463,9 +546,15 @@ def _det_images_pushed(ctx: Ctx) -> Probe:
             return Probe(False, f"{ns} pods in ImagePullBackOff — images not in registry")
     if ctx.have_zarf():
         r = ctx.zarf(["tools", "registry", "catalog"], timeout=60)
-        if r.returncode == 0 and "cybersec-dask" in r.stdout:
-            return Probe(True, "registry catalog contains cybersec-dask")
-    # No evidence either way pre-deploy: defer to the component invariants.
+        if r.returncode == 0:
+            if "cybersec-dask" in r.stdout:
+                return Probe(True, "registry catalog contains cybersec-dask")
+            # Evidence of ABSENCE: catalog reachable and the app repo isn't there.
+            # (Previously conservative-True — harmless only because required
+            # components re-push on every deploy; being precise keeps the report
+            # honest and pushes at T2 where it belongs.)
+            return Probe(False, "registry catalog reachable but cybersec-dask absent — push needed")
+    # Catalog unreachable / no pods to judge: defer to the component invariants.
     return Probe(True, "no image-pull failures observed")
 
 

@@ -59,9 +59,9 @@ IP="$(bash "$SB" ip 2>/dev/null)"
 on_node "rm -rf ~/cybersec-converge/converge/__pycache__" 2>/dev/null || true
 echo "✓ node $IP up, air-gapped, engine staged — running the matrix"
 
-# induce → converge → assert T1.registry-running recovered.
+# induce → converge → assert T1.registry-running recovered (+ optional post-assert).
 run_case() {
-  local name="$1" induce_fn="$2"
+  local name="$1" induce_fn="$2" post_fn="${3:-}"
   echo; echo "═══════════ CASE: $name"
   "$induce_fn"
   local out clean t1 act
@@ -69,8 +69,8 @@ run_case() {
   clean="$(printf '%s\n' "$out" | _strip)"
   t1="$(printf '%s\n' "$clean" | grep -E 'T1[[:space:]].*registry-running' | head -1)"
   act="$(printf '%s\n' "$clean" | grep -oE \
-        'un-defaulted StorageClass[^];]*|reset static registry PV[^];]*|force-finalized[^];]*|created static registry PV[^];]*' \
-        | head -3 | paste -sd'; ' -)"
+        'un-defaulted StorageClass[^];]*|reset static registry PV[^];]*|force-finalized[^];]*|created static registry PV[^];]*|deleted captured registry PVC[^];]*|unwedged pending Helm release[^];]*|cleared pods in Terminating[^];]*' \
+        | head -4 | paste -sd'; ' -)"
   if printf '%s' "$t1" | grep -qiE '\[ *(ok|fixed) *\]'; then
     echo "  ✓ T1 recovered:${t1#*registry-running}"
     [ -n "$act" ] && echo "    ↳ FSM unwind: $act"
@@ -84,11 +84,15 @@ run_case() {
       echo "    ✗ registry PVC storageClassName=$pvc_sc (expected \"\" — capture not prevented)"
       FAIL=$((FAIL + 1)); FAILED_CASES+=("$name [PVC on '$pvc_sc' not '']"); return
     fi
+    # Case-specific proof (agent back / helm unwedged / ns Active …)
+    if [ -n "$post_fn" ] && ! "$post_fn"; then
+      FAIL=$((FAIL + 1)); FAILED_CASES+=("$name [post-assert]"); return
+    fi
     PASS=$((PASS + 1))
   else
     echo "  ✗ T1 did NOT recover"
     echo "    ${t1:-<no T1.registry-running line in output>}"
-    printf '%s\n' "$clean" | grep -iE 'rc=1|MANUAL|Pending|won.t bind|ExternalProvision|registry' \
+    printf '%s\n' "$clean" | grep -iE 'rc=1|MANUAL|Pending|won.t bind|ExternalProvision|registry|agent-hook' \
       | tail -5 | sed 's/^/      /'
     FAIL=$((FAIL + 1)); FAILED_CASES+=("$name")
   fi
@@ -162,12 +166,114 @@ spec:
 Y
 }
 
+# ── audit-gap inducers (2026-07-07 state-space audit) ─────────────────────────
+
+induce_dead_agent() {      # registry Running ≠ init complete: agent gone → every later
+  # deploy ImagePullBackOff on upstream refs. T1 detect must now name it + re-init.
+  on_node "$KCTL -n zarf delete deploy agent-hook --wait=true" >/dev/null 2>&1 || true
+  local i=0
+  while [ "$i" -lt 10 ] && on_node "$KCTL -n zarf get pods --no-headers 2>/dev/null | grep -q '^agent-hook'"; do
+    sleep 3; i=$((i + 1))
+  done
+}
+
+post_agent_back() {
+  local n
+  n="$(on_node "$KCTL -n zarf get pods --no-headers 2>/dev/null" | grep -c '^agent-hook.*Running')" || true
+  if [ "${n:-0}" -ge 1 ]; then echo "    ↳ agent-hook Running (${n}) ✓"; return 0; fi
+  echo "    ✗ agent-hook NOT running after converge"; return 1
+}
+
+induce_wedged_helm() {     # the killed-mid-deploy state: a REAL pending-upgrade helm
+  # revision (payload + labels) makes every upgrade of that release fail "another
+  # operation is in progress"; the operator Deployment is removed so converge MUST
+  # deploy — and therefore must unwedge first.
+  cat <<'PY' | on_node "cat > /tmp/sb-wedge-helm.py"
+import base64, gzip, json, subprocess
+KC = "/var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml".split()
+def k(*a, inp=None):
+    return subprocess.run(KC + list(a), capture_output=True, text=True, input=inp)
+o = json.loads(k("get", "secrets", "-n", "dask-operator", "-l", "owner=helm", "-o", "json").stdout)
+by = {}
+for s in o.get("items", []):
+    lab = s["metadata"]["labels"]; v = int(lab["version"])
+    if lab["name"] not in by or v > by[lab["name"]][0]:
+        by[lab["name"]] = (v, s)
+assert by, "no helm release found in ns dask-operator"
+rel_name, (ver, last) = sorted(by.items())[0]
+new = ver + 1
+gz = base64.b64decode(base64.b64decode(last["data"]["release"]))
+rel = json.loads(gzip.decompress(gz))
+rel["version"] = new
+rel["info"]["status"] = "pending-upgrade"
+helm_blob = base64.b64encode(gzip.compress(json.dumps(rel).encode())).decode()
+secret = {
+    "apiVersion": "v1", "kind": "Secret", "type": "helm.sh/release.v1",
+    "metadata": {
+        "name": "sh.helm.release.v1.%s.v%d" % (rel_name, new),
+        "namespace": "dask-operator",
+        "labels": {"name": rel_name, "owner": "helm",
+                   "status": "pending-upgrade", "version": str(new)},
+    },
+    "data": {"release": base64.b64encode(helm_blob.encode()).decode()},
+}
+r = k("apply", "-f", "-", inp=json.dumps(secret))
+print("planted pending-upgrade rev:", rel_name, new, "rc=", r.returncode)
+r2 = k("delete", "deploy", "--all", "-n", "dask-operator", "--wait=false")
+print("operator deployment removed rc=", r2.returncode)
+PY
+  on_node "sudo python3 /tmp/sb-wedge-helm.py" 2>&1 | sed 's/^/    induce: /'
+}
+
+post_helm_clean() {
+  local pend ops
+  pend="$(on_node "$KCTL get secrets -A -l 'owner=helm,status in (pending-install,pending-upgrade,pending-rollback)' --no-headers 2>/dev/null | grep -c ." )" || true
+  ops="$(on_node "$KCTL -n dask-operator get pods --no-headers 2>/dev/null" | grep -c 'Running')" || true
+  if [ "${pend:-1}" -eq 0 ] && [ "${ops:-0}" -ge 1 ]; then
+    echo "    ↳ no pending-* helm releases; operator Running (${ops}) ✓"; return 0
+  fi
+  echo "    ✗ pending helm secrets remain (${pend:-?}) or operator not Running (${ops:-0})"; return 1
+}
+
+induce_terminating_ns() {  # a finalizer-bearing resource wedges panel-viz in Terminating:
+  # its component deploy fails "namespace is being terminated" until force-finalized.
+  cat <<'Y' | on_node "$KCTL apply -f -" >/dev/null 2>&1 || true
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sb-wedge
+  namespace: panel-viz
+  finalizers: ["cybersec.sandbox/test-wedge"]
+Y
+  on_node "$KCTL delete ns panel-viz --wait=false" >/dev/null 2>&1 || true
+  local i=0
+  while [ "$i" -lt 10 ]; do
+    [ "$(on_node "$KCTL get ns panel-viz -o jsonpath='{.status.phase}'" 2>/dev/null)" = "Terminating" ] && break
+    sleep 3; i=$((i + 1))
+  done
+}
+
+post_ns_active() {
+  # clear the wedge cm's finalizer if it resurfaced in the recreated ns (zombie object)
+  on_node "$KCTL -n panel-viz patch configmap sb-wedge --type=merge -p '{\"metadata\":{\"finalizers\":null}}'" >/dev/null 2>&1 || true
+  local phase pods
+  phase="$(on_node "$KCTL get ns panel-viz -o jsonpath='{.status.phase}'" 2>/dev/null)"
+  pods="$(on_node "$KCTL -n panel-viz get pods --no-headers 2>/dev/null" | grep -c 'Running')" || true
+  if [ "$phase" = "Active" ] && [ "${pods:-0}" -ge 1 ]; then
+    echo "    ↳ panel-viz Active, ${pods} pod(s) Running ✓"; return 0
+  fi
+  echo "    ✗ panel-viz phase=${phase:-absent}, Running pods=${pods:-0}"; return 1
+}
+
 # ── the permutation matrix ────────────────────────────────────────────────────
 run_case "baseline (idempotent converge stays green)"   induce_baseline
 run_case "default StorageClass capture (the field bug)"  induce_default_sc
 run_case "vestigial captured PVC (init reuses 'local-path')" induce_vestigial_pvc
 run_case "Released registry PV (PVC deleted)"            induce_released_pv
 run_case "class-drifted static PV"                       induce_class_drift
+run_case "dead zarf agent (registry up, init incomplete)" induce_dead_agent   post_agent_back
+run_case "wedged pending-upgrade Helm release"            induce_wedged_helm  post_helm_clean
+run_case "app namespace stuck Terminating (apply path)"   induce_terminating_ns post_ns_active
 
 on_node "$KCTL delete storageclass sb-fsm-default --ignore-not-found" >/dev/null 2>&1 || true
 
