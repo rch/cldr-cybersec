@@ -63,6 +63,15 @@ echo "✓ node $IP up, air-gapped, engine staged — running the matrix"
 run_case() {
   local name="$1" induce_fn="$2" post_fn="${3:-}"
   echo; echo "═══════════ CASE: $name"
+  # Fail FAST if the node is unreachable (e.g. the operator's residential IP rotated
+  # out of the SG /32 mid-run — it happened, truncating a case's converge output and
+  # misgrading it). A dead link must abort the matrix loudly, not grade cases.
+  if ! on_node "true" >/dev/null 2>&1; then
+    echo "❌ node unreachable before '$name' — did your public IP rotate out of the SG /32?"
+    echo "   recover: just sandbox-config && bash run-sandbox.sh airgap  (re-applies the /32, keeps egress cut)"
+    FAIL=$((FAIL + 1)); FAILED_CASES+=("$name [node unreachable — aborted matrix]")
+    finish 1
+  fi
   "$induce_fn"
   local out clean t1 act
   out="$(bash "$SB" converge 2>&1)" || true

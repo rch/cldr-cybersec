@@ -155,6 +155,15 @@ resource "aws_instance" "sandbox" {
     http_tokens = "required" # IMDSv2
   }
   tags = { Name = "cybersec-sandbox" }
+
+  # The SSM "latest AL2023" lookup re-resolves as Amazon publishes new AMIs — without
+  # this, a config-only re-apply (e.g. refreshing ssh_cidr after the operator's
+  # residential IP rotates) REPLACES the node and destroys the in-flight validation
+  # state (it did: a /32 refresh terminated a mid-matrix node). Fresh provisions still
+  # get the latest AMI; an existing node is never replaced by AMI drift.
+  lifecycle {
+    ignore_changes = [ami]
+  }
 }
 
 # -----------------------------------------------------------------------------
