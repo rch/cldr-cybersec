@@ -241,24 +241,57 @@ def _unwedge_pending_helm(ctx: Ctx) -> List[str]:
     return actions
 
 
+_NS_CONTENT_KINDS = ("deployments", "replicasets", "statefulsets", "daemonsets",
+                     "services", "configmaps", "secrets", "pvc", "jobs")
+
+
 def _unwedge_terminating_app_ns(ctx: Ctx) -> List[str]:
-    """An app namespace stuck Terminating makes its component deploy fail with
-    'namespace ... is being terminated'. Clear its pods FIRST (force-finalizing a
-    namespace with live pods ORPHANS them — the teardown lesson), then force-finalize
-    once empty. If pods linger this pass, the finalize simply happens on the next
-    reconcile pass (the loop settles between passes). Layer-B only."""
+    """Two app-namespace wedge states, both field-proven:
+
+    TERMINATING — a stuck ns fails its component deploy with 'namespace ... is being
+    terminated'. Crucially, force-finalizing removes ONLY the namespace object: its
+    contents' etcd keys survive and RESURFACE when the ns is recreated (as inert
+    husks — see below). So clear the CONTENTS first (workload kinds explicitly, pods
+    force-deleted; finalizer-bearing stragglers stripped), and force-finalize only
+    once the ns is actually empty — deferring to the next reconcile pass if not.
+
+    ACTIVE HUSKS — a previously force-finalized-then-recreated ns re-exposes its old
+    Deployments/ReplicaSets with dead controller state (desired>0, current=0, no
+    events, no owning helm release): every deploy into it hangs until timeout. The
+    signature is crisp — Deployments present, ZERO pods. Delete the ns cleanly
+    (normal deletion works now and GCs the contents properly); the component deploy
+    recreates everything fresh. Layer-B only."""
     actions: List[str] = []
     for ns in APP_NAMESPACES:
         obj = ctx.get("namespace", ns)
-        if not obj or obj.get("status", {}).get("phase") != "Terminating":
+        if not obj:
             continue
-        ctx.k(["delete", "pods", "--all", "-n", ns,
-               "--force", "--grace-period=0", "--wait=false"])
-        if not ctx.items("pods", ns=ns):
-            if _force_finalize_ns(ctx, ns):
-                actions.append(f"force-finalized Terminating ns {ns}")
-        else:
-            actions.append(f"cleared pods in Terminating ns {ns} (finalize next pass)")
+        phase = obj.get("status", {}).get("phase")
+        if phase == "Terminating":
+            for kind in _NS_CONTENT_KINDS:
+                ctx.k(["delete", kind, "--all", "-n", ns, "--wait=false"])
+            ctx.k(["delete", "pods", "--all", "-n", ns,
+                   "--force", "--grace-period=0", "--wait=false"])
+            # strip finalizers off stragglers so GC can actually finish them
+            for kind in _NS_CONTENT_KINDS:
+                for it in ctx.items(kind, ns=ns):
+                    if (it.get("metadata", {}) or {}).get("finalizers"):
+                        ctx.k(["patch", kind, it["metadata"]["name"], "-n", ns,
+                               "--type=merge", "-p", '{"metadata":{"finalizers":null}}'])
+            leftovers = any(ctx.items(k, ns=ns) for k in ("deployments", "pods"))
+            if not leftovers:
+                if _force_finalize_ns(ctx, ns):
+                    actions.append(f"force-finalized Terminating ns {ns} (contents cleared first)")
+            else:
+                actions.append(f"clearing contents of Terminating ns {ns} (finalize next pass)")
+        elif phase == "Active":
+            deps = ctx.items("deployments", ns=ns)
+            pods = ctx.items("pods", ns=ns)
+            if deps and not pods:
+                ctx.k(["delete", "namespace", ns, "--wait=false"])
+                actions.append(f"deleted ns {ns} carrying resurrected husk workloads "
+                               "(Deployments with zero pods — etcd leftovers of a prior "
+                               "force-finalize; the deploy recreates it clean)")
     return actions
 
 
