@@ -79,6 +79,138 @@ def _force_delete_pvc(ctx: Ctx, ns: str, name: str) -> bool:
 
 _HELM_PENDING = ("pending-install", "pending-upgrade", "pending-rollback")
 
+# A ref the zarf agent MUST rewrite at admission. Never pulled — server dry-run only.
+_CANARY_REF = "ghcr.io/zarf-canary/agent-check:v1"
+_IMAGE_WAIT_BAD = ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull")
+
+
+def _poisoned_app_ns(ctx: Ctx) -> List[str]:
+    """App namespaces carrying ``zarf.dev/agent=ignore`` — the SILENT killer of image
+    rewriting. Zarf's agent mutates pod image refs at admission (the helm manifests
+    keep upstream refs like ghcr.io by design), and its webhook EXCLUDES namespaces
+    labeled ignore/skip. ``zarf init`` labels every PRE-EXISTING namespace ignore (so
+    it won't disturb prior workloads) — correct on first init, but a RE-RUN of init
+    over an existing deployment finds the app namespaces already present and poisons
+    them all. Latent until any pod churn: the recreated pod keeps its upstream ref and
+    ImagePullBackOffs forever in the closed world. Field-proven on the sandbox."""
+    out = []
+    for ns in APP_NAMESPACES:
+        obj = ctx.get("namespace", ns)
+        if not obj:
+            continue
+        labels = (obj.get("metadata", {}) or {}).get("labels", {}) or {}
+        if labels.get("zarf.dev/agent") in ("ignore", "skip"):
+            out.append(ns)
+    return out
+
+
+def _strip_agent_ignore(ctx: Ctx) -> List[str]:
+    """Remove the ``zarf.dev/agent=ignore`` label from OUR app namespaces so the agent
+    mutates their pods again. Only the package's own namespaces — never cluster/system
+    namespaces, where the ignore label is correct and deliberate. Idempotent."""
+    actions: List[str] = []
+    for ns in _poisoned_app_ns(ctx):
+        if ctx.k(["label", "namespace", ns, "zarf.dev/agent-", "--overwrite"]).returncode == 0:
+            actions.append(f"stripped zarf.dev/agent=ignore from ns {ns} "
+                           "(re-init had disabled image rewriting there)")
+    return actions
+
+
+def _webhook_mutating(ctx: Ctx) -> "bool | None":
+    """Does the zarf agent ACTUALLY rewrite an upstream image ref in an APP namespace
+    right now? A SERVER-side dry-run exercises the full admission chain (webhook
+    selectors included), persists nothing and pulls nothing. Runs against the first
+    EXISTING app namespace — zarf deliberately ignores pre-init namespaces like
+    ``default``, so probing there would be a permanent false negative.
+    True=mutating, False=bypassed, None=no verdict (no app ns yet / probe failed)."""
+    ns = next((n for n in APP_NAMESPACES if ctx.exists("namespace", n)), None)
+    if ns is None:
+        return None
+    r = ctx.k(["-n", ns, "run", "zarf-agent-canary",
+               f"--image={_CANARY_REF}", "--restart=Never", "--dry-run=server",
+               "-o", "jsonpath={.spec.containers[0].image}"])
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    return _CANARY_REF not in r.stdout
+
+
+_DASK_ENV_KEYS = ("S3_ENDPOINT", "AWS_REGION", "AWS_ACCESS_KEY_ID",
+                  "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
+
+
+def _unwedge_broken_dask_cluster(ctx: Ctx) -> List[str]:
+    """The dask operator (kopf) creates the scheduler Deployment only on the CR's
+    CREATION event — it neither propagates CR env changes to existing children nor
+    recreates a deleted child (both field-proven). So two wedge states can only be
+    fixed at the CR level: (a) scheduler/worker Deployments carrying S3/AWS env that
+    DRIFTED from the CR (a redeploy fixed the CR's creds; pods keep the old — possibly
+    empty — env forever, and the bucket-ensure action execs the scheduler using ITS
+    env), and (b) the scheduler Deployment MISSING under a live CR (zarf re-applying
+    the unchanged CR is a server-side no-op → no create event → it never returns).
+    Remediation: delete the DaskCluster CR (clearing kopf's finalizer if it lingers) —
+    the imminent component deploy re-applies it as a fresh CREATE and the operator
+    builds scheduler+workers from it. Layer-B; no data lives in these pods."""
+    cr = ctx.get("daskcluster", "cybersec-dask", ns="dask")
+    if not cr:
+        return []
+
+    def env_map(spec: dict) -> dict:
+        m = {}
+        for c in (spec or {}).get("containers", []) or []:
+            for e in c.get("env", []) or []:
+                m[e.get("name")] = e.get("value", "") or ""
+        return m
+
+    want = {
+        "scheduler": env_map(cr.get("spec", {}).get("scheduler", {}).get("spec", {})),
+        "worker": env_map(cr.get("spec", {}).get("worker", {}).get("spec", {})),
+    }
+    scheds = ctx.items("deployments", ns="dask", selector="dask.org/component=scheduler")
+    drifted = []
+    for d in ctx.items("deployments", ns="dask"):
+        role = (d.get("metadata", {}).get("labels", {}) or {}).get("dask.org/component", "")
+        if role not in want:
+            continue
+        have = env_map(d.get("spec", {}).get("template", {}).get("spec", {}))
+        keys = [k for k in _DASK_ENV_KEYS if k in want[role]]
+        if any(have.get(k, "") != want[role].get(k, "") for k in keys):
+            drifted.append(d["metadata"]["name"])
+    if scheds and not drifted:
+        return []
+    reason = ("scheduler Deployment missing under a live CR" if not scheds
+              else f"S3 env drifted from the CR on {drifted}")
+    ctx.k(["delete", "daskcluster", "cybersec-dask", "-n", "dask",
+           "--ignore-not-found", "--wait=false"])
+    if ctx.get("daskcluster", "cybersec-dask", ns="dask"):   # kopf finalizer lingering
+        ctx.k(["patch", "daskcluster", "cybersec-dask", "-n", "dask", "--type=merge",
+               "-p", '{"metadata":{"finalizers":null}}'])
+    return [f"deleted DaskCluster CR ({reason}) — the deploy re-creates it fresh "
+            "(the operator only builds children on CR creation)"]
+
+
+def _unwedge_unmutated_pods(ctx: Ctx) -> List[str]:
+    """Pods admitted while the webhook was bypassed carry UPSTREAM image refs and
+    ImagePullBackOff forever in the closed world — and a no-diff helm upgrade will NOT
+    recreate them, so the deploy's --wait times out again and again. Delete them; their
+    controllers re-create them through the (by now effective) webhook. Precise: only
+    ImagePull-stuck pods whose ref is NOT the internal registry — an internal-ref pod
+    stuck pulling is a T2 registry-content problem, not an admission one. Layer-B."""
+    actions: List[str] = []
+    for ns in APP_NAMESPACES:
+        for p in ctx.items("pods", ns=ns):
+            name = p.get("metadata", {}).get("name", "")
+            stuck = any(
+                ((cs.get("state", {}) or {}).get("waiting") or {}).get("reason") in _IMAGE_WAIT_BAD
+                for cs in (p.get("status", {}).get("containerStatuses", []) or []))
+            if not stuck:
+                continue
+            imgs = [c.get("image", "") for c in p.get("spec", {}).get("containers", [])]
+            if any(i and not i.startswith("127.0.0.1:") for i in imgs):
+                if ctx.k(["delete", "pod", name, "-n", ns, "--wait=false"]).returncode == 0:
+                    actions.append(f"deleted unmutated ImagePull-stuck pod {ns}/{name} "
+                                   "(upstream ref — re-admits via the webhook)")
+    return actions
+
 
 def _unwedge_pending_helm(ctx: Ctx) -> List[str]:
     """A converge/zarf killed mid-deploy leaves its Helm release pending-install/
@@ -155,27 +287,57 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
                    "converge (would render OTEL_DATA_PATH=s3:/// → runtime 'Invalid bucket "
                    "name s3:'). Re-run with S3_BUCKET set (export it before converge-aws.sh, "
                    "or pass --set-variables S3_BUCKET=… / --creds-file).")
-    # Unwind the two deploy-blocking wedge states BEFORE invoking zarf, so a plain
-    # deploy can succeed: a Helm release left pending-* by a killed prior deploy
-    # ("another operation is in progress"), and an app namespace stuck Terminating
-    # ("namespace is being terminated"). Both are Layer-B bookkeeping/state.
-    unwound = _unwedge_pending_helm(ctx) + _unwedge_terminating_app_ns(ctx)
+    # Unwind the deploy-blocking wedge states BEFORE invoking zarf, so a plain deploy
+    # can succeed: a Helm release left pending-* by a killed prior deploy ("another
+    # operation is in progress"), an app namespace stuck Terminating ("namespace is
+    # being terminated"), agent-poisoned namespaces (a re-init labeled them ignore —
+    # pods would admit with upstream refs), and pods ALREADY admitted unmutated (a
+    # no-diff helm upgrade never recreates them → --wait times out forever). All
+    # Layer-B bookkeeping/state. Ordering: labels are stripped before pods are
+    # deleted, so the controllers' replacements re-admit through an ACTIVE agent.
+    unwound = (_unwedge_pending_helm(ctx) + _unwedge_terminating_app_ns(ctx)
+               + _strip_agent_ignore(ctx) + _unwedge_unmutated_pods(ctx)
+               + _unwedge_broken_dask_cluster(ctx))
     pre = f"  [unwound: {'; '.join(unwound)}]" if unwound else ""
     args = ["package", "deploy", ctx.package_path, "--confirm",
             f"--components={components}", "--retries", "10"]
     if not ctx.registry_pvc_enabled:
         args.append("--set-variables=REGISTRY_PVC_ENABLED=false")
     # Non-sensitive vars → --set-variables (reliable; --set is its deprecated alias on
-    # zarf ≥0.70); secrets → ZARF_VAR_* env (off argv/ps).
+    # zarf ≥0.70). SECRETS → a ZARF_CONFIG tmpfs file ([package.deploy.set]), zarf's
+    # first-class config path: keeps them off argv/ps AND actually reaches variable
+    # templating — a bare ZARF_VAR_* env does NOT in v0.70.1 (field-proven twice: the
+    # live S3_BUCKET rendered "" in the configMap, and the sandbox DaskCluster CR
+    # rendered empty AWS creds, silently de-credentialing the workers).
     env = {}
+    secrets = {}
     for k, v in ctx.s3.items():
         if not v:
             continue
         if k.upper() in _S3_SECRET_KEYS:
-            env[f"ZARF_VAR_{k.upper()}"] = v
+            secrets[k.upper()] = v
         else:
             args.append(f"--set-variables={k.upper()}={v}")
-    r = ctx.zarf(args, env=env)
+    cfg_path = None
+    if secrets:
+        import tempfile
+        d = "/dev/shm" if Path("/dev/shm").is_dir() else None
+        fd, cfg_path = tempfile.mkstemp(prefix=".zarf-cfg-", suffix=".toml", dir=d)
+        with open(fd, "w") as f:   # mkstemp: 0600
+            f.write("[package.deploy.set]\n")
+            for k, v in secrets.items():
+                esc = v.replace("\\", "\\\\").replace('"', '\\"')
+                f.write(f'{k} = "{esc}"\n')
+        env["ZARF_CONFIG"] = cfg_path
+    try:
+        r = ctx.zarf(args, env=env)
+    finally:
+        if cfg_path:
+            try:
+                Path(cfg_path).write_bytes(b"\0" * 256)   # best-effort scrub (tmpfs)
+                Path(cfg_path).unlink()
+            except OSError:
+                pass
     if r.returncode == 0:
         return Fix(True, f"zarf deploy {components}: rc=0{pre}")
     # Surface the actual zarf/Helm error tail, not a bare rc=1 — the deploy failures
@@ -358,7 +520,26 @@ def _det_registry_running(ctx: Ctx) -> Probe:
         return Probe(False,
                      f"registry Ready but zarf agent-hook {a_ready}/{len(agents)} — init "
                      "incomplete (image refs won't be rewritten); re-init required")
-    return Probe(True, f"registry ready {ready}/{total}, agent-hook {a_ready}/{len(agents)}")
+    # Ready agents are NOT enough — the agent must be BEHAVIORALLY effective for OUR
+    # namespaces. The field killer: a RE-RUN `zarf init` labels the (now pre-existing)
+    # app namespaces zarf.dev/agent=ignore, silently disabling image rewriting; any
+    # later pod churn then ImagePullBackOffs on upstream refs in the closed world.
+    poisoned = _poisoned_app_ns(ctx)
+    if poisoned:
+        return Probe(False,
+                     f"app namespaces labeled zarf.dev/agent=ignore: {poisoned} — a re-run "
+                     "`zarf init` disabled image rewriting there (pods created later keep "
+                     "upstream refs → ImagePullBackOff air-gapped); label strip required")
+    # End-to-end proof: a canary server dry-run in an app namespace must come back
+    # rewritten (exercises the webhook + selectors; persists nothing, pulls nothing).
+    mut = _webhook_mutating(ctx)
+    if mut is False:
+        return Probe(False,
+                     "registry+agent Ready, app namespaces unlabeled, but the agent did NOT "
+                     "rewrite a canary in an app namespace — admission not reaching the agent; "
+                     "re-init required")
+    return Probe(True, f"registry ready {ready}/{total}, agent-hook {a_ready}/{len(agents)}"
+                       + (", agent rewriting (canary)" if mut else ""))
 
 
 def _default_storage_classes(ctx: Ctx) -> List[str]:
@@ -418,6 +599,14 @@ def _pre_init_cleanup(ctx: Ctx) -> List[str]:
     #     zarf's own helm upgrade of that chart fails "another operation is in
     #     progress" forever. Unwind before init (all modalities).
     actions += _unwedge_pending_helm(ctx)
+
+    # A3. Strip zarf.dev/agent=ignore from OUR app namespaces. `zarf init` labels every
+    #     PRE-EXISTING namespace ignore; a re-run over an existing deployment therefore
+    #     poisons the app namespaces, silently disabling image rewriting for all later
+    #     pod churn. Strip BEFORE init here (and the coming init won't re-poison what
+    #     matters: it labels pre-existing namespaces, so we strip again post-init in
+    #     _rem_registry_running).
+    actions += _strip_agent_ignore(ctx)
 
     # The storage unwind belongs to the RESILIENT path (a static claimRef PV, no
     # provisioner). Dynamic-provisioning mode deliberately relies on a default SC.
@@ -524,6 +713,10 @@ def _rem_registry_running(ctx: Ctx) -> Fix:
     else:
         args.append("--set=REGISTRY_PVC_ENABLED=false")
     r = ctx.zarf(args)
+    # init labels PRE-EXISTING namespaces zarf.dev/agent=ignore — on a re-init that
+    # includes our app namespaces, which kills image rewriting for their future pods.
+    # Strip immediately after, every time. (Idempotent; no-op on a fresh deploy.)
+    actions += _strip_agent_ignore(ctx)
     tail = f"  [unwound: {'; '.join(actions)}]" if actions else ""
     if r.returncode == 0:
         return Fix(True, f"zarf init: rc=0{tail}")

@@ -187,10 +187,20 @@ induce_dead_agent() {      # registry Running ≠ init complete: agent gone → 
 }
 
 post_agent_back() {
-  local n
+  local n img
   n="$(on_node "$KCTL -n zarf get pods --no-headers 2>/dev/null" | grep -c '^agent-hook.*Running')" || true
-  if [ "${n:-0}" -ge 1 ]; then echo "    ↳ agent-hook Running (${n}) ✓"; return 0; fi
-  echo "    ✗ agent-hook NOT running after converge"; return 1
+  if [ "${n:-0}" -lt 1 ]; then echo "    ✗ agent-hook NOT running after converge"; return 1; fi
+  # Running is not enough — admission must BEHAVIORALLY rewrite an upstream ref in an
+  # APP namespace (the field poison: a re-run init labels pre-existing app namespaces
+  # zarf.dev/agent=ignore, disabling rewriting; probing `default` would be a permanent
+  # false negative — zarf deliberately ignores pre-init namespaces). Server dry-run
+  # exercises the full chain incl. selectors; persists nothing.
+  img="$(on_node "$KCTL -n dask-operator run zz-post-canary --image=ghcr.io/zarf-canary/agent-check:v1 --restart=Never --dry-run=server -o jsonpath='{.spec.containers[0].image}'" 2>/dev/null)"
+  case "$img" in
+    *ghcr.io/zarf-canary*) echo "    ✗ agent-hook Running but webhook NOT mutating (canary kept upstream ref)"; return 1 ;;
+    "")                    echo "    ↳ agent-hook Running (${n}) ✓ (canary gave no verdict)"; return 0 ;;
+    *)                     echo "    ↳ agent-hook Running (${n}), webhook mutating (canary → ${img%%@*}) ✓"; return 0 ;;
+  esac
 }
 
 induce_wedged_helm() {     # the killed-mid-deploy state: a REAL pending-upgrade helm

@@ -202,8 +202,9 @@ zarf tools registry catalog 2>/dev/null || echo "registry catalog unavailable (r
 ### 6a. Zarf **agent** + mutating webhook (the image-rewrite machinery)
 
 A registry that's `Running` is NOT a completed init. The **agent-hook** pods rewrite every deployed
-pod's image refs to the internal registry at admission — with the agent dead/absent, deploys "work"
-but pods `ImagePullBackOff` against `ghcr.io`/`quay.io` (they keep upstream refs). Check both:
+pod's image refs to the internal registry at admission (the helm manifests keep upstream refs like
+`ghcr.io` by design — the POD is what gets rewritten). With the agent dead/absent, deploys "work"
+but pods `ImagePullBackOff` against `ghcr.io`/`quay.io`. Check:
 
 ```bash
 kc -n zarf get pods | grep agent-hook || echo "⚠ NO agent-hook pods — init incomplete; re-run zarf init (idempotent)"
@@ -211,6 +212,40 @@ kc get mutatingwebhookconfiguration 2>/dev/null | grep -i zarf || echo "no zarf 
 # ORPHAN check: webhook present while the zarf ns is absent/Terminating = leftover from a
 # force-finalized ns (webhooks are cluster-scoped — ns deletion does NOT remove them):
 kc get ns zarf >/dev/null 2>&1 || { kc get mutatingwebhookconfiguration 2>/dev/null | grep -qi zarf && echo "⚠ ORPHANED zarf webhook (ns gone) — remediation §T1-E"; }
+```
+
+### 6b. ⚠ Namespace poison — the re-init time bomb (CHECK THIS ON SITE)
+
+**`zarf init` labels every PRE-EXISTING namespace `zarf.dev/agent=ignore`** (so it won't disturb
+prior workloads). Correct on first init — but every **re-run** of init over an existing deployment
+finds the app namespaces already present and **poisons them all**: the agent webhook excludes
+ignore-labeled namespaces, so image rewriting is silently OFF there. Latent until any pod churn
+(node reboot, eviction, redeploy) — the recreated pod keeps its upstream ref and
+`ImagePullBackOff`s forever. **A node where init has been re-run (i.e. any recovered node) almost
+certainly carries this poison.** Sandbox-proven 2026-07-08.
+
+```bash
+kc get ns --show-labels | grep 'zarf.dev/agent=ignore' | grep -E 'dask|panel-viz|jupyterhub' \
+  && echo "⚠ POISONED app namespaces — remediation: strip the label (one command)" \
+  || echo "app namespaces clean (agent active)"
+# BEHAVIORAL proof — a canary server dry-run in an APP namespace must come back REWRITTEN
+# (persists nothing, pulls nothing; probing `default` is a false negative — zarf ignores
+# pre-init namespaces deliberately):
+kc -n dask-operator run zz-canary --image=ghcr.io/zarf-canary/agent-check:v1 --restart=Never \
+   --dry-run=server -o jsonpath='{.spec.containers[0].image}'; echo
+# → internal-registry ref (127.0.0.1:31999/...-zarf-…) = agent active ✓ ;  unchanged ghcr.io = bypassed ✗
+```
+
+### 6c. Stale S3 env on Dask pods (operator doesn't propagate CR changes)
+
+The dask operator does NOT roll its child Deployments when the DaskCluster CR's env changes — after
+any redeploy that fixes S3 creds, scheduler/worker pods can keep the OLD (possibly empty) env
+forever. Verify pod env matches the CR (lengths only, no values):
+
+```bash
+kc -n dask get daskcluster cybersec-dask -o jsonpath='{.spec.scheduler.spec.containers[0].env[?(@.name=="AWS_ACCESS_KEY_ID")].value}' | wc -c | sed 's/^/CR cred len (incl newline): /'
+kc -n dask exec deploy/cybersec-dask-scheduler -- sh -c 'echo pod cred len: ${#AWS_ACCESS_KEY_ID}' 2>/dev/null
+# mismatch (CR >1, pod =0) → remediation: delete the dask deployments; the operator recreates from the CR
 ```
 
 ### 6b. Helm release states (a killed deploy leaves WEDGED releases)

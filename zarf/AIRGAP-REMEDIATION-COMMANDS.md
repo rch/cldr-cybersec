@@ -206,7 +206,8 @@ kc -n zarf get pvc zarf-docker-registry -o jsonpath='{.status.phase} sc={.spec.s
 ### E. Agent missing / orphaned zarf webhook (registry up ≠ init complete)
 The **agent-hook** pods rewrite image refs at admission. Registry `Running` but agent absent/dead ⇒
 every subsequent deploy's pods `ImagePullBackOff` against `ghcr.io`/`quay.io` (refs never rewritten).
-Re-running init is safe and idempotent — it redeploys the agent + webhook:
+Re-running init is safe and idempotent — it redeploys the agent + webhook (**but see §E2 — a
+re-init has a poisonous side effect you must undo immediately after**):
 ```bash
 kc -n zarf get pods | grep agent-hook || { cd /var/tmp && zarf init --confirm --storage-class -; }
 ```
@@ -215,6 +216,40 @@ A **force-finalized** zarf ns leaves the cluster-scoped `MutatingWebhookConfigur
 absent, remove the orphan (re-init recreates it properly):
 ```bash
 kc get ns zarf >/dev/null 2>&1 || kc get mutatingwebhookconfiguration -o name 2>/dev/null | grep -i zarf | xargs -r kc delete
+```
+
+### E2. ⚠ Namespace poison — EVERY re-run of `zarf init` plants this (sandbox-proven)
+`zarf init` labels every **pre-existing** namespace `zarf.dev/agent=ignore`. On a re-init that
+includes OUR app namespaces — which **disables image rewriting** there: the agent skips them, so
+any pod created afterward keeps its upstream ref (`ghcr.io/...`) and `ImagePullBackOff`s forever in
+the closed world. Latent until pod churn (reboot/eviction/redeploy). **Strip after every re-init**
+(the engine does this automatically; by hand):
+```bash
+for ns in dask dask-operator panel-viz jupyterhub; do
+  kc label namespace "$ns" zarf.dev/agent- --overwrite 2>/dev/null || true    # engine: _strip_agent_ignore
+done
+# then clean up any pods ALREADY admitted with upstream refs (a no-diff helm upgrade will
+# NEVER recreate them — delete them; their controllers re-admit through the active agent):
+kc get pods -A | grep -E 'ImagePullBackOff|ErrImagePull' | awk '{print $1, $2}' | while read -r ns pod; do
+  img=$(kc -n "$ns" get pod "$pod" -o jsonpath='{.spec.containers[0].image}')
+  case "$img" in 127.0.0.1:*) ;; *) kc -n "$ns" delete pod "$pod" --wait=false ;; esac   # engine: _unwedge_unmutated_pods
+done
+# verify with the app-namespace canary (discovery §6b): the dry-run ref must come back REWRITTEN.
+```
+
+### E3. Stale/broken Dask children (operator only creates on CR CREATION)
+The dask operator (kopf) builds the scheduler/worker Deployments **only on the DaskCluster's
+creation event** — it neither propagates CR env changes to existing children nor recreates a
+deleted child (both sandbox-proven; deleting a drifted Deployment STRANDS the cluster). So fix at
+the **CR level**: delete the DaskCluster and redeploy the `dask-cluster` component — the re-apply
+is a fresh CREATE and the operator builds everything with the CR's (correct) env:
+```bash
+kc -n dask delete daskcluster cybersec-dask --ignore-not-found --wait=false   # engine: _unwedge_broken_dask_cluster
+kc -n dask get daskcluster cybersec-dask >/dev/null 2>&1 \
+  && kc -n dask patch daskcluster cybersec-dask --type=merge -p '{"metadata":{"finalizers":null}}'  # kopf finalizer
+# then redeploy (required component — any deploy carries it; use the env setup from above):
+zarf package deploy "$PKG" --confirm --components=dask-cluster --retries 10 "${SETV[@]}"
+kc -n dask get pods    # scheduler + workers return with the CR's env
 ```
 
 ### F. Wedged Helm release — "another operation (install/upgrade/rollback) is in progress"
@@ -267,18 +302,29 @@ work). Consequence: **`dask-cluster` templates the S3 vars into the scheduler/wo
 deploy** — a deploy run with empty S3 vars silently strips the workers' S3 access (no IMDS exists
 air-gapped). So set up the S3 environment **before ANY deploy**, not just the app tiers.
 
-**Credential discipline (matches the engine exactly):** S3 **secrets** ride `ZARF_VAR_*` env;
-**non-secret** config (`S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION`) goes on `--set-variables`. Never put
-a secret on the command line. `S3_BUCKET` is **required** for `panel-viz`/`navigator-engine` — a
-blank bucket renders `OTEL_DATA_PATH=s3:///` and bricks the app, so the engine refuses it; you
-should too.
+**Credential discipline (matches the engine exactly):** **non-secret** config (`S3_BUCKET`,
+`S3_ENDPOINT`, `S3_REGION`) goes on `--set-variables`; S3 **secrets** ride a **`ZARF_CONFIG`
+tmpfs file** (`[package.deploy.set]`) — zarf's first-class config path. Never put a secret on the
+command line — **and never rely on bare `ZARF_VAR_*` env for package variables: it does NOT reach
+zarf v0.70.1's templating** (field-proven twice: a configMap rendered `S3_BUCKET=""` on the live
+deploy, and the sandbox DaskCluster rendered empty AWS creds, silently de-credentialing every
+worker). `S3_BUCKET` is **required** for `panel-viz`/`navigator-engine` — a blank bucket renders
+`OTEL_DATA_PATH=s3:///` and bricks the app, so the engine refuses it; you should too.
 
 ```bash
-# Load secrets into the environment off the process table (e.g. from your tmpfs creds-file):
+# Load values off the process table (e.g. from your tmpfs creds-file):
 set -a; . /dev/shm/s3-creds; set +a
-export ZARF_VAR_S3_ACCESS_KEY="$S3_ACCESS_KEY" ZARF_VAR_S3_SECRET_KEY="$S3_SECRET_KEY"
-[ -n "${S3_SESSION_TOKEN:-}" ] && export ZARF_VAR_S3_SESSION_TOKEN="$S3_SESSION_TOKEN"
+# SECRETS -> a 0600 tmpfs ZARF_CONFIG file (the mechanism that actually reaches templating):
+umask 077; cat > /dev/shm/zarf-secrets.toml <<EOF
+[package.deploy.set]
+S3_ACCESS_KEY = "$S3_ACCESS_KEY"
+S3_SECRET_KEY = "$S3_SECRET_KEY"
+EOF
+export ZARF_CONFIG=/dev/shm/zarf-secrets.toml
+# NON-SECRETS -> --set-variables:
 SETV=(--set-variables=S3_BUCKET="$S3_BUCKET" --set-variables=S3_ENDPOINT="$S3_ENDPOINT" --set-variables=S3_REGION="$S3_REGION")
+# ... run the deploys (table below) ... then clean up:
+#   shred -u /dev/shm/zarf-secrets.toml; unset ZARF_CONFIG
 ```
 
 ### T2 — push app images to the internal registry

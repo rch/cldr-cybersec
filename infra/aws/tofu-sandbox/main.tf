@@ -40,6 +40,11 @@ variable "aws_region" { default = "us-east-1" }
 variable "instance_type" { default = "m7i.2xlarge" } # 8 vCPU / 32 GiB — whole stack on one node
 variable "root_gb" { default = 80 }                  # package + registry + minio + images, with headroom
 variable "ssh_cidr" { description = "your egress /32 for SSH (e.g. 1.2.3.4/32)" }
+variable "extra_ssh_cidrs" {
+  description = "additional operator CIDRs (e.g. a CGNAT carrier's ranges when the egress IP rotates mid-session — a rotation severed two live validation runs)"
+  type        = list(string)
+  default     = []
+}
 variable "key_path" {
   description = "where to write the generated SSH private key; the harness points this into build/sandbox (gitignored)"
   default     = ""
@@ -121,7 +126,7 @@ resource "aws_security_group_rule" "ssh_in" {
   from_port         = 22
   to_port           = 22
   protocol          = "tcp"
-  cidr_blocks       = [var.ssh_cidr]
+  cidr_blocks       = concat([var.ssh_cidr], var.extra_ssh_cidrs)
   security_group_id = aws_security_group.sandbox.id
   description       = "SSH from operator /32 (stateful: survives the egress cut)"
 }

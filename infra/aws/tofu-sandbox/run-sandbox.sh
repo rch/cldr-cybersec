@@ -126,10 +126,36 @@ case "$ACTION" in
     printf 'S3_ENDPOINT=%s\nS3_BUCKET=%s\nS3_REGION=%s\nS3_ACCESS_KEY=%s\nS3_SECRET_KEY=%s\n' \
       "$S3_ENDPOINT" "$S3_BUCKET" "$S3_REGION" "$S3_ACCESS_KEY" "$S3_SECRET_KEY" \
       | ssh "${SSH_OPTS[@]}" "ec2-user@$IP" "umask 077 && cat > /dev/shm/.sb-creds"
-    ssh "${SSH_OPTS[@]}" "ec2-user@$IP" \
-      "sudo env CONVERGE_CREDS_FILE=/dev/shm/.sb-creds DASK_WORKER_REPLICAS='$DASK_WORKER_REPLICAS' \
-        bash ~/cybersec-converge/converge-node.sh apply; rc=\$?; \
-        shred -u /dev/shm/.sb-creds 2>/dev/null || rm -f /dev/shm/.sb-creds; exit \$rc"
+    # Run DETACHED on the node (setsid + node-side log + rc file). The operator link is
+    # CGNAT and rotated THREE times in one day — a dropped ssh must never kill a
+    # converge (it killed two mid-run: the engine's stdout hits a dead socket and the
+    # session's children get HUP'd). Follow the log via short reconnecting reads; each
+    # read is a fresh ssh, so any number of rotations only delays output, never state.
+    # NB: bracketed pkill patterns ([c]onverge) so pkill -f can't match the very shell
+    # carrying this command string (self-match killed the ssh session → silent set -e death).
+    on_node "sudo pkill -f 'python3 -u -m [c]onverge' 2>/dev/null || true; sudo pkill -f '[z]arf package deploy' 2>/dev/null || true; \
+      sudo rm -f /var/tmp/sb-converge.log /var/tmp/sb-converge.rc; \
+      sudo setsid bash -c 'env CONVERGE_CREDS_FILE=/dev/shm/.sb-creds DASK_WORKER_REPLICAS=$DASK_WORKER_REPLICAS \
+        bash /home/ec2-user/cybersec-converge/converge-node.sh apply; echo \$? > /var/tmp/sb-converge.rc; \
+        shred -u /dev/shm/.sb-creds 2>/dev/null || rm -f /dev/shm/.sb-creds' \
+        </dev/null >> /var/tmp/sb-converge.log 2>&1 & echo '→ converge detached on the node (survives link drops)'"
+    OFF=0; RC=""
+    while :; do
+      SIZE="$(on_node "stat -c%s /var/tmp/sb-converge.log 2>/dev/null" 2>/dev/null || echo "$OFF")"
+      case "$SIZE" in (*[!0-9]*|"") SIZE="$OFF" ;; esac
+      if [ "$SIZE" -gt "$OFF" ]; then
+        on_node "tail -c +$((OFF + 1)) /var/tmp/sb-converge.log" 2>/dev/null || true
+        OFF="$SIZE"
+      fi
+      RC="$(on_node "cat /var/tmp/sb-converge.rc 2>/dev/null" 2>/dev/null || true)"
+      if [ -n "$RC" ]; then break; fi   # (if-form: a bare `[..] && break` trips set -e when false)
+      sleep 15
+    done
+    # drain any bytes written between the last read and the rc file
+    SIZE="$(on_node "stat -c%s /var/tmp/sb-converge.log 2>/dev/null" 2>/dev/null || echo "$OFF")"
+    case "$SIZE" in (*[!0-9]*|"") SIZE="$OFF" ;; esac
+    if [ "$SIZE" -gt "$OFF" ]; then on_node "tail -c +$((OFF + 1)) /var/tmp/sb-converge.log" 2>/dev/null || true; fi
+    exit "${RC:-1}"
     ;;
 
   verify)

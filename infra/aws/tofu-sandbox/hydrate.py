@@ -51,6 +51,13 @@ def main() -> int:
         ip = urllib.request.urlopen("https://checkip.amazonaws.com", timeout=10).read().decode().strip()
         cidr = f"{ip}/32"
 
+    # Extra operator CIDRs (per-dev; e.g. a CGNAT carrier's ranges when the egress IP
+    # rotates mid-session — it severed two live runs). Env overrides HOCON; comma-sep.
+    extra_raw = os.environ.get("SANDBOX_EXTRA_SSH_CIDRS",
+                               str(_val(cfg, "cybersec.sandbox.aws.extra_ssh_cidrs", "") or ""))
+    extra = [c.strip() for c in str(extra_raw).strip("[] ").split(",") if c.strip()]
+    extra_tf = "[" + ", ".join(f'"{c}"' for c in extra) + "]"
+
     if not pkg:
         cands = sorted(
             (root / "zarf").glob("zarf-package-cybersec-dask-amd64-*.tar.zst"),
@@ -63,11 +70,12 @@ def main() -> int:
     key_path = build_dir / "sandbox.pem"
 
     (build_dir / "sandbox.auto.tfvars").write_text(
-        f'ssh_cidr      = "{cidr}"\n'
-        f'instance_type = "{itype}"\n'
-        f"root_gb       = {root_gb}\n"
-        f'aws_region    = "{region}"\n'
-        f'key_path      = "{key_path}"\n'
+        f'ssh_cidr        = "{cidr}"\n'
+        f"extra_ssh_cidrs = {extra_tf}\n"
+        f'instance_type   = "{itype}"\n'
+        f"root_gb         = {root_gb}\n"
+        f'aws_region      = "{region}"\n'
+        f'key_path        = "{key_path}"\n'
     )
     (build_dir / "sandbox.env").write_text(
         f'BUILD_DIR="{build_dir}"\n'
