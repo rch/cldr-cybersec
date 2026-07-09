@@ -1,5 +1,6 @@
 # Ingress resources for external access
-# Uses RKE2's bundled Traefik IngressController by default
+# Uses RKE2's bundled ingress-nginx by default (class "nginx" — Traefik is K3s, not
+# RKE2; the traefik default silently unbound every Ingress on real RKE2)
 #
 # Zarf template variables:
 #   ###ZARF_VAR_INGRESS_CLASS### - Ingress controller class (traefik, nginx)
@@ -14,8 +15,9 @@ metadata:
     app.kubernetes.io/name: dask-dashboard
     app.kubernetes.io/managed-by: zarf
   annotations:
-    # Traefik-specific annotations
-    traefik.ingress.kubernetes.io/router.entrypoints: web
+    # long-lived dashboard websockets survive nginx's 60s default proxy timeout
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 spec:
   ingressClassName: "###ZARF_VAR_INGRESS_CLASS###"
   rules:
@@ -39,9 +41,10 @@ metadata:
     app.kubernetes.io/name: jupyterhub
     app.kubernetes.io/managed-by: zarf
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
-    # WebSocket support for JupyterHub
-    traefik.ingress.kubernetes.io/service.sticky.cookie: "true"
+    # WebSocket keep-alive for JupyterHub kernels
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/affinity: cookie
 spec:
   ingressClassName: "###ZARF_VAR_INGRESS_CLASS###"
   rules:
@@ -65,9 +68,11 @@ metadata:
     app.kubernetes.io/name: panel-viz
     app.kubernetes.io/managed-by: zarf
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
-    # WebSocket support for Panel
-    traefik.ingress.kubernetes.io/service.sticky.cookie: "true"
+    # WebSocket keep-alive for Panel/Bokeh AND the embedded terminal (/ws) — without
+    # these, nginx drops idle websockets at its 60s default and the REPL disconnects
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/affinity: cookie
 spec:
   ingressClassName: "###ZARF_VAR_INGRESS_CLASS###"
   rules:

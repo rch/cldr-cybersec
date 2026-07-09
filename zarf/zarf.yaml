@@ -17,7 +17,7 @@ variables:
   # Ingress configuration
   - name: INGRESS_CLASS
     description: Kubernetes ingress controller class
-    default: traefik
+    default: nginx
   - name: INGRESS_DOMAIN
     description: Base domain for ingress hostnames
     default: cybersec.local
