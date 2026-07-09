@@ -1,136 +1,75 @@
 # Air-Gap Convergent Deploy — Operator Runbook (v1.6.2)
 
 **Audience.** You have a single-node, air-gapped Kubernetes (RKE2) and need to stand up the
-cybersec-dask / OTEL Navigator stack with **no internet**. The node may already be carrying a
-**partial or stuck Zarf procedure** (a half-finished `zarf init`, a registry up but the
-zarf-agent missing, app pods in `ImagePullBackOff` against `ghcr.io`/`quay.io`, a namespace
-wedged in `Terminating`) **or an interfering cluster storage config** (a default StorageClass
-whose provisioner can't run air-gapped, capturing the registry's PVC). The linear
-`zarf init && zarf package deploy` path does not recover from these states.
+cybersec-dask / OTEL Navigator stack with **no internet**. The node may already carry a **partial
+or stuck Zarf procedure** — a half-finished `zarf init`, a registry up but the agent missing,
+pods in `ImagePullBackOff` against `ghcr.io`, a namespace wedged `Terminating`, app namespaces
+silently poisoned by a prior re-init — or an **interfering storage config** (a default
+StorageClass whose provisioner can't run air-gapped). The linear `zarf init && zarf package
+deploy` path does not recover from these states; the convergence engine does.
 
-**This runbook drives the deployment to target state from *any* partial-failure state — one
-command, on the node, no internet — using the convergence engine.**
+**How to read this document.**
+- **Part I** — the procedure. Step-by-step, assuming the automation produces the intended result
+  (it is validated 8/8 against induced wedge states on real air-gapped RKE2 before every release).
+- **Part II** — the manual equivalents: how to replicate, by hand, each procedure the engine
+  automates — for when you want surgical control or the engine isn't available.
+- **Part III** — in-situ investigation: the methods for diagnosing and remediating **unforeseen**
+  error modes — the discipline and the technique catalog that found every root cause we now
+  auto-heal.
+
+Companion references: [AIRGAP-DISCOVERY.md](AIRGAP-DISCOVERY.md) (the read-only pre-flight
+audit) and [AIRGAP-REMEDIATION-COMMANDS.md](AIRGAP-REMEDIATION-COMMANDS.md) (the full manual
+mirror of every engine remediation, tier by tier).
 
 ---
 
-## What it is
+# Part I — The procedure
 
-A deterministic finite-state machine — **detect → remediate → re-detect → fixpoint** — over a
-tiered catalog of invariants (node → storage → registry → images → operator → scheduler →
-workloads → ingress). It is **idempotent** (`verify` is a clean no-op once at target) and
-**never destroys a transported (Layer-A) artifact** — that guard is structural in the engine.
-It **picks up wherever your procedure stalled**: already-good tiers detect `[ok]` and are
-skipped; only the broken ones are remediated.
+## 1. What the automation is
 
-**New in v1.6.2 — five more field-proven wedge states self-heal** (each discovered by driving a
-live specimen node from quadruple-wedged to `✔ CONVERGED`):
+A deterministic FSM — **detect → remediate → re-detect → fixpoint** — over a tiered invariant
+catalog (node → storage → registry/agent → images → operator → scheduler → workloads → ingress).
+**Idempotent** (`verify` is a clean no-op at target), **conservative** (no code path deletes a
+transported Layer-A artifact — structural guard), and **resumptive** (already-good tiers detect
+`[ok]`; only broken ones are remediated).
 
-1. a Helm release left `pending-install/upgrade/rollback` by a killed deploy ("another operation
-   is in progress" forever) — the stuck revision is removed before every deploy;
-2. app namespaces **poisoned by a re-run `zarf init`** (`zarf.dev/agent=ignore` on pre-existing
-   namespaces → image rewriting silently OFF → later pod churn `ImagePullBackOff`s on upstream
-   refs) — labels stripped at three points, already-poisoned pods recycled, and the agent proven
-   **behaviorally** with a canary dry-run in an app namespace;
-3. S3 secrets that never rendered (bare `ZARF_VAR_*` env does not template in zarf v0.70.1) —
-   secrets now ride a 0600 tmpfs `ZARF_CONFIG` file, off `argv` AND actually rendering;
-4. stale/stranded Dask children (the operator builds them **only on CR creation**) — fixed at the
-   CR level: delete + fresh re-create via the deploy;
-5. **force-finalize resurrection** (a namespace's contents outlive the namespace object in etcd
-   and re-expose as inert husks on recreation) — contents drained before any finalize; husk
-   namespaces (Deployments with zero pods) healed by a clean delete + redeploy.
-
-v1.6.1's headline — the T1 registry/storage FSM that deterministically defeats the StorageClass
-capture (interfering default SC, dead provisioner, stranded/mis-classed PV, vestigial captured
-PVC, wedged namespace) — is retained; when the engine *can't* self-heal it still prints a
-**precise diagnosis**, not a bare `rc=1`. (Root cause below.)
-
-## The two layers
-
-- **Layer A** — artifacts you transport IN: the deploy package, the **zarf-init package**, the
-  zarf binary, the engine bundle. Never re-fetched; the engine verifies, never pulls.
+- **Layer A** — what you transport IN: deploy package, **zarf-init package**, zarf binary, engine
+  bundle. Never re-fetched; the engine verifies, never pulls.
 - **Layer B** — the deployment (K8s resources, registry content). Disposable; rebuilt from Layer A.
 
-## Resilient by default (no StorageClass required)
+**Resilient by default:** the Zarf registry binds a claimRef hostPath PV — bare RKE2 with no
+StorageClass is the baseline; an interfering default SC is defeated deterministically
+(`--storage-class -`).
 
-The Zarf registry binds a **claimRef hostPath PV**, and the engine pre-makes that path writable
-(the registry runs non-root). So a single, disk-limited node with a **bare RKE2** — no default
-StorageClass, no provisioner, no bootstrap images — is the baseline.
-
-**If the node *does* ship a default StorageClass** (e.g. RKE2's built-in `local-path`) whose
-provisioner isn't running in the closed world, it would otherwise hijack the registry's PVC and
-hang it `Pending` forever. The engine **defeats that deterministically** (see the root-cause
-section below) — it inits the registry with an explicit empty storageClass that binds the static
-hostPath PV directly, regardless of any default. Resourced multi-node clusters that genuinely want
-dynamic PVCs can opt back in with `CONVERGE_DYNAMIC_PROVISIONING=1`.
-
----
-
-## Why `zarf init` was capturing the registry PVC (root cause + the fix)
-
-The single most persistent air-gap failure — `zarf init` exits `rc=1`, `kubectl -n zarf get pvc`
-shows `zarf-docker-registry  Pending  storageClass=local-path`, and the `zarf` namespace rolls
-back — is a **Helm storageClass gotcha**, now fixed deterministically:
-
-- The init package's `docker-registry` chart **omits** `storageClassName` from the PVC when its
-  value is empty (`{{- if .Values.persistence.storageClass }}`). Zarf's default for that value is
-  empty, so the field is omitted, and **Kubernetes admission stamps the cluster-default
-  StorageClass** — RKE2 `local-path`, which is `WaitForFirstConsumer` with a provisioner that
-  isn't running air-gapped. The PVC waits on that provisioner forever; the registry pod can't bind
-  its volume; `zarf init` rolls back.
-- A PVC's `storageClassName` is **immutable**, and `zarf init` **reuses an existing PVC by name** —
-  so once a captured `local-path` PVC exists, re-running init (or merely un-defaulting the SC)
-  cannot fix it. This is the "vestigial artifact" that survived every retry.
-
-**The fix (engine does this for you):** init the registry with `zarf init --storage-class -`. The
-`-` is the chart's sentinel for *explicit empty* (`storageClassName: ""`), which **disables dynamic
-provisioning and binds our static claimRef hostPath PV directly** — no provisioner, no default-SC
-race. The engine also **deletes any vestigial captured PVC** first so init recreates it clean.
-
-If you are ever recovering this **by hand**, the equivalent is:
-
-```bash
-kubectl -n zarf delete pvc zarf-docker-registry --ignore-not-found    # drop the captured PVC
-cd /var/tmp && zarf init --confirm --storage-class -                  # re-init on ""
-```
-
----
-
-## 1. Prerequisites (on the node)
+## 2. Prerequisites (on the node)
 
 - An existing single-node RKE2 — `kubectl get nodes` shows it `Ready`.
-- `python3` (standard library only — the engine needs no extra packages).
-- root (RKE2's kubeconfig is root-only).
-- The release assets (next section) transported into the closed world.
+- `python3` (stdlib only), root (RKE2's kubeconfig is root-only).
+- The release assets transported into the closed world.
 
-## 2. Transport the release assets into the closed world
+## 3. Transport
 
-Verify integrity first (`sha256sum -c SHA256SUMS`), then place each asset:
+Verify integrity (`sha256sum -c SHA256SUMS`), then place each asset:
 
 | Asset | Destination |
 |-------|-------------|
-| `zarf-package-cybersec-dask-amd64-1.6.2.tar.zst` | `/var/tmp/` |
+| `zarf-package-cybersec-dask-amd64-1.6.2.tar.zst` | `/var/tmp/` — **keep only ONE version there** (discovery is newest-by-mtime) |
 | `zarf-init-amd64-v0.70.1.tar.zst` *(Layer A — the piece partial procedures most often lack)* | `/var/tmp/` (beside the deploy package) |
-| `zarf` *(the v0.70.1 binary)* | `/usr/local/bin/zarf` (`chmod +x`) |
-| `cybersec-converge-1.6.2.tar.gz` *(the convergence engine)* | unpack to a working dir of your choice |
+| `zarf` *(v0.70.1 binary)* | `/usr/local/bin/zarf` (`chmod +x`) |
+| `cybersec-converge-1.6.2.tar.gz` *(the engine)* | unpack anywhere writable |
 
 ```bash
 sha256sum -c SHA256SUMS
 install -m0755 zarf /usr/local/bin/zarf
 mv zarf-package-cybersec-dask-amd64-1.6.2.tar.zst zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
-
 mkdir -p ~/cybersec-converge && tar xzf cybersec-converge-1.6.2.tar.gz -C ~/cybersec-converge
 ```
 
-> The engine bundle is **self-locating** — `converge-node.sh` resolves the engine, the manifests,
-> the deploy package (`/var/tmp` or its 2nd arg) and the zarf-init package (beside the deploy
-> package) relative to itself. Unpack it **anywhere** writable; `~/cybersec-converge` is just a
-> convention.
+## 4. Converge — one command
 
-## 3. Converge — one command
-
-S3 is **provided** in your environment (an endpoint + a given bucket). Keep the secret off the
-process table by passing a creds-file (the engine reads it and forwards values to Zarf as
-variables — never on `argv`):
+S3 is **provided** in your environment. Keep secrets off the process table via a tmpfs
+creds-file; the engine forwards non-secrets on `--set-variables` and secrets via a `ZARF_CONFIG`
+file it manages itself (never `argv`, never bare env — see Part II §7 for why):
 
 ```bash
 umask 077; cat > /dev/shm/s3-creds <<'EOF'
@@ -145,108 +84,326 @@ sudo env CONVERGE_CREDS_FILE=/dev/shm/s3-creds bash ~/cybersec-converge/converge
 shred -u /dev/shm/s3-creds
 ```
 
-The engine discovers both packages in `/var/tmp`, preps the registry hostPath, **clears any
-storage/registry residue blocking `zarf init`** (see the table below), runs `zarf init`
-(registry + agent + webhook), pushes the app images from the package, deploys the components, and
-stops at a fixpoint. Watch the tiers climb:
+> **`S3_BUCKET` is required** — the engine refuses to deploy the app components with a blank
+> bucket (it would render `OTEL_DATA_PATH=s3:///` and brick the app) and says so.
 
-```
-registry hostPath … prepared  →  [un-defaulted StorageClass 'local-path']  →
-zarf init: rc=0  →  T2.images-pushed  →  T3 dask-operator  →  T4 scheduler  →
-T5 otel-navigator / navigator-engine / jupyterhub  →  T6 ingress  →  ✔ CONVERGED
-```
-
-> **`S3_BUCKET` is required** for the panel-viz / navigator-engine components — the engine
-> **refuses** to deploy them with an empty bucket (it would render `OTEL_DATA_PATH=s3:///` and
-> brick the app) and tells you so, rather than failing silently. Make sure it's in the creds-file.
-
-## 4. Verify
+Watch the tiers climb to `✔ CONVERGED`. If your session may drop (remote/flaky link), run it
+detached and follow the log — a dead SSH must never kill a converge:
 
 ```bash
-sudo bash ~/cybersec-converge/converge-node.sh verify     # every invariant [ok] = at target
+sudo setsid bash -c 'env CONVERGE_CREDS_FILE=/dev/shm/s3-creds \
+  bash ~/cybersec-converge/converge-node.sh apply; echo $? > /var/tmp/converge.rc' \
+  </dev/null >> /var/tmp/converge.log 2>&1 &
+tail -f /var/tmp/converge.log          # reconnect + re-tail as needed; rc in /var/tmp/converge.rc
 ```
 
----
+## 5. Verify (always — after every apply)
 
-## What it resolves (partial-procedure + storage realities)
+```bash
+sudo bash ~/cybersec-converge/converge-node.sh verify     # every invariant [ok] = at target; exit 0
+```
+
+The apply loop never re-checks an invariant that passed earlier in the same run, so `verify` is
+the authoritative post-state. Exit codes: `0` converged · `1` not converged (read the per-tier
+diagnosis — it names the unmet condition, never a bare `rc=1`) · `2` CLOSURE violation (a Layer-A
+artifact is missing; re-transport — the engine will not pull).
+
+## 6. Other modes
+
+- `converge-node.sh dry-run` — what *would* be remediated; changes nothing.
+- `converge-node.sh teardown` — clean-slate the app stack (registry + PV + node images
+  **CONSERVED** → fast redeploy).
+- `CONVERGE_DYNAMIC_PROVISIONING=1` — opt into the default-StorageClass modality (resourced
+  multi-node cluster with a working provisioner).
+
+## 7. What it resolves autonomously
 
 | Symptom | The engine's action |
 |---------|---------------------|
-| `zarf init`: "requires a zarf-init package" | runs from the directory holding the transported init package so init finds it |
-| image push `500 … permission denied` | preps the registry hostPath writable (the registry runs as a non-root UID; `fsGroup` does not chown hostPath) |
-| pods `ImagePullBackOff` on `ghcr.io`/`quay.io` | a fully-completed `zarf init` deploys the **agent + webhook**, which rewrite images to the internal registry — **and (new in v1.6.2)** the engine strips the `zarf.dev/agent=ignore` label a RE-RUN init plants on the app namespaces (which silently disables rewriting for all later pod churn), deletes pods already admitted with upstream refs, and proves the agent behaviorally with a canary dry-run in an app namespace |
-| **helm: "another operation (install/upgrade/rollback) is in progress"** (a killed prior deploy) | **(v1.6.2)** deletes the latest `pending-*` release revision before every deploy and before init, then proceeds |
-| **Dask pods carrying stale/empty S3 env** (the operator never propagates CR changes; a deleted scheduler never returns) | **(v1.6.2)** deletes the DaskCluster CR (clearing kopf's finalizer) so the deploy re-creates it fresh — children are only built on CR creation |
-| **app namespace stuck `Terminating`, or an Active ns full of husk workloads** (force-finalize resurrection: contents' etcd keys outlive the ns object) | **(v1.6.2)** drains the namespace contents + strips straggler finalizers BEFORE finalizing; detects the husk signature (Deployments with zero pods) and deletes the ns cleanly for a fresh redeploy |
-| **S3 secrets not reaching the rendered manifests** (bare `ZARF_VAR_*` env does not template in zarf v0.70.1) | **(v1.6.2)** secrets ride a 0600 tmpfs `ZARF_CONFIG` file (`[package.deploy.set]`), scrubbed after each deploy — off argv AND actually renders |
-| **registry PVC `Pending storageClass=local-path`** (the cluster-default SC captured it; provisioner dead air-gapped) | inits with **`--storage-class -`** → registry PVC `storageClassName:""` → binds the static hostPath PV directly, no provisioner, no default-SC race; also **un-defaults** the SC as hygiene |
-| **vestigial `zarf-docker-registry` PVC** on a non-`""` class that init keeps reusing (immutable class) | **deletes the captured PVC** (clearing the `pvc-protection` finalizer if it lingers) so init recreates it clean on `""` — Layer-B; the Retain PV conserves the images |
-| **registry PV stranded `Released`/`Failed`, or its `storageClassName` drifted off `""`** | **resets the PV object to `""`** (binds with no provisioner) — the hostPath images are **conserved** (Retain), so the registry comes back on the same storage with no re-push |
-| **`zarf` namespace wedged `Terminating`** | **force-finalizes** it, then re-initializes the registry |
-| workers oversubscribed (`Pending`) | reaps excess worker Deployments to fit the node's schedulable capacity |
-| re-run of an already-good cluster | fast no-op (every tier detects `[ok]`) |
-
-## Precise diagnosis when it *can't* self-heal
-
-A failed `zarf init` no longer reports a bare `rc=1`. The engine inspects the live state and tells
-you exactly what's unmet, e.g.:
-
-```
-T1  [FAIL]  T1.registry-running
-      zarf init rc=1: registry PVC Pending storageClass='local-path';
-      registry PVC is on 'local-path', not '' — the cluster-default SC captured it
-      (immutable); delete it so init recreates it on '' (init must pass --storage-class -);
-      static PV Available storageClass='' (≠ PVC's 'local-path' → won't bind);
-      default StorageClass ['local-path'] present — its PVCs wait on a provisioner
-      that may be absent in the air-gap; the resilient path wants none
-```
-
-(Once on v1.6.2 the engine resolves this case itself — the diagnosis above is what you'd
-see only if a deeper problem keeps the captured PVC from being deleted.)
-
-Component deploys (dask-operator / jupyterhub) likewise surface the underlying zarf/Helm error
-tail. (S3 secrets ride the environment, never `stdout`, so these diagnoses stay clean.)
-
-## Recovery — the engine self-heals; reserve `zarf destroy` for true corruption
-
-Earlier guidance was "do **not** iterate a wedged `zarf init` — run `zarf destroy`." With v1.6.2 the
-engine **unwinds** the storage/registry wedge states itself (Terminating ns, stranded/mis-classed
-PV, default-SC capture, **a vestigial captured registry PVC**), so a plain re-run of
-`converge-node.sh apply` is the right move — it makes
-forward progress each pass to a fixpoint. **Only** if the engine's diagnosis points at damage below
-Layer B that it structurally won't touch (etcd/kubelet/CNI failure, a corrupt control plane) should
-you `zarf destroy --confirm` (or reprovision the node) for a clean base, then re-run converge.
-
-## Diagnose / other modes
-
-- `converge-node.sh dry-run` — show what *would* be remediated; changes nothing.
-- `converge-node.sh verify` — read-only target oracle (exit 0 = at target).
-- `converge-node.sh teardown` — clean-slate the app stack (registry + node images **CONSERVED**)
-  for a fast redeploy.
-- `CONVERGE_DYNAMIC_PROVISIONING=1` — opt in to the default-StorageClass path (a resourced
-  multi-node cluster with a working provisioner). The engine then leaves default SCs alone.
-
-## Exit codes
-
-`0` = converged / clean verify. `1` = not converged (see the diagnosis). `2` = a **CLOSURE**
-violation — a transported Layer-A artifact is missing; re-transport it (the engine will not pull).
+| `zarf init`: "requires a zarf-init package" | runs from the directory holding the transported init package |
+| image push `500 … permission denied` | preps the registry hostPath writable (registry runs non-root; `fsGroup` doesn't chown hostPath) |
+| registry PVC `Pending storageClass=local-path` (default-SC capture; provisioner dead air-gapped) | inits with **`--storage-class -`** → PVC pinned to `""` → binds the static hostPath PV; un-defaults the SC as hygiene |
+| vestigial captured registry PVC (immutable class; init reuses it by name) | deletes it (clearing `pvc-protection`) so init recreates it on `""` — the Retain PV conserves pushed images |
+| registry PV stranded `Released`/`Failed`/class-drifted | resets the PV object to `""` — hostPath data conserved |
+| `zarf` namespace wedged `Terminating` | force-finalizes it, then re-inits |
+| registry up but **agent missing** (init incomplete) | T1 requires agent-hook Ready; re-init restores it |
+| **app namespaces poisoned by a re-run init** (`zarf.dev/agent=ignore` → rewriting silently OFF → later pod churn `ImagePullBackOff`s on upstream refs) | strips the label pre-init, post-init, and pre-deploy; recycles already-poisoned pods; proves the agent **behaviorally** (canary dry-run in an app namespace) |
+| helm "another operation (install/upgrade/rollback) is in progress" (killed prior deploy) | deletes the stuck `pending-*` revision before every deploy and before init |
+| S3 secrets never rendered (bare `ZARF_VAR_*` env doesn't template in zarf v0.70.1) | secrets ride a 0600 tmpfs `ZARF_CONFIG` file, scrubbed after each deploy |
+| Dask pods with stale/empty S3 env; a deleted scheduler that never returns (operator builds children **only on CR creation**) | deletes the DaskCluster CR (clearing kopf's finalizer) → the deploy re-creates it fresh |
+| app namespace stuck `Terminating`, or Active but full of **husk workloads** (force-finalize resurrection) | drains contents + strips finalizers BEFORE finalizing; heals husk namespaces (Deployments with zero pods) with a clean delete + redeploy |
+| workers oversubscribed (`Pending`) | caps worker replicas to schedulable capacity; reaps orphaned excess Deployments |
+| re-run on an already-good cluster | fast no-op (every tier `[ok]`) |
 
 ---
 
-## Provenance / validation
+# Part II — Manual equivalents (replicating the automation by hand)
+
+Everything the engine does is plain `kubectl` + `zarf`. The full per-invariant mirror lives in
+[AIRGAP-REMEDIATION-COMMANDS.md](AIRGAP-REMEDIATION-COMMANDS.md); this section is the condensed
+operating sequence. Setup used throughout (root on the control-plane node):
+
+```bash
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+kc() { /var/lib/rancher/rke2/bin/kubectl --kubeconfig "$KUBECONFIG" "$@"; }
+PKG=$(ls -t /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst | head -1)
+```
+
+### 1. Pre-flight (read-only)
+Run the discovery audit — [AIRGAP-DISCOVERY.md](AIRGAP-DISCOVERY.md) — top to bottom. At minimum:
+node Ready, packages staged, the **SC/PVC capture state**, the **namespace-poison check**
+(`kc get ns --show-labels | grep 'zarf.dev/agent=ignore'` on app namespaces), helm `pending-*`
+releases, and the S3 endpoint/creds you were given.
+
+### 2. Registry storage (the resilient path)
+```bash
+mkdir -p /var/lib/zarf-registry && chmod 0777 /var/lib/zarf-registry
+kc apply -f - <<'YAML'
+apiVersion: v1
+kind: PersistentVolume
+metadata: {name: zarf-registry-pv}
+spec:
+  capacity: {storage: 5Gi}
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath: {path: /var/lib/zarf-registry, type: DirectoryOrCreate}
+  claimRef: {namespace: zarf, name: zarf-docker-registry}
+YAML
+```
+
+### 3. Pre-init unwind (A→D, all idempotent)
+```bash
+# A. zarf ns wedged Terminating → force-finalize (the ONLY way out)
+kc get ns zarf -o json | python3 -c 'import sys,json;o=json.load(sys.stdin);o["spec"]["finalizers"]=[];print(json.dumps(o))' \
+  | kc replace --raw /api/v1/namespaces/zarf/finalize -f -   # only if Terminating
+# B. un-default any default StorageClass (hygiene)
+kc get sc -o name | xargs -r -n1 -I{} kc patch {} -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
+# C. delete a captured registry PVC (class ≠ "" is IMMUTABLE — removal is the only fix)
+kc -n zarf delete pvc zarf-docker-registry --ignore-not-found --wait=false
+# D. wedged helm releases from a killed prior run
+kc get secrets -A -l 'owner=helm,status in (pending-install,pending-upgrade,pending-rollback)' \
+  -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name'   # delete each listed secret
+```
+
+### 4. Init on explicit empty storageClass
+```bash
+cd /var/tmp && zarf init --confirm --storage-class -      # "-" = storageClassName:"" → binds the static PV
+kc -n zarf get pods                                        # registry 1/1 AND agent-hook 2/2
+```
+
+### 5. Strip the namespace poison — after EVERY init/re-init
+```bash
+for ns in dask dask-operator panel-viz jupyterhub; do
+  kc label namespace "$ns" zarf.dev/agent- --overwrite 2>/dev/null || true
+done
+# behavioral proof — the canary must come back REWRITTEN (internal 127.0.0.1:31999/... ref):
+kc -n dask-operator run zz --image=ghcr.io/zarf-canary/agent-check:v1 --restart=Never \
+   --dry-run=server -o jsonpath='{.spec.containers[0].image}'; echo
+# recycle any pod already admitted with an upstream ref (stuck ImagePull, image NOT 127.0.0.1:*)
+```
+
+### 6. Component deploys — secrets via ZARF_CONFIG, never bare env
+Bare `ZARF_VAR_*` env does **not** reach zarf v0.70.1 templating (field-proven twice — it
+silently renders empty values). Non-secrets go on `--set-variables`:
+```bash
+set -a; . /dev/shm/s3-creds; set +a
+umask 077; cat > /dev/shm/zarf-secrets.toml <<EOF
+[package.deploy.set]
+S3_ACCESS_KEY = "$S3_ACCESS_KEY"
+S3_SECRET_KEY = "$S3_SECRET_KEY"
+EOF
+export ZARF_CONFIG=/dev/shm/zarf-secrets.toml
+SETV=(--set-variables=S3_BUCKET="$S3_BUCKET" --set-variables=S3_ENDPOINT="$S3_ENDPOINT" --set-variables=S3_REGION="$S3_REGION")
+
+zarf package deploy "$PKG" --confirm --components=cybersec-images  --retries 10 "${SETV[@]}"
+zarf package deploy "$PKG" --confirm --components=dask-operator    --retries 10 "${SETV[@]}"
+zarf package deploy "$PKG" --confirm --components=dask-cluster     --retries 10 "${SETV[@]}"
+zarf package deploy "$PKG" --confirm --components=cybersec-images,panel-viz        --retries 10 "${SETV[@]}"
+zarf package deploy "$PKG" --confirm --components=cybersec-images,navigator-engine --retries 10 "${SETV[@]}"
+zarf package deploy "$PKG" --confirm --components=jupyterhub,sample-notebooks,ingress --retries 10 "${SETV[@]}"
+shred -u /dev/shm/zarf-secrets.toml; unset ZARF_CONFIG
+```
+> `required: true` components (`cybersec-images`, `dask-operator`, `dask-cluster`) ride EVERY
+> deploy — so pass the S3 setup to all of them, and don't be surprised by re-pushes.
+
+### 7. Dask repairs are CR-level
+The operator builds children only on CR **creation** — env changes never propagate; a deleted
+scheduler never returns. To repair stale creds or a stranded scheduler:
+```bash
+kc -n dask delete daskcluster cybersec-dask --ignore-not-found --wait=false
+kc -n dask get daskcluster cybersec-dask >/dev/null 2>&1 \
+  && kc -n dask patch daskcluster cybersec-dask --type=merge -p '{"metadata":{"finalizers":null}}'
+zarf package deploy "$PKG" --confirm --components=dask-cluster --retries 10 "${SETV[@]}"
+```
+
+### 8. Namespace teardown — NEVER force-finalize with contents
+Force-finalizing removes only the namespace **object**; its contents' etcd keys survive and
+**resurrect as inert husks** when the ns is recreated (Deployments with zero pods that hang every
+later deploy). Drain first, finalize last:
+```bash
+NS=<stuck-ns>
+for kind in deployments replicasets statefulsets daemonsets services configmaps secrets pvc jobs; do
+  kc delete "$kind" --all -n "$NS" --wait=false 2>/dev/null
+done
+kc delete pods --all -n "$NS" --force --grace-period=0 --wait=false
+# only when the ns is EMPTY:
+kc get ns "$NS" -o json | python3 -c 'import sys,json;o=json.load(sys.stdin);o["spec"]["finalizers"]=[];print(json.dumps(o))' \
+  | kc replace --raw "/api/v1/namespaces/$NS/finalize" -f -
+# husk recovery (Active ns, Deployments present, zero pods): kc delete ns "$NS" (normal delete now works) + redeploy
+```
+
+---
+
+# Part III — In-situ investigation of unforeseen error modes
+
+Everything above exists because something once failed in a way no procedure anticipated. When you
+hit a state neither the engine nor Part II covers, this is the method. It found nine root causes;
+it will find the tenth.
+
+## 3.1 The discipline
+
+1. **Observe before you deduce.** When a hypothesis needs a third assumption to survive, stop and
+   fetch the decisive object instead. (The webhook "TLS skew" theory survived two contradictions;
+   one `kubectl get ns --show-labels` ended it.)
+2. **Distinguish slow from stuck — check visible progress every 5–15 minutes.** "Waiting for it
+   to finish" cannot tell the difference. Progress = new log lines, pod state transitions, byte
+   counts — not "the process is alive". Two flat checks ⇒ investigate.
+3. **Never let a link own a long operation.** Run it detached with a node-side log + rc file
+   (Part I §4); a dropped session then delays your *view*, never the *work*.
+4. **Change one thing, re-run the oracle.** `converge-node.sh verify` (read-only) after every
+   manual intervention — it grades all tiers and its diagnosis strings name unmet conditions.
+5. **Respect the conservation guardrails while experimenting**: never `crictl rmi`/prune, never
+   delete `/var/lib/zarf-registry` data (except the documented corrupt-registry recovery), prefer
+   deleting *objects* whose data survives (PVC/PV objects, pods, CRs) over anything bearing state.
+6. **Record the before/after.** The discovery doc's one-shot snapshot (§12) before and after any
+   experiment turns "I think that fixed it" into a diff.
+
+## 3.2 Technique catalog (all field-proven)
+
+**Admission behavior without side effects — the canary server dry-run.** A `--dry-run=server`
+create traverses the real admission chain (webhooks, selectors, mutation) and persists nothing:
+```bash
+kc -n <app-ns> run zz --image=ghcr.io/zarf-canary/agent-check:v1 --restart=Never \
+   --dry-run=server -o jsonpath='{.spec.containers[0].image}'
+```
+Rewritten ref ⇒ the agent mutates that namespace; unchanged ⇒ bypass (check the namespace labels
+against the webhook's `namespaceSelector` before blaming the agent — zarf *deliberately* ignores
+pre-init namespaces, so `default` is a permanent false negative).
+
+**Helm archaeology — what was ACTUALLY rendered, per revision.** Release state lives in secrets
+(`-l owner=helm`; labels `name`/`version`/`status`). The payload is base64(base64(gzip(JSON))) and
+contains the rendered manifest — decisive when you must know whether a rewrite/variable ever made
+it into an applied revision:
+```bash
+kc get secrets -A -l owner=helm -o custom-columns='NS:.metadata.namespace,RELEASE:.metadata.labels.name,VER:.metadata.labels.version,STATUS:.metadata.labels.status'
+kc -n <ns> get secret sh.helm.release.v1.<rel>.v<N> -o jsonpath='{.data.release}' \
+  | base64 -d | base64 -d | gunzip | python3 -c 'import sys,json; print(json.load(sys.stdin)["manifest"])' | grep image:
+```
+
+**Controller-intent forensics — "who should have created this, and did it try?"** A workload
+that "should exist" but doesn't: check the would-be creator's view. `ReplicaSet` desired vs
+current **plus its events**: `FailedCreate` events = tried and failed (quota/SA/admission); **no
+events at all** = the controller isn't even trying — suspect stale/ownerless objects (see next).
+Same logic one level up (Deployment→RS) and for operators (does the CR's controller only act on
+*creation* events? The dask operator does — kopf handlers, not reconciliation).
+
+**The resurrection signature — objects older than their namespace.** After any force-finalize,
+compare ages: `kc -n <ns> get all -o wide` objects older than `kc get ns <ns>` creation ⇒ etcd
+leftovers re-exposed by recreation. They look healthy (`deleting=False`, no finalizers) but their
+controllers are dead to them. Remedy: clean delete of the ns (works now) + redeploy.
+
+**Rendered-value verification without echoing secrets — compare lengths.** When "the creds are
+set" is in doubt, walk the chain and print only lengths: HOCON/creds-file → zarf variables →
+rendered CR/ConfigMap (`jsonpath` the value into `wc -c`) → pod env (`kc exec … -- sh -c 'echo
+${#AWS_ACCESS_KEY_ID}'`) → runtime behavior (an in-pod `s3fs`/`boto3` probe using the pod's own
+env — discovery §9). The first hop where the length drops to 0 is your culprit.
+
+**Event archaeology.** `kc get events -A --sort-by=.lastTimestamp | tail -30` and
+`kc describe pod … | sed -n '/Events:/,$p'` — image-pull targets (upstream host vs `127.0.0.1`),
+admission denials, scheduling reasons. The *hostname* in a pull error tells you whether the
+problem is rewriting (upstream host in a closed world) or registry content (internal host, 404/500).
+
+**Action/script failure inside zarf deploys.** Component actions run under `set -e`: an inner
+command's non-zero aborts the action even if the script "handles" it afterward. The engine
+surfaces the zarf error tail; to see an action's own prints, re-run the failing deploy manually
+and read the full output, or exec the action's key command yourself (they're plain shell in
+`zarf.yaml`).
+
+**Timeout vs failure.** `rc=124` from the engine = its subprocess timeout (default 1800s/zarf
+call) — the operation *hung*. Hangs point at waits (helm `--wait`, zarf healthchecks) on pods
+that will never arrive: go look at what the wait is waiting FOR (`kc get pods -n <target-ns>`)
+rather than re-running.
+
+**Package/variable spot-checks.** `zstd -dc pkg.tar.zst | tar -xO zarf.yaml` reads the manifest
+straight from a package; `zarf tools registry catalog` lists what's actually in the internal
+registry; `kc -n zarf get secret zarf-state` existence marks a completed init.
+
+## 3.3 Escalation — when it's genuinely below Layer B
+
+If evidence points below the deployment — etcd/kubelet/CNI failure, a corrupt control plane
+(API errors unrelated to workloads, node flapping NotReady with healthy hardware) — the engine
+structurally won't touch it:
+
+```bash
+zarf destroy --confirm     # removes registry too; then re-init + converge apply
+# or reprovision the node, re-transport, converge apply
+```
+
+Justify it with evidence first: `systemctl status rke2-server`, `journalctl -u rke2-server -n
+100`, `kc get --raw /healthz`, `dmesg | tail` (OOM/disk). "Converge didn't fix it" is not, by
+itself, evidence of a below-Layer-B fault — re-read its diagnosis line; it names what's unmet.
+
+## 3.4 Feeding it back
+
+An unforeseen mode you solved by hand is a candidate invariant. Capture: the **detect** (what
+observable state distinguishes it), the **remediate** (the idempotent command sequence), and the
+**inducer** (how to plant the state on a sandbox). That triple is exactly one catalog entry +
+one matrix case — the mechanism by which this runbook's Part I table has grown from three rows
+to fourteen.
+
+---
+
+## Appendix A — root cause: the registry-PVC StorageClass capture (fixed in v1.6.1)
+
+`zarf init` exits `rc=1`; `kubectl -n zarf get pvc` shows `zarf-docker-registry Pending
+storageClass=local-path`. The init package's `docker-registry` chart **omits** `storageClassName`
+when its value is empty, so Kubernetes admission stamps the cluster-default SC — RKE2
+`local-path`, `WaitForFirstConsumer`, provisioner absent air-gapped → the PVC waits forever and
+init rolls back. The class is **immutable** and init **reuses the PVC by name**, so retries can't
+fix it. Fix: delete the captured PVC + `zarf init --storage-class -` (the chart's sentinel for
+*explicit empty*) → binds the static claimRef PV, no provisioner, no default-SC race.
+
+## Appendix B — root causes fixed in v1.6.2 (the 2026-07 audit)
+
+1. **Re-init namespace poison.** `zarf init` labels every *pre-existing* namespace
+   `zarf.dev/agent=ignore` (correct on first init; a re-run poisons the app namespaces). The
+   agent webhook excludes them → image rewriting silently OFF → the wedge stays latent until pod
+   churn, then `ImagePullBackOff` on upstream refs. **Any node where init was ever re-run should
+   be assumed poisoned.**
+2. **`ZARF_VAR_*` env doesn't template** (zarf v0.70.1): package variables passed as bare env
+   render as empty strings — proven by a configMap (`S3_BUCKET=""`) and a DaskCluster CR (empty
+   AWS creds). Deploy-time variables must ride `--set-variables` (non-secret) or a `ZARF_CONFIG`
+   file (`[package.deploy.set]`, secret).
+3. **kopf children are creation-only.** The dask operator neither propagates CR changes to
+   existing children nor recreates deleted ones; re-applying an unchanged CR is a server-side
+   no-op. All repairs are CR-level (delete + fresh create).
+4. **Force-finalize resurrection.** A namespace's contents outlive the namespace object in etcd;
+   recreation re-exposes them as controller-dead husks. Drain before finalizing; treat
+   "Deployments with zero pods" as the husk signature.
+5. **Helm pending-\* wedge.** A killed deploy leaves the latest release revision `pending-*`;
+   every subsequent operation fails "another operation is in progress" until that revision's
+   secret is deleted.
+
+## Appendix C — provenance / validation
 
 The FSM is regression-tested end-to-end against a throwaway air-gapped RKE2 node —
-`just sandbox-test-fsm` provisions a node, **induces** each wedged state, converges, and asserts
-recovery, then tears the node down. The v1.6.2 matrix is **8 cases**: the five registry/storage
-permutations (default-SC capture with `WaitForFirstConsumer` — faithful to RKE2 `local-path`; a
-**vestigial captured registry PVC** — the exact live-node wedge; Released PV; class drift;
-idempotent baseline) plus three from the 2026-07 state-space audit: a **dead zarf agent**
-(registry up, init incomplete — post-asserts the agent is back AND behaviorally rewriting via an
-app-namespace canary), a **wedged `pending-upgrade` Helm release** (a REAL fabricated pending
-revision + a removed operator — post-asserts zero pending releases and the operator recovered),
-and an **app namespace stuck `Terminating`** (a finalizer-wedged namespace — post-asserts the
-namespace is Active with pods Running). Each storage case additionally asserts the bound registry
-PVC lands on `storageClassName=""` (proving the static-PV bind). Beyond the matrix, the five
-v1.6.2 fixes were each validated individually by driving a live quadruple-wedged specimen node to
-`✔ CONVERGED` with the engine alone. Every permutation in the table above is exercised on real
-Kubernetes before a release is cut.
+`just sandbox-test-fsm` provisions, **induces** each wedged state, converges, asserts recovery,
+destroys. The v1.6.2 matrix is **8 cases, 8 passed**: five registry/storage permutations
+(default-SC capture faithful to RKE2 `local-path`; the vestigial captured PVC — the exact
+live-node wedge; Released PV; class drift; idempotent baseline) plus three audit cases with
+mechanism-level post-asserts — dead agent (agent back AND canary-rewriting), wedged
+`pending-upgrade` release (zero pending AND operator recovered), Terminating namespace (Active
+AND pods Running). Each storage case additionally asserts the registry PVC binds on
+`storageClassName=""`. The five v1.6.2 fixes were also validated individually by driving a live
+quadruple-wedged specimen to `✔ CONVERGED` with the engine alone.
