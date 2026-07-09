@@ -74,6 +74,17 @@ spec:
     - host: panel.###ZARF_VAR_INGRESS_DOMAIN###
       http:
         paths:
+          # Terminal WebSocket -> the pty-proxy sidecar. The app's browser JS falls
+          # back to same-origin /ws when the page isn't on :5006 — without this rule
+          # the embedded terminal (and the `switch` REPL command) never connects
+          # through the ingress. Longest-prefix wins, so /ws is carved out of /.
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: otel-navigator
+                port:
+                  number: 8765
           - path: /
             pathType: Prefix
             backend:

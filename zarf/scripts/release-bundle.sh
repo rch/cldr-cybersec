@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-VER="${RELEASE_VERSION:-1.6.2}"
+VER="${RELEASE_VERSION:-1.6.3}"
 ZARF_VER="${ZARF_VERSION:-v0.70.1}"
 PKG="zarf/zarf-package-cybersec-dask-amd64-${VER}.tar.zst"
 OUT="build/release"

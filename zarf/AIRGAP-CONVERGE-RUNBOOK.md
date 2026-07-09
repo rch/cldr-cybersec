@@ -1,4 +1,4 @@
-# Air-Gap Convergent Deploy — Operator Runbook (v1.6.2)
+# Air-Gap Convergent Deploy — Operator Runbook (v1.6.3)
 
 **Audience.** You have a single-node, air-gapped Kubernetes (RKE2) and need to stand up the
 cybersec-dask / OTEL Navigator stack with **no internet**. The node may already carry a **partial
@@ -53,16 +53,16 @@ Verify integrity (`sha256sum -c SHA256SUMS`), then place each asset:
 
 | Asset | Destination |
 |-------|-------------|
-| `zarf-package-cybersec-dask-amd64-1.6.2.tar.zst` | `/var/tmp/` — **keep only ONE version there** (discovery is newest-by-mtime) |
+| `zarf-package-cybersec-dask-amd64-1.6.3.tar.zst` | `/var/tmp/` — **keep only ONE version there** (discovery is newest-by-mtime) |
 | `zarf-init-amd64-v0.70.1.tar.zst` *(Layer A — the piece partial procedures most often lack)* | `/var/tmp/` (beside the deploy package) |
 | `zarf` *(v0.70.1 binary)* | `/usr/local/bin/zarf` (`chmod +x`) |
-| `cybersec-converge-1.6.2.tar.gz` *(the engine)* | unpack anywhere writable |
+| `cybersec-converge-1.6.3.tar.gz` *(the engine)* | unpack anywhere writable |
 
 ```bash
 sha256sum -c SHA256SUMS
 install -m0755 zarf /usr/local/bin/zarf
-mv zarf-package-cybersec-dask-amd64-1.6.2.tar.zst zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
-mkdir -p ~/cybersec-converge && tar xzf cybersec-converge-1.6.2.tar.gz -C ~/cybersec-converge
+mv zarf-package-cybersec-dask-amd64-1.6.3.tar.zst zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
+mkdir -p ~/cybersec-converge && tar xzf cybersec-converge-1.6.3.tar.gz -C ~/cybersec-converge
 ```
 
 ## 4. Converge — one command
@@ -108,7 +108,54 @@ the authoritative post-state. Exit codes: `0` converged · `1` not converged (re
 diagnosis — it names the unmet condition, never a bare `rc=1`) · `2` CLOSURE violation (a Layer-A
 artifact is missing; re-transport — the engine will not pull).
 
-## 6. Other modes
+## 6. First data (closed world) — the OTEL_Data_Generator notebook
+
+The package ships **no data** (by design — datasets are provided or generated on site). The app
+resolves its dataset from `s3://$S3_BUCKET/_active_dataset.json` and **fails loud** (naming the
+bucket) until that marker + parquet exist. If the provided bucket is empty, seed it **from inside
+the cluster** — the generator notebook is transported with the package, and the pods already
+carry the S3 endpoint + credentials:
+
+1. Open **JupyterHub** — `http://jupyter.<your-ingress-domain>/` (or the hub's NodePort).
+2. Open **`OTEL_Data_Generator.ipynb`** (in the sample-notebooks the deploy mounted).
+3. Run all cells — it writes partitioned OTel parquet (`…/spans/date=…/hour=…/`) **and** the
+   `_active_dataset.json` marker to the given bucket, using the pod's own env (no secrets typed).
+4. Prove the data path end-to-end (readiness probes cannot see it) — the in-pod S3 check from
+   [AIRGAP-DISCOVERY.md](AIRGAP-DISCOVERY.md) §9:
+   ```bash
+   kubectl -n dask exec deploy/cybersec-dask-scheduler -- python -c "
+   import os, s3fs
+   fs = s3fs.S3FileSystem(key=os.environ.get('AWS_ACCESS_KEY_ID') or None,
+                          secret=os.environ.get('AWS_SECRET_ACCESS_KEY') or None,
+                          client_kwargs={'endpoint_url': os.environ.get('S3_ENDPOINT') or None})
+   b = os.environ.get('S3_BUCKET') or '<bucket>'
+   print('marker:', fs.exists(f'{b}/_active_dataset.json'))"
+   ```
+5. Load/refresh the app — it discovers the dataset from the marker; nothing is hardcoded.
+
+## 7. Access the app + the embedded terminal (`switch` and friends)
+
+- **The app**: `http://panel.<your-ingress-domain>/otel-navigator` (ingress) or
+  `http://<node>:30506/otel-navigator` (NodePort).
+- **The embedded terminal** (the deterministic REPL: `status`, `chk`, **`switch`** — the
+  engine-driven toggle between the explorer and the Tap-linked latency-spectrum view, all backed
+  by distributed Dask): its WebSocket must reach the pty-proxy. Two supported paths:
+  - **Ingress (default)**: the bundled ingress routes **`/ws` → pty-proxy** on the panel host —
+    same-origin, no configuration.
+  - **NodePort / tunnel**: set the explicit URL at deploy time —
+    `PTY_PROXY_WS=ws://<node>:30765` in the environment of `converge-node.sh apply` (or
+    `--set-variables PTY_PROXY_WS=…` on a manual deploy). Re-running apply with it set is safe
+    and rolls only the app pod.
+- Quick wire-check from any workstation that can reach the endpoint (expect `101`):
+  ```bash
+  curl -s -i -N --max-time 5 -H "Connection: Upgrade" -H "Upgrade: websocket" \
+    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" \
+    http://panel.<domain>/ws | head -1
+  ```
+- In the terminal, `switch` toggles the visualization; both panes rasterize via datashader over
+  the Dask workers — viewport interactions fan out as distributed reads.
+
+## 8. Other modes
 
 - `converge-node.sh dry-run` — what *would* be remediated; changes nothing.
 - `converge-node.sh teardown` — clean-slate the app stack (registry + PV + node images
@@ -116,7 +163,7 @@ artifact is missing; re-transport — the engine will not pull).
 - `CONVERGE_DYNAMIC_PROVISIONING=1` — opt into the default-StorageClass modality (resourced
   multi-node cluster with a working provisioner).
 
-## 7. What it resolves autonomously
+## 9. What it resolves autonomously
 
 | Symptom | The engine's action |
 |---------|---------------------|
@@ -376,6 +423,9 @@ fix it. Fix: delete the captured PVC + `zarf init --storage-class -` (the chart'
 
 ## Appendix B — root causes fixed in v1.6.2 (the 2026-07 audit)
 
+*(v1.6.3 adds no engine changes — it routes the terminal WebSocket: the `/ws` ingress rule and
+the `PTY_PROXY_WS` deploy variable, plus the first-data procedure in Part I §6.)*
+
 1. **Re-init namespace poison.** `zarf init` labels every *pre-existing* namespace
    `zarf.dev/agent=ignore` (correct on first init; a re-run poisons the app namespaces). The
    agent webhook excludes them → image rewriting silently OFF → the wedge stays latent until pod
@@ -399,11 +449,11 @@ fix it. Fix: delete the captured PVC + `zarf init --storage-class -` (the chart'
 
 The FSM is regression-tested end-to-end against a throwaway air-gapped RKE2 node —
 `just sandbox-test-fsm` provisions, **induces** each wedged state, converges, asserts recovery,
-destroys. The v1.6.2 matrix is **8 cases, 8 passed**: five registry/storage permutations
+destroys. The v1.6.3 matrix is **8 cases, 8 passed**: five registry/storage permutations
 (default-SC capture faithful to RKE2 `local-path`; the vestigial captured PVC — the exact
 live-node wedge; Released PV; class drift; idempotent baseline) plus three audit cases with
 mechanism-level post-asserts — dead agent (agent back AND canary-rewriting), wedged
 `pending-upgrade` release (zero pending AND operator recovered), Terminating namespace (Active
 AND pods Running). Each storage case additionally asserts the registry PVC binds on
-`storageClassName=""`. The five v1.6.2 fixes were also validated individually by driving a live
+`storageClassName=""`. The five v1.6.3 fixes were also validated individually by driving a live
 quadruple-wedged specimen to `✔ CONVERGED` with the engine alone.

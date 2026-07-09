@@ -120,9 +120,13 @@ spec:
             # Dask scheduler address (deployed in same cluster)
             - name: DASK_SCHEDULER
               value: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
-            # PTY proxy WS URL: empty = auto-detect from browser hostname + port
+            # PTY proxy WS URL for the embedded terminal (and the `switch` REPL
+            # command). Empty = browser auto-detect: :5006 pages target ws://host:8765,
+            # anything else falls back to same-origin /ws — which the bundled ingress
+            # now routes to the pty-proxy. For NodePort/tunnel access where neither
+            # holds, set at deploy time: --set-variables PTY_PROXY_WS=ws://<node>:30765
             - name: PTY_PROXY_WS
-              value: ""
+              value: "###ZARF_VAR_PTY_PROXY_WS###"
           envFrom:
             - configMapRef:
                 name: otel-navigator-config
