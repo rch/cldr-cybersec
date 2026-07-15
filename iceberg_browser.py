@@ -157,23 +157,51 @@ def get_catalog():
 
 
 def get_table():
-    """Get the first available table in the catalog"""
+    """Load the preferred CloudTrail table from the catalog.
+
+    Preference order matches the live datagen path:
+      1. cybersec.cloudtrail_events  (Polaris warehouse default)
+      2. default.cloudtrail_events
+      3. first table found in any namespace
+
+    Distinguishes missing-table from broken warehouse (e.g. MinIO bucket gone /
+    stale metadata) so API handlers can surface a useful error.
+    """
     try:
         catalog = get_catalog()
-        # Try to load cloudtrail_events from default namespace
-        try:
-            return catalog.load_table("default.cloudtrail_events")
-        except NoSuchTableError:
-            pass
-        
-        # Otherwise, find the first available table
+        candidates = [
+            "cybersec.cloudtrail_events",
+            "default.cloudtrail_events",
+        ]
+        last_err = None
+        for ident in candidates:
+            try:
+                return catalog.load_table(ident)
+            except NoSuchTableError as e:
+                last_err = e
+                continue
+            except Exception as e:
+                # Table is registered but unreadable (missing S3 object, bad bucket…)
+                last_err = e
+                print(f"Error loading table {ident}: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
+                # Keep trying other candidates; if none load, fall through.
+                continue
+
         namespaces = catalog.list_namespaces()
         for namespace in namespaces:
             tables = catalog.list_tables(namespace)
-            if tables:
-                # Return the first table found
-                return catalog.load_table(tables[0])
-        
+            for table_id in tables:
+                try:
+                    return catalog.load_table(table_id)
+                except Exception as e:
+                    last_err = e
+                    print(f"Error loading table {table_id}: {type(e).__name__}: {e}")
+                    continue
+
+        if last_err is not None:
+            print(f"get_table: no loadable table (last error: {last_err})")
         return None
     except Exception as e:
         print(f"Error loading table: {e}")
@@ -313,16 +341,36 @@ def get_events():
         region = request.args.get("region")
         event_source = request.args.get("event_source")
         
-        # Start with table scan - use limit to prevent loading entire table
-        # PyIceberg scan().to_pandas() loads all matching rows, so we need to be careful
-        # For large tables, we sample recent data files only
-        MAX_SCAN_ROWS = 10000  # Cap to prevent memory issues
-
-        # Note: limit is a parameter to scan(), not a chained method
+        # Cap scan size to keep memory bounded on large tables.
+        MAX_SCAN_ROWS = 10000
         scan = table.scan(limit=MAX_SCAN_ROWS)
 
-        # Convert to pandas DataFrame
-        df = scan.to_pandas()
+        # Flink + PyIceberg writers can diverge on optional types (e.g. read_only as
+        # string vs boolean). Prefer a full to_pandas(); on schema-promotion failure,
+        # fall back to column-selected Arrow projection without the conflict-prone
+        # fields, then coerce remaining columns.
+        try:
+            df = scan.to_pandas()
+        except Exception as scan_err:
+            print(f"/api/events scan.to_pandas failed ({scan_err}); using resilient path")
+            field_names = [f.name for f in table.schema().fields]
+            # Drop booleans that commonly conflict with Flink string-encoded flags
+            safe_fields = [
+                n for n in field_names
+                if n not in ("read_only",)  # re-derived below if needed
+            ]
+            try:
+                arrow = table.scan(limit=MAX_SCAN_ROWS, selected_fields=tuple(safe_fields)).to_arrow()
+                df = arrow.to_pandas()
+            except Exception as e2:
+                # Last resort: raw file sample via metadata only
+                return jsonify({
+                    "error": f"Cannot read table rows: {scan_err}; fallback also failed: {e2}",
+                    "hint": "Stale or mixed-schema data files — recreate table or wait for "
+                            "datagen to rewrite with a consistent schema",
+                }), 500
+            if "read_only" not in df.columns:
+                df["read_only"] = None
 
         # Parse event_data JSON first if it exists (needed for filtering)
         if "event_data" in df.columns:
