@@ -25,18 +25,25 @@ PKG=$(ls -t /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst 2>/dev/null | he
 
 ## 1. STEP ZERO — disk + kubelet (BEFORE transport)
 
-Default kubelet **image-GC fires at 85% disk** and deletes transported images.
+Default kubelet **image-GC fires at 85%** and **%-based eviction** on large disks
+triggers `DiskPressure` with tens of GiB still free (e.g. 5% of 900G ≈ 45G).
+Use **absolute** free-space thresholds + raised image-GC:
 
 ```bash
-df -h /var/lib/rancher /var/tmp /var/lib
-grep -q 'image-gc-high-threshold' /etc/rancher/rke2/config.yaml 2>/dev/null || cat >> /etc/rancher/rke2/config.yaml <<'EOF'
+df -h / /var/lib/rancher /var/tmp
+sudo tee /etc/rancher/rke2/config.yaml >/dev/null <<'EOF'
+# Absolute free-space (not %): schedulable with ordinary free headroom on large disks.
+# Image GC raised so transported Layer-A images are not pruned.
 kubelet-arg:
-  - "eviction-hard=imagefs.available<2%,nodefs.available<2%,nodefs.inodesFree<2%,memory.available<100Mi"
-  - "eviction-minimum-reclaim=imagefs.available=1%,nodefs.available=1%"
+  - "eviction-hard=nodefs.available<5Gi,imagefs.available<5Gi,nodefs.inodesFree<1%,memory.available<100Mi"
+  - "eviction-soft=nodefs.available<10Gi,imagefs.available<10Gi,memory.available<200Mi"
+  - "eviction-soft-grace-period=nodefs.available=5m,imagefs.available=5m,memory.available=2m"
+  - "eviction-minimum-reclaim=nodefs.available=1Gi,imagefs.available=1Gi"
   - "image-gc-high-threshold=100"
   - "image-gc-low-threshold=99"
 EOF
-systemctl restart rke2-server   # MERGE if kubelet-arg already exists
+sudo systemctl restart rke2-server   # does not kill running pods (containerd keeps them)
+# Expect: DiskPressure=False, no disk-pressure taint, once free space ≥ ~10Gi
 ```
 
 ## 2. Sitrep (paste for remote consult)

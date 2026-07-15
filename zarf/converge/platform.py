@@ -33,10 +33,15 @@ RKE2_CONFIG = Path("/etc/rancher/rke2/config.yaml")
 REGISTRY_HOSTPATH = Path("/var/lib/zarf-registry")
 DEFAULT_PKG_DIRS = (Path("/var/tmp"), Path("/opt/zarf"), Path.cwd())
 
-# Kubelet args that keep transported images alive on small disks.
+# Kubelet args for air-gap / large-disk workstations:
+#  - Absolute free-space thresholds (Gi) so a 900G disk at ~90% full still schedules
+#    (percent-based soft/hard eviction would fire with tens of GiB free).
+#  - Image GC raised so kubelet does not prune transported Layer-A images.
 _KUBELET_GC_ARGS = (
-    'eviction-hard=imagefs.available<2%,nodefs.available<2%,nodefs.inodesFree<2%,memory.available<100Mi',
-    'eviction-minimum-reclaim=imagefs.available=1%,nodefs.available=1%',
+    'eviction-hard=nodefs.available<5Gi,imagefs.available<5Gi,nodefs.inodesFree<1%,memory.available<100Mi',
+    'eviction-soft=nodefs.available<10Gi,imagefs.available<10Gi,memory.available<200Mi',
+    'eviction-soft-grace-period=nodefs.available=5m,imagefs.available=5m,memory.available=2m',
+    'eviction-minimum-reclaim=nodefs.available=1Gi,imagefs.available=1Gi',
     'image-gc-high-threshold=100',
     'image-gc-low-threshold=99',
 )
@@ -62,80 +67,84 @@ def _read_rke2_config() -> str:
         return ""
 
 
+def _canonical_kubelet_block() -> str:
+    lines = [
+        "# Dev / air-gap workstation: absolute free-space thresholds (not %).",
+        "# Percent-based eviction on large disks triggers DiskPressure with tens",
+        "# of GiB still free. Image GC raised so Layer-A images are not pruned.",
+        "kubelet-arg:",
+    ]
+    for a in _KUBELET_GC_ARGS:
+        lines.append(f'  - "{a}"')
+    return "\n".join(lines) + "\n"
+
+
 def kubelet_gc_policy_ok(text: Optional[str] = None) -> bool:
-    """True if image-gc-high-threshold is raised to disable aggressive GC."""
+    """True if absolute eviction thresholds + raised image-GC are present."""
     raw = text if text is not None else _read_rke2_config()
     if not raw:
         return False
-    # Accept high-threshold=100 (or >=99) as our target policy.
     m = re.search(r"image-gc-high-threshold[=:](\d+)", raw)
     if not m:
         return False
     try:
-        return int(m.group(1)) >= 99
+        if int(m.group(1)) < 99:
+            return False
     except ValueError:
         return False
+    # Prefer absolute Gi thresholds (dev large-disk posture).
+    if "nodefs.available<5Gi" in raw:
+        return True
+    # Percent-based hard eviction: force upgrade to absolute Gi form.
+    if "eviction-hard=" in raw and "Gi" not in raw:
+        return False
+    return False
 
 
 def det_kubelet_gc_policy(_ctx: Ctx) -> Probe:
-    """Layer-B node policy: default kubelet GC at 85% deletes Layer-A images."""
+    """Layer-B node policy: default % eviction + 85% image-GC break air-gap stacks."""
     if not RKE2_CONFIG.parent.is_dir() and not Path("/etc/rancher").is_dir():
-        # Not an RKE2 node (e.g. operator laptop dry-run) — not applicable.
         return Probe(True, "not an RKE2 host path layout — kubelet GC N/A")
     raw = _read_rke2_config()
     if kubelet_gc_policy_ok(raw):
-        return Probe(True, f"image-gc-high-threshold raised in {RKE2_CONFIG}")
+        return Probe(True, f"absolute eviction + image-GC raised in {RKE2_CONFIG}")
     if not raw:
         return Probe(False,
-                     f"{RKE2_CONFIG} missing/empty — default kubelet GC at ~85% will "
-                     "prune transported images under disk pressure")
+                     f"{RKE2_CONFIG} missing/empty — default kubelet eviction/GC will "
+                     "DiskPressure / prune images under ordinary disk use")
     return Probe(False,
-                 f"{RKE2_CONFIG} lacks image-gc-high-threshold=100 — Layer-A images "
-                 "at risk of silent GC under disk pressure")
+                 f"{RKE2_CONFIG} needs absolute free-space eviction (<5Gi hard) and "
+                 "image-gc-high-threshold=100 — percent thresholds fire too early on large disks")
 
 
 def rem_kubelet_gc_policy(_ctx: Ctx) -> Fix:
-    """Merge lenient kubelet-arg into RKE2 config. Restarts rke2-server when root
+    """Write canonical lenient kubelet-arg block. Restarts rke2-server when root
     (does not disrupt running pods — containerd keeps them). MANUAL if not root."""
     if os.geteuid() != 0:
         return Fix(False,
-                   f"MANUAL: as root, append kubelet-arg GC block to {RKE2_CONFIG} "
-                   "and `systemctl restart rke2-server` (see AIRGAP-CHEATSHEET §1)")
+                   f"MANUAL: as root, install absolute-threshold kubelet-arg block in "
+                   f"{RKE2_CONFIG} and `systemctl restart rke2-server` "
+                   "(see AIRGAP-CHEATSHEET §1)")
     try:
         RKE2_CONFIG.parent.mkdir(parents=True, exist_ok=True)
         raw = _read_rke2_config()
         if kubelet_gc_policy_ok(raw):
-            return Fix(False, "kubelet GC policy already applied")
-        # If kubelet-arg already exists, append missing entries carefully.
-        block_lines = ["kubelet-arg:"]
-        for a in _KUBELET_GC_ARGS:
-            block_lines.append(f'  - "{a}"')
-        block = "\n".join(block_lines) + "\n"
-        if "kubelet-arg:" in raw:
-            # Merge: ensure each arg line is present under existing list.
-            missing = [a for a in _KUBELET_GC_ARGS if a.split("=")[0] not in raw]
-            if not missing:
-                return Fix(False, "kubelet-arg present; GC keys already covered")
-            add = "".join(f'  - "{a}"\n' for a in missing)
-            # Insert after first kubelet-arg: line
-            new = re.sub(
-                r"(kubelet-arg:\s*\n)",
-                r"\1" + add,
+            return Fix(False, "kubelet absolute-eviction + GC policy already applied")
+        block = _canonical_kubelet_block()
+        # Replace entire kubelet-arg: list(s) with the canonical block so we do not
+        # leave duplicate keys (YAML last-wins) or stale percent thresholds.
+        if re.search(r"(?m)^kubelet-arg:\s*$", raw):
+            # Drop all kubelet-arg sections and any immediately following list items.
+            cleaned = re.sub(
+                r"(?ms)^kubelet-arg:\s*\n(?:[ \t]+-.*\n)*",
+                "",
                 raw,
-                count=1,
             )
-            if new == raw:
-                # Fallback append full block (last-key-wins risk documented)
-                new = raw.rstrip() + "\n" + block
-            RKE2_CONFIG.write_text(new)
-            detail = f"merged {len(missing)} kubelet-arg GC entries into {RKE2_CONFIG}"
+            new = cleaned.rstrip() + "\n\n" + block if cleaned.strip() else block
         else:
-            with RKE2_CONFIG.open("a") as f:
-                if raw and not raw.endswith("\n"):
-                    f.write("\n")
-                f.write(block)
-            detail = f"appended kubelet-arg GC block to {RKE2_CONFIG}"
-        # Restart rke2-server so kubelet picks up args (pods keep running).
+            new = (raw.rstrip() + "\n\n" + block) if raw.strip() else block
+        RKE2_CONFIG.write_text(new)
+        detail = f"wrote absolute-eviction kubelet policy to {RKE2_CONFIG}"
         r = subprocess.run(
             ["systemctl", "restart", "rke2-server"],
             capture_output=True, text=True, timeout=120,
@@ -148,7 +157,6 @@ def rem_kubelet_gc_policy(_ctx: Ctx) -> Fix:
         return Fix(False, f"MANUAL: cannot write {RKE2_CONFIG}: {e}")
     except subprocess.TimeoutExpired:
         return Fix(True, f"wrote GC policy; rke2-server restart still running")
-
 
 # --------------------------------------------------------------------------- #
 # IngressClass selection
