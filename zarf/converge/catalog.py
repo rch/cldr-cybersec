@@ -19,6 +19,7 @@ import stat
 from pathlib import Path
 from typing import List, Optional
 
+from .discovery import APP_NAMESPACES, DASK_CRD_KINDS
 from .kube import Ctx
 from .model import Cost, Fix, Invariant, Layer, Probe
 
@@ -480,25 +481,19 @@ def _unwedge_pending_helm(ctx: Ctx) -> List[str]:
 
 
 _NS_CONTENT_KINDS = ("deployments", "replicasets", "statefulsets", "daemonsets",
-                     "services", "configmaps", "secrets", "pvc", "jobs")
+                     "services", "configmaps", "secrets", "pvc", "jobs",
+                     "ingresses", "networkpolicies", "endpointslices")
 
 
 def _unwedge_terminating_app_ns(ctx: Ctx) -> List[str]:
-    """Two app-namespace wedge states, both field-proven:
+    """App-namespace wedges (also covered by discovery.sweep_vestiges each pass).
 
-    TERMINATING — a stuck ns fails its component deploy with 'namespace ... is being
-    terminated'. Crucially, force-finalizing removes ONLY the namespace object: its
-    contents' etcd keys survive and RESURFACE when the ns is recreated (as inert
-    husks — see below). So clear the CONTENTS first (workload kinds explicitly, pods
-    force-deleted; finalizer-bearing stragglers stripped), and force-finalize only
-    once the ns is actually empty — deferring to the next reconcile pass if not.
+    TERMINATING — drain contents (incl. ingress/finalizers) then finalize when empty.
+    ACTIVE HUSKS — controllers/services with zero pods, or all-junk pods: recycle ns.
+    Layer-B only; package redeploy recreates everything.
+    """
+    from .discovery import _drain_ns, _is_app_husk, _force_finalize_ns as _ff
 
-    ACTIVE HUSKS — a previously force-finalized-then-recreated ns re-exposes its old
-    Deployments/ReplicaSets with dead controller state (desired>0, current=0, no
-    events, no owning helm release): every deploy into it hangs until timeout. The
-    signature is crisp — Deployments present, ZERO pods. Delete the ns cleanly
-    (normal deletion works now and GCs the contents properly); the component deploy
-    recreates everything fresh. Layer-B only."""
     actions: List[str] = []
     for ns in APP_NAMESPACES:
         obj = ctx.get("namespace", ns)
@@ -506,39 +501,24 @@ def _unwedge_terminating_app_ns(ctx: Ctx) -> List[str]:
             continue
         phase = obj.get("status", {}).get("phase")
         if phase == "Terminating":
-            for kind in _NS_CONTENT_KINDS:
-                ctx.k(["delete", kind, "--all", "-n", ns, "--wait=false"])
-            ctx.k(["delete", "pods", "--all", "-n", ns,
-                   "--force", "--grace-period=0", "--wait=false"])
-            # strip finalizers off stragglers so GC can actually finish them
-            for kind in _NS_CONTENT_KINDS:
-                for it in ctx.items(kind, ns=ns):
-                    if (it.get("metadata", {}) or {}).get("finalizers"):
-                        ctx.k(["patch", kind, it["metadata"]["name"], "-n", ns,
-                               "--type=merge", "-p", '{"metadata":{"finalizers":null}}'])
-            leftovers = any(ctx.items(k, ns=ns) for k in ("deployments", "pods"))
+            actions.extend(_drain_ns(ctx, ns))
+            leftovers = any(ctx.items(k, ns=ns) for k in ("deployments", "pods", "pvc"))
             if not leftovers:
-                if _force_finalize_ns(ctx, ns):
+                if _ff(ctx, ns) or _force_finalize_ns(ctx, ns):
                     actions.append(f"force-finalized Terminating ns {ns} (contents cleared first)")
             else:
                 actions.append(f"clearing contents of Terminating ns {ns} (finalize next pass)")
         elif phase == "Active":
-            deps = ctx.items("deployments", ns=ns)
-            pods = ctx.items("pods", ns=ns)
-            if deps and not pods:
+            reason = _is_app_husk(ctx, ns)
+            if reason:
+                actions.extend(_drain_ns(ctx, ns))
                 ctx.k(["delete", "namespace", ns, "--wait=false"])
-                actions.append(f"deleted ns {ns} carrying resurrected husk workloads "
-                               "(Deployments with zero pods — etcd leftovers of a prior "
-                               "force-finalize; the deploy recreates it clean)")
+                actions.append(f"deleted husk ns {ns} ({reason})")
     return actions
 
 
-# S3/deploy variables that are SECRET — delivered via ZARF_VAR_* ENV only (kept off
-# argv / the process table). Everything else (bucket, region, endpoint, replica count)
-# is non-sensitive config and goes on --set-variables, the RELIABLE substitution path
-# (--set is its deprecated alias on zarf ≥0.70). A bare ZARF_VAR_* env did NOT reach the
-# rendered configMap in practice (live S3_BUCKET came out ""), so OTEL_DATA_PATH rendered
-# "s3:///" → runtime "Invalid bucket name 's3:'".
+# S3 secrets → ZARF_CONFIG tmpfs [package.deploy.set]. Non-secrets → --set-variables.
+# Bare ZARF_VAR_* env does NOT template in zarf v0.70.1 (field-proven empty renders).
 _S3_SECRET_KEYS = {"S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_SESSION_TOKEN"}
 # Components whose manifests template a non-empty S3_BUCKET into a configMap. Deploying
 # them with a blank bucket silently bricks the app at runtime, so we refuse instead.
@@ -1352,15 +1332,9 @@ def _rem_ingress(ctx: Ctx) -> Fix:
     return _zarf_deploy_components(ctx, "ingress")
 
 
-# --------------------------------------------------------------------------- #
-# Clean-slate teardown targets (the disposable Layer-B APP STACK)
-# --------------------------------------------------------------------------- #
-# `converge --teardown` removes these and nothing else. The foundational tier
-# (zarf registry, local-path-storage / StorageClass) and ALL Layer-A node images
-# are CONSERVED — teardown is the clean slate of the WORKLOADS, not the platform,
-# so a subsequent `--apply` redeploys fast from the still-present registry.
-APP_NAMESPACES = ["dask", "dask-operator", "jupyterhub", "panel-viz"]
-DASK_CRD_KINDS = ["daskclusters", "daskworkergroups", "daskautoscalers", "daskjobs"]
+# APP_NAMESPACES / DASK_CRD_KINDS: imported from discovery (managed-scope SSOT).
+# Teardown and remediations mutate only those Layer-B targets; registry hostPath
+# data and Layer-A node images are never deleted.
 
 
 # --------------------------------------------------------------------------- #

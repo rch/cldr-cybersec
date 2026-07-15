@@ -482,3 +482,25 @@ diagnose strings that name the unmet condition.
 
 Matrix: `just sandbox-test-fsm` — includes husk Service, PVC/ns split-brain, and
 hostPath permission inducers in addition to the v1.6.2/1.6.3 eight.
+
+## Appendix E — always-on discovery + vestige sweep (v0.3.0 / package 1.6.4+)
+
+Every `converge-node.sh` mode runs **multi-layer discovery** before catalog work:
+
+```
+nodes → managed namespaces → controllers/pods → PVC→PV→SC chains →
+helm pending secrets → VolumeAttachments → Dask CR finalizers
+```
+
+**Apply** additionally, **each reconcile pass**:
+
+1. Print discovery (entry → relationship → root condition)
+2. **Vestige sweep** (Layer-B only): pending helm, agent poison labels, Terminating
+   namespaces/PVCs, junk/Failed pods, Service-only husks, Deploy/STS with zero pods,
+   orphan app PVs, stuck VolumeAttachments, stuck Dask CRs
+3. Re-detect **every** invariant (no sticky OK)
+4. Remediate broken Layer-B tiers
+
+**Never disposed (Layer-A / foundational):** containerd images, `/var/lib/zarf-registry`
+data, zarf binary + init/deploy packages on disk, RKE2 system namespaces. A Bound
+registry PVC with Ready registry is left intact during sweep.
