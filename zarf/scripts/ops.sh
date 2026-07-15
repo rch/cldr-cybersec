@@ -31,6 +31,7 @@ _image_inputs() {
   local f
   for f in "$DOCKERFILE" zarf/images/requirements-airgap.txt \
            zarf/images/requirements-agent.txt zarf/images/otel-navigator.py \
+           zarf/images/data-view.py zarf/scripts/generate-vpc-flow.py \
            zarf/images/loader.js; do
     [ -f "$f" ] && echo "$f"
   done

@@ -1,0 +1,76 @@
+# Continuous VPC flow log generator with fixed disk envelope.
+# Writes Hive-partitioned parquet to s3://$S3_BUCKET/vpc-flow/ and expires
+# old partitions so MinIO does not fill the node.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vpc-flow-generator-config
+  namespace: panel-viz
+  labels:
+    app: vpc-flow-generator
+    app.kubernetes.io/managed-by: zarf
+data:
+  S3_BUCKET: "###ZARF_VAR_S3_BUCKET###"
+  AWS_REGION: "###ZARF_VAR_S3_REGION###"
+  FLOW_PREFIX: "vpc-flow"
+  FLOW_MODE: "stream"
+  FLOW_RPS: "200"
+  # 8 GiB envelope
+  FLOW_MAX_BYTES: "8589934592"
+  FLOW_MAX_HOURS: "3"
+  FLOW_BATCH: "200"
+  FLOW_EXPIRE_EVERY: "60"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vpc-flow-generator
+  namespace: panel-viz
+  labels:
+    app: vpc-flow-generator
+    app.kubernetes.io/name: vpc-flow-generator
+    app.kubernetes.io/component: datagen
+    app.kubernetes.io/managed-by: zarf
+    app.kubernetes.io/part-of: cybersec
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vpc-flow-generator
+  template:
+    metadata:
+      labels:
+        app: vpc-flow-generator
+        app.kubernetes.io/name: vpc-flow-generator
+    spec:
+      containers:
+        - name: generator
+          image: localhost:5555/cybersec-dask:2025.2.0-69d3bf7cc2
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - /app/generate-vpc-flow.py
+            - --mode=stream
+          envFrom:
+            - configMapRef:
+                name: vpc-flow-generator-config
+            - secretRef:
+                name: otel-navigator-credentials
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # No HTTP — process liveness via exec heartbeat on cursor age is optional;
+          # keep a simple process check.
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os,sys; sys.exit(0 if os.path.exists('/app/generate-vpc-flow.py') else 1)"
+            initialDelaySeconds: 30
+            periodSeconds: 60

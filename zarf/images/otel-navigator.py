@@ -69,6 +69,15 @@ MIN_MAIN_HEIGHT = 600
 TERMINAL_WS_URL = os.environ.get('PTY_PROXY_WS', '')
 TERMINAL_HEIGHT = 280
 
+# Top-bar multi-app nav (panel serve multi-route). Labels are short so they
+# don't echo the FastListTemplate title ("OTEL Navigator").
+NAV_HTML = """
+<div style="display:flex;gap:16px;align-items:center;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13px;">
+  <a href="/otel-navigator" style="color:#fff;text-decoration:none;font-weight:700;border-bottom:2px solid #58a6ff;padding-bottom:2px;">Metrics</a>
+  <a href="/data-view" style="color:#c9d1d9;text-decoration:none;">Data-View</a>
+</div>
+"""
+
 # -------------------------------------------------------------------------
 # Dask Client (lazy singleton)
 # -------------------------------------------------------------------------
@@ -359,13 +368,19 @@ class GhosttyTerminal(pn.reactive.ReactiveHTML):
                 var wsUrl = data.ws_url;
                 if (!wsUrl) {
                     var pagePort = parseInt(window.location.port) || 0;
+                    var host = window.location.hostname;
+                    var proto = (window.location.protocol === 'https:') ? 'wss://' : 'ws://';
                     if (pagePort === 5006) {
                         // Local dev: panel serve on 5006, pty-proxy sidecar on 8765.
-                        wsUrl = 'ws://' + window.location.hostname + ':8765';
+                        wsUrl = 'ws://' + host + ':8765';
+                    } else if (pagePort === 30506) {
+                        // Zarf NodePort: panel 30506 / pty-proxy 30765 (no ingress /ws).
+                        wsUrl = 'ws://' + host + ':30765';
+                    } else if (pagePort === 0 || pagePort === 80 || pagePort === 443) {
+                        // Ingress / tunnel: same-origin /ws → pty-proxy.
+                        wsUrl = proto + window.location.host + '/ws';
                     } else {
-                        // Through ingress (Cloudflare tunnel / Traefik): same-origin,
-                        // scheme-correct, no port. Tunnel routes /ws -> pty-proxy :8765.
-                        var proto = (window.location.protocol === 'https:') ? 'wss://' : 'ws://';
+                        // Other direct ports: prefer explicit PTY_PROXY_WS; fall back /ws.
                         wsUrl = proto + window.location.host + '/ws';
                     }
                 }
@@ -769,7 +784,12 @@ class SpanExplorer(param.Parameterized):
 
         threading.Thread(target=_bg_load, daemon=True).start()
 
-    @param.depends('phase', 'workers', 'processing', 'partitions', 'error', 'current_dataset', 'dataset_phase')
+    # Include `ready` — without it the activity line sticks on "Loading..." after
+    # load_data sets ready=True (phase/partitions update, but this pane never re-runs).
+    @param.depends(
+        'phase', 'workers', 'processing', 'partitions', 'ready',
+        'error', 'current_dataset', 'dataset_phase',
+    )
     def status_panel(self):
         """Live status panel showing Dask activity and dataset info."""
         if self.error:
@@ -779,8 +799,8 @@ class SpanExplorer(param.Parameterized):
             activity = f"**{self.processing}** tasks running"
             activity_style = "color: #28a745; font-weight: bold;"
         elif self.ready:
-            activity = "Idle"
-            activity_style = "color: #6c757d;"
+            activity = "Ready"
+            activity_style = "color: #28a745; font-weight: bold;"
         else:
             activity = "Loading..."
             activity_style = "color: #007bff;"
@@ -1022,6 +1042,7 @@ class SpanExplorer(param.Parameterized):
     def main_view(self):
         """Main content: active visualization + engine terminal."""
         return pn.Column(
+            pn.pane.HTML(NAV_HTML),
             self.viz_view,
             pn.layout.Divider(),
             self._terminal_pane,

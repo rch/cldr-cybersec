@@ -52,8 +52,11 @@ RUN python -c "import pandas; import numpy; import pyarrow; import holoviews; im
 # Create app directory
 RUN mkdir -p /app /app/static/ghostty
 
-# Copy OTEL Navigator application
+# Copy OTEL Navigator + Data-View applications
 COPY zarf/images/otel-navigator.py /app/otel-navigator.py
+COPY zarf/images/data-view.py /app/data-view.py
+# Streaming VPC flow generator (also used as a K8s workload entrypoint)
+COPY zarf/scripts/generate-vpc-flow.py /app/generate-vpc-flow.py
 
 # Copy sample notebooks for JupyterHub users
 COPY zarf/images/sample-notebooks/ /app/sample-notebooks/
@@ -103,6 +106,8 @@ COPY zarf/images/loader.js /app/static/ghostty/loader.js
 
 # Verify app can be imported (catches syntax errors at build time)
 RUN python -c "import ast; ast.parse(open('/app/otel-navigator.py').read()); print('App syntax OK')"
+RUN python -c "import ast; ast.parse(open('/app/data-view.py').read()); print('Data-View syntax OK')"
+RUN python -c "import ast; ast.parse(open('/app/generate-vpc-flow.py').read()); print('VPC flow generator syntax OK')"
 RUN PYTHONPATH=/app python -c "from cybersec.engine.service import NavigatorEngineServicer; from cybersec.pty_proxy.repl import NavigatorREPL; print('Engine + PTY proxy imports OK')"
 
 # Set environment variables for Dask

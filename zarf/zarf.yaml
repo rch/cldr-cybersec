@@ -123,7 +123,7 @@ components:
     images:
       # Custom Dask image with pre-baked Python dependencies (Panel, HoloViews, etc.)
       # Note: Use localhost:5555 for local builds, will be rewritten by Zarf during deploy
-      - localhost:5555/cybersec-dask:2025.2.0-e66f38622f
+      - localhost:5555/cybersec-dask:2025.2.0-7e0a98e2ed
       # Dask Kubernetes Operator
       - ghcr.io/dask/dask-kubernetes-operator:2024.1.0
 
@@ -222,7 +222,7 @@ components:
       - quay.io/jupyterhub/k8s-hub:4.0.0
       - quay.io/jupyterhub/configurable-http-proxy:4.5.5
       # User notebook environment uses the custom cybersec-dask image
-      - localhost:5555/cybersec-dask:2025.2.0-e66f38622f
+      - localhost:5555/cybersec-dask:2025.2.0-7e0a98e2ed
     charts:
       - name: jupyterhub
         namespace: jupyterhub
@@ -248,11 +248,12 @@ components:
   - name: panel-viz
     required: false
     default: true
-    description: Panel visualization dashboard for OTEL traces and metrics
+    description: Panel visualization dashboard for OTEL traces, Data-View, and VPC flow stream
     manifests:
       - name: panel-viz-deployment
         files:
           - manifests/panel-viz.yaml
+          - manifests/vpc-flow-generator.yaml
     actions:
       onDeploy:
         after:
@@ -264,6 +265,14 @@ components:
                 condition: Ready
             maxTotalSeconds: 300
             description: Wait for Panel-Viz (otel-navigator) to be ready
+          - wait:
+              cluster:
+                kind: Pod
+                name: app=vpc-flow-generator
+                namespace: panel-viz
+                condition: Ready
+            maxTotalSeconds: 180
+            description: Wait for vpc-flow-generator to be ready
 
   # ===========================================================================
   # Navigator Engine - gRPC engine for terminal-driven heatmap updates (M2)
