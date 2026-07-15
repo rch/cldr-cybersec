@@ -65,10 +65,22 @@ if [ ! -r "$KUBECONFIG" ] && [ "$(id -u)" != 0 ]; then
   echo "❌ $KUBECONFIG not readable — run as root (sudo) on the control-plane node." >&2
   exit 2
 fi
-ZARF_BIN=""
-for c in /usr/local/bin/zarf /var/lib/rancher/rke2/bin/zarf zarf; do
-  if [ -x "$c" ] || command -v "$c" >/dev/null 2>&1; then ZARF_BIN="$c"; break; fi
-done
+# Prefer explicit ZARF_BIN (must match the package build version — format skew is
+# unrecoverable air-gapped). Then PATH `zarf`, then well-known install paths.
+# Do NOT prefer a stale /usr/local/bin/zarf over a correct PATH entry.
+if [ -z "${ZARF_BIN:-}" ] || [ ! -x "$ZARF_BIN" ]; then
+  ZARF_BIN=""
+  if command -v zarf >/dev/null 2>&1; then
+    ZARF_BIN="$(command -v zarf)"
+  else
+    for c in /usr/local/bin/zarf /var/lib/rancher/rke2/bin/zarf; do
+      if [ -x "$c" ]; then ZARF_BIN="$c"; break; fi
+    done
+  fi
+fi
+# Resolve to absolute path so sudo/chdir cannot lose it.
+[ -n "$ZARF_BIN" ] && ZARF_BIN="$(readlink -f "$ZARF_BIN" 2>/dev/null || echo "$ZARF_BIN")"
+echo "   zarf: ${ZARF_BIN:-<none>} ($("$ZARF_BIN" version 2>/dev/null | head -1 || echo '?'))"
 KUBECTL_CMD=""
 for c in /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl kubectl; do
   if [ -x "$c" ] || command -v "$c" >/dev/null 2>&1; then
