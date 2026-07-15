@@ -146,6 +146,13 @@ class DataView(param.Parameterized):
         # treat stream.x_range (stale relative secs) as a user gesture.
         self._hist_applying = False
         self._hist_built = False
+        # Stable facet host — rebuilt in place so we don't depend on stream_epoch
+        # (live refresh was recreating buttons every poll and eating clicks).
+        self._facets_col = pn.Column(
+            pn.pane.Markdown("_No facets yet_", sizing_mode="stretch_width"),
+            sizing_mode="stretch_width",
+            scroll=True,
+        )
         self._filter_input = pn.widgets.TextInput(
             name="",  # no label — keeps the control bar on one baseline
             placeholder='field:value  e.g. action:REJECT  dstport:443',
@@ -175,7 +182,10 @@ class DataView(param.Parameterized):
         self._schedule_bg(force=True)
 
     def _on_clear(self, *_):
+        if not self.filters:
+            return
         self.filters = []
+        self.error = ""
         self._bump_all()
 
     def _on_add_click(self, *_):
@@ -185,6 +195,17 @@ class DataView(param.Parameterized):
     def _on_filter_submit(self, event):
         # Enter in some browsers fires value change with same text; only on explicit add for safety
         pass
+
+    def _filter_exists(self, field: str, value: str, op: str = "==") -> bool:
+        sv = str(value)
+        for f in self.filters:
+            if (
+                f.get("field") == field
+                and f.get("op", "==") == op
+                and str(f.get("value")) == sv
+            ):
+                return True
+        return False
 
     def _parse_and_add(self, text: str):
         text = (text or "").strip()
@@ -199,26 +220,50 @@ class DataView(param.Parameterized):
         else:
             self.error = f"Bad filter: {text!r} (use field:value)"
             return
-        self.filters = list(self.filters) + [{"field": field, "op": "==", "value": value}]
-        self.error = ""
-        self._bump_all()
+        if not field or value == "":
+            self.error = f"Bad filter: {text!r} (use field:value)"
+            return
+        self.add_facet_filter(field, value)
 
     def add_facet_filter(self, field: str, value: str):
+        field = (field or "").strip()
+        value = str(value).strip()
+        if not field or value == "":
+            return
+        if self._filter_exists(field, value):
+            # Already applied — still refresh chips/status so the UI feels responsive.
+            self.error = ""
+            self._refresh_filter_bar_only()
+            return
+        print("[DATA-VIEW] add filter %s=%s" % (field, value), flush=True)
         self.filters = list(self.filters) + [{"field": field, "op": "==", "value": value}]
+        self.error = ""
         self._bump_all()
 
     def remove_filter(self, idx: int):
         fl = list(self.filters)
         if 0 <= idx < len(fl):
-            fl.pop(idx)
+            removed = fl.pop(idx)
+            print("[DATA-VIEW] remove filter %s" % removed, flush=True)
             self.filters = fl
             self._bump_all()
 
+    def _refresh_filter_bar_only(self):
+        """Force filter chip row to repaint without recomputing data."""
+        self.param.trigger("filters")
+
     def _bump_all(self):
-        self.facet_token += 1
-        self.table_token += 1
+        # Recompute FIRST so reactive panes that fire on token bumps see filtered _df.
         self._recompute_filtered()
+        self.table_token += 1
+        self.facet_token += 1
         self._update_histogram_data()
+        self._rebuild_facets()
+        # Ensure filter chips / status see new rows count.
+        try:
+            self.param.trigger("filters")
+        except Exception:
+            pass
 
     def _window_minutes(self) -> int:
         m = {"5m": 5, "15m": 15, "1h": 60, "3h": 180}
@@ -228,12 +273,20 @@ class DataView(param.Parameterized):
         import data_view_lib as dvl
 
         with self._lock:
-            raw = self._df_raw
-            self._df = dvl.apply_filters(raw, list(self.filters))
-            self.rows_in_window = len(self._df)
+            raw = self._df_raw if self._df_raw is not None else pd.DataFrame()
+            fl = list(self.filters)
+            self._df = dvl.apply_filters(raw, fl)
+            self.rows_in_window = int(len(self._df))
             if not self._df.empty and "start" in self._df.columns:
                 mx = self._df["start"].max()
                 self.last_event_ts = str(mx) if pd.notna(mx) else "—"
+            elif self._df.empty:
+                self.last_event_ts = "—"
+        print(
+            "[DATA-VIEW] filters=%s rows=%s/%s"
+            % (len(fl), self.rows_in_window, len(raw) if raw is not None else 0),
+            flush=True,
+        )
 
     # -- discovery: cache-first paint + background refresh --
     # Measured cold path ~3.4s (glob 1.5s + sequential reads 1.75s). That must
@@ -437,40 +490,62 @@ class DataView(param.Parameterized):
         self.refreshing = refreshing
         self.error = ""
 
-        # Bump tokens on real data changes so table/facets repaint.
+        # Bump tokens on real data changes so table repaints.
         # Histogram is updated in-place via Pipe (preserves pan/zoom).
+        # Facets rebuild on a throttle (not every stream_epoch) so clicks survive.
         if (not unchanged) or (from_cache and self.stream_epoch == 0):
             self.stream_epoch += 1
             self.table_token += 1
+            self._update_histogram_data()
             if now - self._last_facet >= FACET_S or self.facet_token == 0:
                 self.facet_token += 1
                 self._last_facet = now
-            self._update_histogram_data()
+                self._rebuild_facets()
 
         win = self.time_window
         self.files_in_window = len(paths or [])
         self.load_ms = float(load_ms or 0)
+        nfilt = len(self.filters)
+        filt_bit = (" · %d filter%s" % (nfilt, "s" if nfilt != 1 else "")) if nfilt else ""
         # Status text holds epoch/window only — files/rows/load live in fixed slots.
         if self._df_raw is None or self._df_raw.empty:
-            self.status_line = f"epoch {self.stream_epoch} · window {win} · waiting for data…"
+            self.status_line = "epoch %s · window %s · waiting for data…" % (
+                self.stream_epoch, win,
+            )
         else:
-            self.status_line = f"epoch {self.stream_epoch} · window {win}"
+            self.status_line = "epoch %s · window %s%s" % (
+                self.stream_epoch, win, filt_bit,
+            )
 
     # -- panes --
     @param.depends("filters", "error")
     def filter_bar(self):
         chips = []
         for i, f in enumerate(self.filters):
-            label = f"{f['field']}:{f['value']}"
-            btn = pn.widgets.Button(name=f"× {label}", button_type="light", width=max(120, 10 * len(label)))
-            # capture index
+            label = "%s:%s" % (f.get("field"), f.get("value"))
+            btn = pn.widgets.Button(
+                name="× %s" % label,
+                button_type="light",
+                width=max(120, 10 * len(label) + 24),
+            )
             def _rm(event, idx=i):
                 self.remove_filter(idx)
             btn.on_click(_rm)
             chips.append(btn)
-        err = pn.pane.Alert(self.error, alert_type="warning") if self.error else pn.Spacer(height=0)
+        err = (
+            pn.pane.Alert(self.error, alert_type="warning")
+            if self.error
+            else pn.Spacer(height=0)
+        )
         return pn.Column(
-            pn.Row(self._filter_input, self._add_btn, self._clear_btn, self._window, self._pause, sizing_mode="stretch_width"),
+            pn.Row(
+                self._filter_input,
+                self._add_btn,
+                self._clear_btn,
+                self._window,
+                self._pause,
+                sizing_mode="stretch_width",
+            ),
             pn.Row(*chips, sizing_mode="stretch_width") if chips else pn.Spacer(height=0),
             err,
             sizing_mode="stretch_width",
@@ -962,39 +1037,85 @@ class DataView(param.Parameterized):
             ]
             self._hist_built = False
 
-    @param.depends("facet_token", "stream_epoch")
     def facets_pane(self):
+        """Stable container — contents replaced by ``_rebuild_facets``."""
+        return self._facets_col
+
+    def _rebuild_facets(self):
+        """Rebuild left-nav field chips from the *filtered* frame.
+
+        Uses a stable Column host so live stream_epoch bumps do not tear down
+        buttons mid-click. Counts reflect the current filter set (ELK-style).
+        """
         df = self._df
         if df is None or df.empty:
-            return pn.pane.Markdown("_No facets yet_", sizing_mode="stretch_width")
+            self._facets_col.objects = [
+                pn.pane.Markdown("_No facets yet_", sizing_mode="stretch_width"),
+            ]
+            return
 
-        sections = [pn.pane.Markdown("### Fields", margin=(0, 0, 8, 0))]
+        sections = [
+            pn.pane.Markdown("### Fields", margin=(0, 0, 4, 0)),
+            pn.pane.Markdown(
+                "_Click a value to filter · counts are for the current result set_",
+                styles={"font-size": "11px", "color": "#8b949e"},
+                margin=(0, 0, 8, 0),
+            ),
+        ]
         work = df
-        # sample for high-ish volume
         if len(work) > 50_000:
             work = work.sample(n=50_000, random_state=0)
+
+        active = {(str(f.get("field")), str(f.get("value"))) for f in self.filters}
 
         for field in FACET_FIELDS:
             if field not in work.columns:
                 continue
             vc = work[field].astype(str).value_counts().head(8)
             total = max(int(vc.sum()), 1)
-            rows = [pn.pane.Markdown(f"**{field}**", margin=(8, 0, 2, 0))]
+            rows = [pn.pane.Markdown("**%s**" % field, margin=(8, 0, 2, 0))]
             for val, cnt in vc.items():
                 pct = 100.0 * cnt / total
-                label = f"{val}  {cnt:,} ({pct:.0f}%)"
-                b = pn.widgets.Button(name=label, button_type="light", sizing_mode="stretch_width",
-                                     styles={"text-align": "left", "font-size": "12px"})
-                def _click(event, f=field, v=str(val)):
-                    self.add_facet_filter(f, v)
+                vstr = str(val)
+                on = (field, vstr) in active
+                label = "%s%s  %s (%.0f%%)" % (
+                    "● " if on else "",
+                    vstr,
+                    f"{int(cnt):,}",
+                    pct,
+                )
+                b = pn.widgets.Button(
+                    name=label,
+                    button_type="primary" if on else "light",
+                    sizing_mode="stretch_width",
+                    styles={"text-align": "left", "font-size": "12px"},
+                )
+                # Bind with defaults so the closure captures this iteration.
+                def _click(event, f=field, v=vstr, already=on):
+                    if already:
+                        # Toggle off: remove matching filter(s).
+                        fl = [
+                            x for x in self.filters
+                            if not (
+                                x.get("field") == f
+                                and str(x.get("value")) == v
+                            )
+                        ]
+                        if len(fl) != len(self.filters):
+                            self.filters = fl
+                            self._bump_all()
+                    else:
+                        self.add_facet_filter(f, v)
                 b.on_click(_click)
                 rows.append(b)
             sections.extend(rows)
 
-        return pn.Column(*sections, sizing_mode="stretch_width", scroll=True)
+        self._facets_col.objects = sections
 
-    @param.depends("table_token", "stream_epoch")
+    @param.depends("table_token")
     def table_pane(self):
+        # Only table_token — not stream_epoch. Live publish already bumps
+        # table_token on data change; filter bumps it via _bump_all.
         df = self._df
         cols = [
             c for c in [
@@ -1004,7 +1125,11 @@ class DataView(param.Parameterized):
         ]
         if df is None or df.empty or not cols:
             return pn.pane.Markdown("_No documents in window_", sizing_mode="stretch_both")
-        show = df.sort_values("start", ascending=False).head(TABLE_ROWS) if "start" in df.columns else df.head(TABLE_ROWS)
+        show = (
+            df.sort_values("start", ascending=False).head(TABLE_ROWS)
+            if "start" in df.columns
+            else df.head(TABLE_ROWS)
+        )
         show = show[cols].copy()
         if "start" in show.columns:
             show["start"] = show["start"].astype(str)
@@ -1019,7 +1144,7 @@ class DataView(param.Parameterized):
 
     @param.depends(
         "status_line", "rps_est", "rows_in_window", "files_in_window",
-        "load_ms", "stream_epoch", "live", "last_event_ts",
+        "load_ms", "stream_epoch", "live", "last_event_ts", "filters",
     )
     def status_strip(self):
         # Keep badge text stable (LIVE / PAUSED only) so the strip doesn't
@@ -1029,17 +1154,32 @@ class DataView(param.Parameterized):
             live_col, live_txt = "#3fb950", "● LIVE"
         else:
             live_col, live_txt = "#d29922", "○ PAUSED"
+        nfilt = len(self.filters)
+        filt_html = (
+            "<span>filters: <b>%d</b></span>" % nfilt if nfilt else ""
+        )
         return pn.pane.HTML(
-            f"<div style='display:flex;gap:18px;align-items:center;font-size:12px;"
-            f"color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,sans-serif;'>"
-            f"<span style='color:{live_col};font-weight:700;'>{live_txt}</span>"
-            f"<span>{self.status_line}</span>"
-            f"<span>files: <b>{self.files_in_window:,}</b></span>"
-            f"<span>rows: <b>{self.rows_in_window:,}</b></span>"
-            f"<span>load: <b>{self.load_ms:.0f}ms</b></span>"
-            f"<span>≈ {self.rps_est:.0f} Δrows/s</span>"
-            f"<span>last event: {self.last_event_ts}</span>"
-            f"</div>",
+            "<div style='display:flex;gap:18px;align-items:center;font-size:12px;"
+            "color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,sans-serif;'>"
+            "<span style='color:%s;font-weight:700;'>%s</span>"
+            "<span>%s</span>"
+            "<span>files: <b>%s</b></span>"
+            "<span>rows: <b>%s</b></span>"
+            "%s"
+            "<span>load: <b>%.0fms</b></span>"
+            "<span>≈ %.0f Δrows/s</span>"
+            "<span>last event: %s</span>"
+            "</div>" % (
+                live_col,
+                live_txt,
+                self.status_line,
+                f"{self.files_in_window:,}",
+                f"{self.rows_in_window:,}",
+                filt_html,
+                self.load_ms,
+                self.rps_est,
+                self.last_event_ts,
+            ),
             sizing_mode="stretch_width",
         )
 
@@ -1060,13 +1200,14 @@ class DataView(param.Parameterized):
         side = pn.Column(
             pn.pane.Markdown("# Data-View", margin=(0, 0, 6, 0)),
             pn.pane.Markdown(
-                f"**Prefix** `{VPC_FLOW_PREFIX}/`  \n"
-                f"**Bucket** `{S3_BUCKET or '—'}`  \n"
-                f"**Window** sliding (see control)",
+                "**Prefix** `%s/`  \n"
+                "**Bucket** `%s`  \n"
+                "**Window** sliding (see control)"
+                % (VPC_FLOW_PREFIX, S3_BUCKET or "—"),
                 styles={"font-size": "11px", "color": "#8b949e"},
             ),
             pn.layout.Divider(),
-            pn.panel(self.facets_pane),
+            self.facets_pane(),
             width=280,
             sizing_mode="fixed",
             scroll=True,

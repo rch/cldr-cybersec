@@ -212,27 +212,51 @@ def cache_put(*, sig: str, df, paths: list, cursor: dict, load_ms: float) -> Non
         _FRAME_CACHE["load_ms"] = load_ms
 
 
+def _col_match_mask(col: pd.Series, value, *, equal: bool) -> pd.Series:
+    """Match facet/text filter values across numeric and string columns.
+
+    Facet buttons always pass string labels (from value_counts.astype(str)),
+    while parquet columns may be int/float/bool — compare both ways.
+    """
+    sval = str(value).strip()
+    as_str = col.astype(str)
+    # Normalize "443.0" style float strings from pandas.
+    as_str_norm = as_str.str.replace(r"\.0$", "", regex=True)
+    mask_str = as_str == sval
+    mask_norm = as_str_norm == sval
+    mask = mask_str | mask_norm
+    if pd.api.types.is_numeric_dtype(col) or pd.api.types.is_bool_dtype(col):
+        try:
+            value_n = pd.to_numeric(sval)
+            mask = mask | (col == value_n)
+        except Exception:
+            pass
+        # bool facets may show "True"/"False"
+        if sval.lower() in ("true", "false", "1", "0"):
+            try:
+                mask = mask | (col.astype(bool) == (sval.lower() in ("true", "1")))
+            except Exception:
+                pass
+    return mask if equal else ~mask
+
+
 def apply_filters(df: pd.DataFrame, filters: list[dict]) -> pd.DataFrame:
-    if df.empty or not filters:
-        return df
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty or not filters:
+        return df if df is not None else pd.DataFrame()
     out = df
     for f in filters:
         field, op, value = f.get("field"), f.get("op", "=="), f.get("value")
-        if field not in out.columns:
+        if not field or field not in out.columns:
+            logger.debug("filter skip unknown field %s", field)
             continue
         try:
             col = out[field]
-            if op == "==":
-                if pd.api.types.is_numeric_dtype(col):
-                    try:
-                        value_n = pd.to_numeric(value)
-                        out = out[col == value_n]
-                    except Exception:
-                        out = out[col.astype(str) == str(value)]
-                else:
-                    out = out[col.astype(str) == str(value)]
-            elif op == "!=":
-                out = out[col.astype(str) != str(value)]
+            if op in ("==", "eq", None, ""):
+                out = out[_col_match_mask(col, value, equal=True)]
+            elif op in ("!=", "ne"):
+                out = out[_col_match_mask(col, value, equal=False)]
+            else:
+                logger.warning("filter unsupported op %r on %s", op, field)
         except Exception as e:
             logger.warning("filter apply %s: %s", f, e)
     return out
