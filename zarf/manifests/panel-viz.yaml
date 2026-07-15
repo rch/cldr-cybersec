@@ -40,10 +40,11 @@ data:
   OTEL_DATA_PATH: "s3://###ZARF_VAR_S3_BUCKET###/"
   # AWS region for S3 access
   AWS_REGION: "###ZARF_VAR_S3_REGION###"
-  # Data-View streaming VPC flow prefix (Hive parquet under bucket)
+  # Data-View: sliding window over minute= partitions (6 files/min → ~90 in 15m)
   VPC_FLOW_PREFIX: "vpc-flow"
   DATA_VIEW_WINDOW_MIN: "15"
   DATA_VIEW_DISCOVERY_S: "2"
+  DATA_VIEW_MAX_FILES: "102"
   # Optional AI agent (ACP). OFF by default; set AGENT_BACKEND=acp + a model
   # endpoint to enable. Read by the engine (cybersec.engine.agent.config).
   AGENT_BACKEND: "###ZARF_VAR_AGENT_BACKEND###"
@@ -104,7 +105,7 @@ spec:
       containers:
         - name: otel-navigator
           # Image will be rewritten by Zarf to use internal registry
-          image: localhost:5555/cybersec-dask:2025.2.0-7e0a98e2ed
+          image: localhost:5555/cybersec-dask:2025.2.0-97741da505
           imagePullPolicy: IfNotPresent
           # Serve OTEL Navigator with ghostty-web WASM assets for terminal
           command:
@@ -160,7 +161,7 @@ spec:
             failureThreshold: 5
         # PTY proxy sidecar: bridges terminal WebSocket to gRPC engine
         - name: pty-proxy
-          image: localhost:5555/cybersec-dask:2025.2.0-7e0a98e2ed
+          image: localhost:5555/cybersec-dask:2025.2.0-97741da505
           imagePullPolicy: IfNotPresent
           command:
             - python

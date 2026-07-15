@@ -110,11 +110,15 @@ ENIS = [f"eni-{uuid.uuid4().hex[:8]}" for _ in range(30)]
 INSTANCES = [f"i-{uuid.uuid4().hex[:8]}" for _ in range(40)]
 
 
-def generate_batch(n: int, now: datetime | None = None) -> pa.Table:
-    """Vectorized synthetic VPC flow rows with event time ≈ now."""
+def generate_batch(
+    n: int,
+    now: datetime | None = None,
+    window_sec: float = 2.0,
+) -> pa.Table:
+    """Vectorized synthetic VPC flow rows with event times in [now-window_sec, now]."""
     now = now or datetime.now(timezone.utc)
-    # spread slightly within the last few seconds
-    offsets = np.random.uniform(-2.0, 0.0, size=n)
+    window_sec = max(float(window_sec), 0.1)
+    offsets = np.random.uniform(-window_sec, 0.0, size=n)
     starts = [now + timedelta(seconds=float(o)) for o in offsets]
     ends = [s + timedelta(seconds=float(x)) for s, x in zip(starts, np.random.uniform(0.001, 30.0, size=n))]
 
@@ -292,23 +296,37 @@ def run_stream(
     max_hours: float,
     batch: int,
     expire_every: float,
+    files_per_min: int = 6,
 ) -> int:
-    print(f"[stream] rps={rps} batch={batch} max_bytes={max_bytes} max_hours={max_hours}", flush=True)
+    """Stream at ~rps by buffering, then flush files_per_min objects per minute=.
+
+    Default files_per_min=6 → one flush every 10s, ~rps*10 rows per object.
+    Avoids the small-file tax of writing once per second.
+    """
+    files_per_min = max(int(files_per_min), 1)
+    flush_interval = 60.0 / files_per_min
+    rows_per_flush = max(int(round(rps * flush_interval)), 1)
+    # `batch` is ignored for pacing; kept for CLI/seed compatibility.
+    print(
+        f"[stream] rps={rps} files_per_min={files_per_min} "
+        f"flush_every={flush_interval:.1f}s rows_per_flush={rows_per_flush} "
+        f"max_bytes={max_bytes} max_hours={max_hours}",
+        flush=True,
+    )
     rows_total = 0
     bytes_total = 0
     last_expire = 0.0
     last_cursor = 0.0
     last_path = ""
-    # pace: emit `batch` rows every batch/rps seconds
-    interval = max(batch / float(rps), 0.05)
-    cursor_every = 2.0  # avoid hammering the same S3 key (breaks s3fs ETag readers)
+    cursor_every = max(flush_interval, 2.0)
     while True:
         t_loop = time.time()
         now = datetime.now(timezone.utc)
-        table = generate_batch(batch, now=now)
+        # Event times spread across this flush window (not a 2s spike).
+        table = generate_batch(rows_per_flush, now=now, window_sec=flush_interval)
         path, size = write_table(s3, base, table, now)
         last_path = path
-        rows_total += batch
+        rows_total += rows_per_flush
         bytes_total += size
         catalog_id = f"{partition_key(now)}:{rows_total}"
         stats: dict = {}
@@ -326,15 +344,17 @@ def run_stream(
                 "last_path": last_path,
                 "expire": stats,
                 "rps": rps,
+                "files_per_min": files_per_min,
+                "rows_per_flush": rows_per_flush,
             })
             last_cursor = t_loop
-        if rows_total % (rps * 5) < batch:
-            print(
-                f"[stream] rows={rows_total:,} last={path} size={size} expire={stats or 'skip'}",
-                flush=True,
-            )
+        print(
+            f"[stream] rows={rows_total:,} last={path} size={size} "
+            f"part={partition_key(now)} expire={stats or 'skip'}",
+            flush=True,
+        )
         elapsed = time.time() - t_loop
-        sleep_for = interval - elapsed
+        sleep_for = flush_interval - elapsed
         if sleep_for > 0:
             time.sleep(sleep_for)
 
@@ -350,6 +370,12 @@ def main() -> int:
     p.add_argument("--max-bytes", type=int, default=int(os.environ.get("FLOW_MAX_BYTES", str(8 * 1024**3))))
     p.add_argument("--max-hours", type=float, default=float(os.environ.get("FLOW_MAX_HOURS", "3")))
     p.add_argument("--batch", type=int, default=int(os.environ.get("FLOW_BATCH", "200")))
+    p.add_argument(
+        "--files-per-min",
+        type=int,
+        default=int(os.environ.get("FLOW_FILES_PER_MIN", "6")),
+        help="Objects flushed per minute= partition (default: 6 → every 10s)",
+    )
     p.add_argument("--expire-every", type=float, default=float(os.environ.get("FLOW_EXPIRE_EVERY", "60")))
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
@@ -357,7 +383,8 @@ def main() -> int:
     print("=" * 60)
     print("VPC Flow Generator")
     print(f"  mode={args.mode} bucket={args.bucket} prefix={args.prefix}")
-    print(f"  rps={args.rps} max_bytes={args.max_bytes} max_hours={args.max_hours}")
+    print(f"  rps={args.rps} files_per_min={args.files_per_min}")
+    print(f"  max_bytes={args.max_bytes} max_hours={args.max_hours}")
     print(f"  endpoint={args.endpoint or '(AWS)'}")
     print("=" * 60)
     if args.dry_run:
@@ -372,7 +399,10 @@ def main() -> int:
     # ensure prefix exists by writing nothing — first write creates it
     if args.mode == "seed":
         return run_seed(s3, base, args.rps, args.max_bytes, args.max_hours, args.batch)
-    return run_stream(s3, base, args.rps, args.max_bytes, args.max_hours, args.batch, args.expire_every)
+    return run_stream(
+        s3, base, args.rps, args.max_bytes, args.max_hours, args.batch,
+        args.expire_every, files_per_min=args.files_per_min,
+    )
 
 
 if __name__ == "__main__":

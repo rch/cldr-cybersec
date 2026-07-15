@@ -16,7 +16,9 @@ data:
   FLOW_PREFIX: "vpc-flow"
   FLOW_MODE: "stream"
   FLOW_RPS: "200"
-  # 8 GiB envelope
+  # 6 objects per minute= partition (flush every 10s) — avoids small-file tax
+  FLOW_FILES_PER_MIN: "6"
+  # 8 GiB / 3 h envelope (age usually binds first at 200 rps)
   FLOW_MAX_BYTES: "8589934592"
   FLOW_MAX_HOURS: "3"
   FLOW_BATCH: "200"

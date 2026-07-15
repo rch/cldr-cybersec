@@ -54,6 +54,7 @@ RUN mkdir -p /app /app/static/ghostty
 
 # Copy OTEL Navigator + Data-View applications
 COPY zarf/images/otel-navigator.py /app/otel-navigator.py
+COPY zarf/images/data_view_lib.py /app/data_view_lib.py
 COPY zarf/images/data-view.py /app/data-view.py
 # Streaming VPC flow generator (also used as a K8s workload entrypoint)
 COPY zarf/scripts/generate-vpc-flow.py /app/generate-vpc-flow.py

@@ -29,10 +29,13 @@ import param
 
 try:
     import holoviews as hv
+    import datashader as dsh
     hv.extension("bokeh")
     _HAS_HV = True
+    _HAS_DS = True
 except Exception:  # pragma: no cover
     _HAS_HV = False
+    _HAS_DS = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,19 +49,25 @@ pn.extension("tabulator", loading_spinner="dots", loading_color="#0072B5")
 # Config
 # -------------------------------------------------------------------------
 
-S3_BUCKET = os.environ.get("S3_BUCKET", "")
-S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
-AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
-AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
-AWS_SESSION_TOKEN = os.environ.get("AWS_SESSION_TOKEN", "")
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-VPC_FLOW_PREFIX = os.environ.get("VPC_FLOW_PREFIX", "vpc-flow").strip("/")
+# Process-stable I/O (survives panel serve session re-exec / missing __builtins__).
+# Must import by path so `panel serve /app/data-view.py` resolves it from /app.
+import sys as _sys
 
-WINDOW_MIN = int(os.environ.get("DATA_VIEW_WINDOW_MIN", "15"))
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if _APP_DIR not in _sys.path:
+    _sys.path.insert(0, _APP_DIR)
+
+import data_view_lib as _dvl  # noqa: E402
+
+S3_BUCKET = _dvl.S3_BUCKET
+S3_ENDPOINT = _dvl.S3_ENDPOINT
+VPC_FLOW_PREFIX = _dvl.VPC_FLOW_PREFIX
+WINDOW_MIN = _dvl.WINDOW_MIN
 DISCOVERY_S = float(os.environ.get("DATA_VIEW_DISCOVERY_S", "2"))
 FACET_S = float(os.environ.get("DATA_VIEW_FACET_S", "5"))
 TABLE_ROWS = int(os.environ.get("DATA_VIEW_TABLE_ROWS", "80"))
-MAX_FILES = int(os.environ.get("DATA_VIEW_MAX_FILES", "90"))
+MAX_FILES = _dvl.MAX_FILES
+CACHE_TTL_S = _dvl.CACHE_TTL_S
 
 FACET_FIELDS = [
     "action",
@@ -77,183 +86,7 @@ NAV_HTML = """
 </div>
 """
 
-
-def _storage_options() -> dict:
-    opts: dict[str, Any] = {}
-    if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
-        opts["key"] = AWS_ACCESS_KEY_ID
-        opts["secret"] = AWS_SECRET_ACCESS_KEY
-        if AWS_SESSION_TOKEN:
-            opts["token"] = AWS_SESSION_TOKEN
-    if S3_ENDPOINT:
-        opts["client_kwargs"] = {"endpoint_url": S3_ENDPOINT}
-    if AWS_REGION:
-        opts.setdefault("client_kwargs", {})
-        opts["client_kwargs"]["region_name"] = AWS_REGION
-    return opts
-
-
-def _s3fs():
-    import s3fs
-
-    return s3fs.S3FileSystem(**_storage_options())
-
-
-def _port_bucket(p: int) -> str:
-    if p in (80, 443, 22, 53, 123, 389, 636, 3306, 5432, 6379, 8080, 8443):
-        return str(p)
-    if p < 1024:
-        return "sys-other"
-    return "ephemeral"
-
-
-# -------------------------------------------------------------------------
-# Catalog / load
-# -------------------------------------------------------------------------
-
-def read_cursor(fs) -> dict:
-    if not S3_BUCKET:
-        return {}
-    path = f"{S3_BUCKET}/{VPC_FLOW_PREFIX}/_stream_cursor.json"
-    for attempt in range(3):
-        try:
-            # Cursor is rewritten every batch — bust s3fs ETag cache.
-            try:
-                fs.invalidate_cache(path)
-            except Exception:
-                pass
-            if not fs.exists(path):
-                return {}
-            with fs.open(path, "rb") as f:
-                return json.loads(f.read().decode("utf-8"))
-        except Exception as e:
-            if attempt == 2:
-                logger.debug("cursor read failed: %s", e)
-            time.sleep(0.05 * (attempt + 1))
-    return {}
-
-
-def list_recent_parquet(fs, window_min: int) -> list[str]:
-    """List parquet files under prefix whose partition time is within window.
-
-    Always busts s3fs directory cache — otherwise the UI freezes on the first
-    listing while the generator keeps writing new objects.
-    """
-    if not S3_BUCKET:
-        return []
-    root = f"{S3_BUCKET}/{VPC_FLOW_PREFIX}"
-    try:
-        # Critical: s3fs caches listings; without invalidate, glob is sticky.
-        try:
-            fs.invalidate_cache(root)
-            fs.invalidate_cache()
-        except Exception:
-            pass
-        pattern = f"{root}/date=*/hour=*/minute=*/*.parquet"
-        files = fs.glob(pattern, refresh=True) if hasattr(fs, "glob") else fs.glob(pattern)
-    except TypeError:
-        # older s3fs: no refresh kw
-        try:
-            fs.invalidate_cache()
-            files = fs.glob(f"{root}/date=*/hour=*/minute=*/*.parquet")
-        except Exception as e:
-            logger.warning("glob failed: %s", e)
-            return []
-    except Exception as e:
-        logger.warning("glob failed: %s", e)
-        return []
-
-    if not files:
-        try:
-            fs.invalidate_cache(root)
-            files = [p for p in fs.find(root, refresh=True) if p.endswith(".parquet") and "_stream" not in p]
-        except TypeError:
-            files = [p for p in fs.find(root) if p.endswith(".parquet") and "_stream" not in p]
-        except Exception:
-            return []
-
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_min)
-    kept: list[tuple[str, datetime]] = []
-    for p in files:
-        parts = {kv.split("=")[0]: kv.split("=")[1] for kv in p.split("/") if "=" in kv}
-        try:
-            dt = datetime(
-                int(parts["date"][:4]),
-                int(parts["date"][5:7]),
-                int(parts["date"][8:10]),
-                int(parts.get("hour", "0")),
-                int(parts.get("minute", "0")),
-                tzinfo=timezone.utc,
-            )
-        except Exception:
-            # Prefer keeping unparseable paths (likely fresh) over dropping them
-            dt = datetime.now(timezone.utc)
-        if dt >= cutoff:
-            kept.append((p if p.startswith("s3://") else f"s3://{p}", dt))
-
-    # Newest first, cap, then chronological for stable concat
-    kept.sort(key=lambda x: (x[1], x[0]), reverse=True)
-    paths = [p for p, _ in kept[:MAX_FILES]]
-    return list(reversed(paths))
-
-
-def load_frame(paths: list[str]) -> pd.DataFrame:
-    if not paths:
-        return pd.DataFrame()
-    try:
-        import pyarrow.parquet as pq
-        from pyarrow import fs as pafs
-
-        storage = _storage_options()
-        # Use pandas via s3fs for simplicity across endpoints
-        frames = []
-        fs = _s3fs()
-        for p in paths:
-            key = p.replace("s3://", "")
-            try:
-                with fs.open(key, "rb") as f:
-                    table = pq.read_table(f)
-                frames.append(table.to_pandas())
-            except FileNotFoundError:
-                continue
-            except Exception as e:
-                logger.debug("skip %s: %s", p, e)
-                continue
-        if not frames:
-            return pd.DataFrame()
-        df = pd.concat(frames, ignore_index=True)
-        if "start" in df.columns:
-            df["start"] = pd.to_datetime(df["start"], utc=True, errors="coerce")
-        return df
-    except Exception as e:
-        logger.exception("load_frame failed: %s", e)
-        return pd.DataFrame()
-
-
-def apply_filters(df: pd.DataFrame, filters: list[dict]) -> pd.DataFrame:
-    if df.empty or not filters:
-        return df
-    out = df
-    for f in filters:
-        field, op, value = f.get("field"), f.get("op", "=="), f.get("value")
-        if field not in out.columns:
-            continue
-        try:
-            col = out[field]
-            if op == "==":
-                if pd.api.types.is_numeric_dtype(col):
-                    try:
-                        value_n = pd.to_numeric(value)
-                        out = out[col == value_n]
-                    except Exception:
-                        out = out[col.astype(str) == str(value)]
-                else:
-                    out = out[col.astype(str) == str(value)]
-            elif op == "!=":
-                out = out[col.astype(str) != str(value)]
-        except Exception as e:
-            logger.warning("filter apply %s: %s", f, e)
-    return out
+apply_filters = _dvl.apply_filters
 
 
 # -------------------------------------------------------------------------
@@ -270,10 +103,14 @@ class DataView(param.Parameterized):
     facet_token = param.Integer(default=0)
     table_token = param.Integer(default=0)
     rows_in_window = param.Integer(default=0)
+    files_in_window = param.Integer(default=0)
+    load_ms = param.Number(default=0.0)
     last_event_ts = param.String(default="—")
     status_line = param.String(default="Starting…")
     rps_est = param.Number(default=0.0)
     error = param.String(default="")
+    refreshing = param.Boolean(default=False)
+    from_cache = param.Boolean(default=False)
 
     def __init__(self, **params):
         super().__init__(**params)
@@ -284,7 +121,31 @@ class DataView(param.Parameterized):
         self._last_rows = 0
         self._last_rows_t = time.time()
         self._busy = False
-        self._cb = None  # periodic callback handle
+        self._cb = None  # UI tick (applies pending + schedules bg)
+        self._bg_kicked = False  # first discover thread launched
+        self._pending: dict | None = None  # set by bg thread, applied on event loop
+        self._last_bg = 0.0
+        # Persistent histogram state — must NOT be recreated on every stream_epoch
+        # or the user's pan/zoom is wiped by the refresh loop.
+        self._hist_view = pn.Column(
+            pn.pane.Markdown(
+                "### Time histogram\n_Waiting for data…_",
+                sizing_mode="stretch_width",
+            ),
+            sizing_mode="stretch_width",
+            height=200,
+        )
+        self._hist_stream = None  # hv.streams.RangeX — persistent viewport
+        self._hist_pipe = None  # hv.streams.Pipe of plot-ready frame
+        self._hist_t0 = None  # pd.Timestamp origin for t_sec
+        self._hist_t_max = 1.0
+        # Absolute user viewport (UTC timestamps). None = follow full window.
+        # Source of truth across live refresh (t0 shifts every load).
+        self._hist_view_abs: tuple | None = None
+        # True while we programmatically push Pipe/RangeX — callback must NOT
+        # treat stream.x_range (stale relative secs) as a user gesture.
+        self._hist_applying = False
+        self._hist_built = False
         self._filter_input = pn.widgets.TextInput(
             name="",  # no label — keeps the control bar on one baseline
             placeholder='field:value  e.g. action:REJECT  dstport:443',
@@ -298,10 +159,20 @@ class DataView(param.Parameterized):
         self._pause = pn.widgets.Toggle(name="Live", value=True, width=70)
         self._pause.param.watch(self._on_live_toggle, "value")
         self._window = pn.widgets.Select.from_param(self.param.time_window, name="", width=100)
+        self.param.watch(self._on_window_change, "time_window")
 
     # -- filter UI --
     def _on_live_toggle(self, event):
         self.live = bool(event.new)
+
+    def _on_window_change(self, event):
+        # Force catalog rebind for the new sliding window; clear user viewport
+        # so we re-anchor to the full new window.
+        self.catalog_id = ""
+        self._hist_view_abs = None
+        self.status_line = f"Loading window {event.new}…"
+        self.refreshing = True
+        self._schedule_bg(force=True)
 
     def _on_clear(self, *_):
         self.filters = []
@@ -344,111 +215,246 @@ class DataView(param.Parameterized):
             self._bump_all()
 
     def _bump_all(self):
-        self.hist_token += 1
         self.facet_token += 1
         self.table_token += 1
         self._recompute_filtered()
+        self._update_histogram_data()
 
     def _window_minutes(self) -> int:
         m = {"5m": 5, "15m": 15, "1h": 60, "3h": 180}
         return m.get(self.time_window, WINDOW_MIN)
 
     def _recompute_filtered(self):
+        import data_view_lib as dvl
+
         with self._lock:
             raw = self._df_raw
-            self._df = apply_filters(raw, list(self.filters))
+            self._df = dvl.apply_filters(raw, list(self.filters))
             self.rows_in_window = len(self._df)
             if not self._df.empty and "start" in self._df.columns:
                 mx = self._df["start"].max()
                 self.last_event_ts = str(mx) if pd.notna(mx) else "—"
 
-    # -- discovery (Bokeh periodic callback — NOT a raw thread) --
-    # Param updates from a daemon thread do not push to open browser sessions.
-    # pn.state.add_periodic_callback runs on the server event loop and does.
+    # -- discovery: cache-first paint + background refresh --
+    # Measured cold path ~3.4s (glob 1.5s + sequential reads 1.75s). That must
+    # NOT run on the Bokeh event loop or first paint freezes. Pattern:
+    #   1) apply process cache immediately (if any)
+    #   2) periodic tick on event loop only applies `_pending` results
+    #   3) worker thread lists/loads and sets `_pending` when catalog moves
     def start(self):
-        if self._cb is not None:
-            return
-        # Immediate first tick so the page isn't empty until the first interval.
-        try:
-            self._discover_once()
-        except Exception as e:
-            logger.exception("initial discover: %s", e)
-            self.error = str(e)
-        period_ms = max(int(DISCOVERY_S * 1000), 500)
-        self._cb = pn.state.add_periodic_callback(self._tick, period=period_ms)
-        logger.info("Data-View live poll every %sms", period_ms)
+        """Idempotent boot: kick bg I/O anytime; attach UI tick when Document exists.
 
-    def _tick(self):
-        if not self.live:
+        Safe to call at module import *and* from ``pn.state.onload``. Discovery
+        does not need a Document; ``add_periodic_callback`` does.
+        """
+        print("[DATA-VIEW] start() bg_kicked=%s cb=%s" % (self._bg_kicked, self._cb is not None), flush=True)
+        # Instant paint from process cache (other sessions / prior poll).
+        try:
+            self._try_apply_process_cache(instant=True)
+        except Exception as e:
+            print("[DATA-VIEW] cache apply failed: %s" % e, flush=True)
+        if self._df_raw is None or getattr(self._df_raw, "empty", True):
+            try:
+                self.status_line = "epoch 0 · window %s · waiting for data…" % self.time_window
+            except Exception:
+                pass
+        if not self._bg_kicked:
+            self._bg_kicked = True
+            try:
+                self.refreshing = True
+            except Exception:
+                pass
+            self._schedule_bg(force=True)
+        # UI tick — only works once a Document is available (onload).
+        if self._cb is None:
+            try:
+                self._cb = pn.state.add_periodic_callback(self._tick, period=400)
+                print("[DATA-VIEW] periodic callback attached", flush=True)
+            except Exception as e:
+                print("[DATA-VIEW] periodic_callback deferred: %s" % e, flush=True)
+        logger.info(
+            "Data-View start cache_hit=%s cb=%s bg=%s",
+            self.from_cache, self._cb is not None, self._bg_kicked,
+        )
+
+    def _try_apply_process_cache(self, instant: bool = False) -> bool:
+        import data_view_lib as dvl
+
+        hit = dvl.cache_get()
+        if not hit:
+            return False
+        self._publish(
+            df=hit["df"],
+            sig=hit["sig"],
+            paths=hit["paths"],
+            cursor=hit["cursor"],
+            load_ms=hit["load_ms"],
+            from_cache=True,
+            refreshing=True,
+        )
+        return True
+
+    def _schedule_bg(self, force: bool = False):
+        if not self.live and not force:
             return
         if self._busy:
             return
+        now = time.time()
+        if not force and (now - self._last_bg) < DISCOVERY_S:
+            return
         self._busy = True
+        self._last_bg = now
+        self.refreshing = True
+        threading.Thread(target=self._bg_discover, daemon=True, name="data-view-bg").start()
+
+    def _tick(self):
+        """Event-loop only: apply bg results + schedule next discover."""
+        pending = None
+        with self._lock:
+            if self._pending is not None:
+                pending = self._pending
+                self._pending = None
+        if pending is not None:
+            if pending.get("error"):
+                self.error = str(pending["error"])
+                self.refreshing = False
+            elif pending.get("unchanged"):
+                # Catalog quiet — heartbeat only, keep current panes / stable wording.
+                self.refreshing = False
+                self.from_cache = False
+                npaths = len(pending.get("paths") or [])
+                if npaths:
+                    self.files_in_window = npaths
+                if pending.get("load_ms") is not None:
+                    self.load_ms = float(pending["load_ms"])
+                self.status_line = (
+                    f"epoch {self.stream_epoch} · window {self.time_window}"
+                )
+            else:
+                self._publish(
+                    df=pending["df"],
+                    sig=pending["sig"],
+                    paths=pending["paths"],
+                    cursor=pending.get("cursor") or {},
+                    load_ms=pending.get("load_ms", 0),
+                    from_cache=False,
+                    refreshing=False,
+                )
+        if self.live:
+            self._schedule_bg(force=False)
+
+    def _bg_discover(self):
+        """Worker thread: S3 list + load via process-stable data_view_lib.
+
+        Never touches param from here. Local-import the lib so we never depend
+        on the panel session module globals (which can lose ``__builtins__`` /
+        names mid-flight and turn into blank histograms).
+        """
+        import logging as _logging
+        import time as _time
+        import data_view_lib as dvl
+
+        log = _logging.getLogger("data-view")
         try:
-            self._discover_once()
+            # Read session-owned attrs once; don't re-resolve module globals later.
+            window_min = self._window_minutes()
+            catalog_id = self.catalog_id
+            has_data = self._df_raw is not None and not getattr(self._df_raw, "empty", True)
+            skip = catalog_id if has_data else None
+            result = dvl.discover(window_min, skip_if_sig=skip)
+            if result.get("error"):
+                with self._lock:
+                    self._pending = {"error": result["error"]}
+                return
+            if result.get("unchanged"):
+                with self._lock:
+                    self._pending = {
+                        "df": self._df_raw,
+                        "sig": result["sig"],
+                        "paths": result.get("paths") or [],
+                        "cursor": result.get("cursor") or {},
+                        "load_ms": result.get("load_ms", 0),
+                        "unchanged": True,
+                    }
+                return
+            with self._lock:
+                self._pending = {
+                    "df": result["df"],
+                    "sig": result["sig"],
+                    "paths": result.get("paths") or [],
+                    "cursor": result.get("cursor") or {},
+                    "load_ms": result.get("load_ms", 0),
+                    "unchanged": False,
+                }
+            print(
+                "[DATA-VIEW] bg pending rows=%s files=%s" % (
+                    0 if result.get("df") is None else len(result["df"]),
+                    len(result.get("paths") or []),
+                ),
+                flush=True,
+            )
+            # Nudge the event loop in case the periodic callback is delayed.
+            try:
+                pn.state.schedule_callback(self._tick, 50)
+            except Exception:
+                pass
         except Exception as e:
-            logger.exception("discover: %s", e)
-            self.error = str(e)
+            log.exception("bg discover: %s", e)
+            print("[DATA-VIEW] bg discover ERROR: %s" % e, flush=True)
+            try:
+                with self._lock:
+                    self._pending = {"error": str(e)}
+            except Exception:
+                pass
         finally:
             self._busy = False
 
-    def _discover_once(self):
-        if not S3_BUCKET:
-            self.status_line = "S3_BUCKET not set"
-            return
-        fs = _s3fs()
-        cur = read_cursor(fs)
-        catalog = str(
-            cur.get("catalog_id")
-            or cur.get("rows_written")
-            or cur.get("last_path")
-            or cur.get("last_partition")
-            or ""
-        )
-        paths = list_recent_parquet(fs, self._window_minutes())
-        # Prefer newest slice for fast reload (full window still capped by MAX_FILES)
-        live_paths = paths[-min(len(paths), 24):] if paths else []
-        sig = f"{catalog}|{len(paths)}|{paths[-1] if paths else ''}|{paths[0] if paths else ''}"
-        if sig != self.catalog_id:
-            self.catalog_id = sig
-            # Load the recent tail for snappy live updates; fall back to full set if tiny
-            load_paths = live_paths if len(live_paths) >= 1 else paths
-            df = load_frame(load_paths)
-            with self._lock:
-                self._df_raw = df
-            self._recompute_filtered()
-            now = time.time()
-            dt = max(now - self._last_rows_t, 0.001)
-            delta = max(len(df) - self._last_rows, 0)
+    def _publish(
+        self,
+        *,
+        df: pd.DataFrame,
+        sig: str,
+        paths: list,
+        cursor: dict,
+        load_ms: float,
+        from_cache: bool,
+        refreshing: bool,
+    ):
+        """Apply a frame on the event loop — bumps tokens so panes repaint."""
+        unchanged = sig == self.catalog_id and not from_cache
+        with self._lock:
+            self._df_raw = df if df is not None else pd.DataFrame()
+        self.catalog_id = sig
+        self._recompute_filtered()
+        now = time.time()
+        dt = max(now - self._last_rows_t, 0.001)
+        delta = max(len(self._df_raw) - self._last_rows, 0)
+        if not unchanged and not from_cache:
             self.rps_est = round(delta / dt, 1) if delta > 0 else max(self.rps_est * 0.5, 0.0)
-            self._last_rows = len(df)
-            self._last_rows_t = now
+        self._last_rows = len(self._df_raw)
+        self._last_rows_t = now
+        self.from_cache = from_cache
+        self.refreshing = refreshing
+        self.error = ""
+
+        # Bump tokens on real data changes so table/facets repaint.
+        # Histogram is updated in-place via Pipe (preserves pan/zoom).
+        if (not unchanged) or (from_cache and self.stream_epoch == 0):
             self.stream_epoch += 1
-            self.hist_token += 1
             self.table_token += 1
-            if now - self._last_facet >= FACET_S:
+            if now - self._last_facet >= FACET_S or self.facet_token == 0:
                 self.facet_token += 1
                 self._last_facet = now
-            age = cur.get("updated_at", "")
-            self.status_line = (
-                f"Live · epoch {self.stream_epoch} · {len(load_paths)}/{len(paths)} files · "
-                f"{self.rows_in_window:,} rows · cursor {age or 'n/a'}"
-            )
-            self.error = ""
-            logger.info(
-                "discover epoch=%s files=%s rows=%s last=%s",
-                self.stream_epoch, len(load_paths), self.rows_in_window,
-                paths[-1] if paths else None,
-            )
+            self._update_histogram_data()
+
+        win = self.time_window
+        self.files_in_window = len(paths or [])
+        self.load_ms = float(load_ms or 0)
+        # Status text holds epoch/window only — files/rows/load live in fixed slots.
+        if self._df_raw is None or self._df_raw.empty:
+            self.status_line = f"epoch {self.stream_epoch} · window {win} · waiting for data…"
         else:
-            if not self.catalog_id:
-                self.status_line = "Waiting for vpc-flow stream (no partitions yet)…"
-            else:
-                # Heartbeat so the strip shows the poll is alive even if listing is sticky
-                self.status_line = (
-                    f"Live · epoch {self.stream_epoch} · poll ok · "
-                    f"{self.rows_in_window:,} rows (no new files)"
-                )
+            self.status_line = f"epoch {self.stream_epoch} · window {win}"
 
     # -- panes --
     @param.depends("filters", "error")
@@ -470,41 +476,491 @@ class DataView(param.Parameterized):
             sizing_mode="stretch_width",
         )
 
-    @param.depends("hist_token", "stream_epoch", "time_window")
     def histogram_pane(self):
-        """Auto-advancing line/area time series (live edge follows stream_epoch)."""
-        df = self._df
-        if df is None or df.empty or "start" not in df.columns:
-            return pn.pane.Markdown(
-                "### Time histogram\n_No data in window — start vpc-flow-generator stream._",
-                sizing_mode="stretch_width",
+        """Stable container — plot is built once and fed via Pipe so pan/zoom survives refresh."""
+        return self._hist_view
+
+    def _prepare_hist_frame(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Timestamp, float, str, bool]:
+        """Return (plot_df with t_sec/metric/y, t0, t_max, ylabel, use_sum)."""
+        plot_df = df.dropna(subset=["start"]).copy()
+        plot_df["start"] = pd.to_datetime(plot_df["start"], utc=True, errors="coerce")
+        plot_df = plot_df.dropna(subset=["start"])
+        if plot_df.empty:
+            return plot_df, pd.Timestamp.now(tz="UTC"), 1.0, "value", False
+        if "bytes" in plot_df.columns:
+            # Bytes are non-negative; clamp so Σ never paints below zero.
+            plot_df["metric"] = (
+                pd.to_numeric(plot_df["bytes"], errors="coerce").fillna(0.0).clip(lower=0.0)
             )
+            ylabel, use_sum = "bytes (Σ)", True
+        else:
+            plot_df["metric"] = 1.0
+            ylabel, use_sum = "flows", False
+        t0 = plot_df["start"].min()
+        plot_df = plot_df.assign(
+            t_sec=(plot_df["start"] - t0).dt.total_seconds().astype("float64"),
+            y=0.0,
+        )
+        # Drop any rows that somehow land before the origin (clock skew / tz).
+        plot_df = plot_df[plot_df["t_sec"] >= 0.0]
+        if plot_df.empty:
+            return plot_df, t0, 1.0, ylabel, use_sum
+        t_max = float(plot_df["t_sec"].max()) if len(plot_df) else 1.0
+        if t_max <= 0:
+            t_max = 1.0
+        return plot_df, t0, t_max, ylabel, use_sum
+
+    def _clamp_xr(self, lo: float, hi: float, t_max: float) -> tuple[float, float]:
+        """Hard-clamp viewport to [0, t_max] — never show negative time."""
+        t_max = max(float(t_max), 1e-3)
         try:
-            s = df.dropna(subset=["start"]).set_index("start").sort_index()
-            # resample to ~40 bins
-            span = (s.index.max() - s.index.min()).total_seconds() or 1
-            rule = "30s" if span < 1800 else ("1min" if span < 7200 else "5min")
-            counts = s.resample(rule).size()
-            if _HAS_HV:
-                curve = hv.Curve((counts.index, counts.values), "time", "flows").opts(
-                    height=140,
-                    responsive=True,
-                    color="#58a6ff",
-                    line_width=2,
-                    tools=["hover"],
-                    xlabel="",
-                    ylabel="flows",
-                    bgcolor="#0d1117",
-                )
-                area = hv.Area((counts.index, counts.values), "time", "flows").opts(
-                    alpha=0.25, color="#58a6ff", bgcolor="#0d1117",
-                )
-                return pn.pane.HoloViews(area * curve, sizing_mode="stretch_width", height=160)
-            # fallback table stats
-            return pn.pane.Markdown(f"**{len(df):,}** flows in window (hist backend unavailable)")
+            lo = float(lo)
+        except (TypeError, ValueError):
+            lo = 0.0
+        try:
+            hi = float(hi)
+        except (TypeError, ValueError):
+            hi = t_max
+        if not np.isfinite(lo):
+            lo = 0.0
+        if not np.isfinite(hi):
+            hi = t_max
+        if hi < lo:
+            lo, hi = hi, lo
+        span = max(hi - lo, 1e-3)
+        if span >= t_max - 1e-9:
+            return (0.0, t_max)
+        # Hit walls while preserving span when possible.
+        if lo < 0.0:
+            lo, hi = 0.0, min(t_max, span)
+        if hi > t_max:
+            hi, lo = t_max, max(0.0, t_max - span)
+        if lo < 0.0:
+            lo = 0.0
+        if hi - lo < 1e-6:
+            hi = min(t_max, lo + 1.0)
+            lo = max(0.0, hi - 1.0)
+        return (float(lo), float(hi))
+
+    def _as_sec(self, v, t0: pd.Timestamp) -> float | None:
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return None
+        if isinstance(v, np.datetime64):
+            v = pd.Timestamp(v)
+        if isinstance(v, datetime) and not isinstance(v, pd.Timestamp):
+            v = pd.Timestamp(v)
+        if isinstance(v, pd.Timestamp):
+            t0s = pd.Timestamp(t0)
+            if t0s.tzinfo is not None and v.tzinfo is None:
+                v = v.tz_localize("UTC")
+            elif t0s.tzinfo is None and v.tzinfo is not None:
+                v = v.tz_convert("UTC").tz_localize(None)
+            return float((v - t0s).total_seconds())
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return None
+        if abs(fv) > 1e12:
+            try:
+                unit = "ns" if abs(fv) > 1e15 else "ms"
+                ts = pd.Timestamp(fv, unit=unit, tz="UTC")
+                t0s = pd.Timestamp(t0)
+                if t0s.tzinfo is None:
+                    t0s = t0s.tz_localize("UTC")
+                return float((ts - t0s).total_seconds())
+            except Exception:
+                return None
+        return fv
+
+    def _range_from_abs(self, t0: pd.Timestamp, t_max: float) -> tuple[float, float]:
+        """Convert stored absolute viewport → seconds relative to current t0."""
+        if self._hist_view_abs is None or t0 is None:
+            return (0.0, float(t_max))
+        a0, a1 = self._hist_view_abs
+        lo = self._as_sec(a0, t0)
+        hi = self._as_sec(a1, t0)
+        if lo is None or hi is None:
+            return (0.0, float(t_max))
+        return self._clamp_xr(lo, hi, t_max)
+
+    def _range_from_stream(self, x_range, t0: pd.Timestamp, t_max: float) -> tuple[float, float]:
+        """Interpret RangeX payload (user gesture) as seconds in [0, t_max]."""
+        if x_range is not None and x_range[0] is not None and x_range[1] is not None:
+            lo, hi = self._as_sec(x_range[0], t0), self._as_sec(x_range[1], t0)
+            if lo is not None and hi is not None:
+                return self._clamp_xr(lo, hi, t_max)
+        return self._range_from_abs(t0, t_max)
+
+    def _store_abs_viewport(self, xr: tuple[float, float], t0: pd.Timestamp, t_max: float) -> None:
+        """Persist user viewport in absolute time. Full window → None (follow live)."""
+        lo, hi = float(xr[0]), float(xr[1])
+        # Near-full range means user is following the live window (or hit reset).
+        if lo <= 0.05 and hi >= float(t_max) - 0.05:
+            self._hist_view_abs = None
+            return
+        try:
+            t0s = pd.Timestamp(t0)
+            self._hist_view_abs = (
+                t0s + pd.to_timedelta(lo, unit="s"),
+                t0s + pd.to_timedelta(hi, unit="s"),
+            )
+        except Exception:
+            pass
+
+    def _hist_n_bins(self, span: float, t_max: float) -> int:
+        """Choose bin count so time windows stay visually distinct.
+
+        Target ~2s per bin on a full window; more bins when zoomed in.
+        """
+        span = max(float(span), 1.0)
+        t_max = max(float(t_max), span)
+        # Zoomed view: denser bins (down to ~0.5s); full window: ~2s bins.
+        target_w = 0.5 if span < t_max * 0.35 else 2.0
+        n = int(round(span / target_w))
+        return int(np.clip(n, 48, 200))
+
+    def _hist_empty_plot(self, title: str = ""):
+        opts = dict(
+            height=160,
+            responsive=True,
+            xlim=(0, 1),
+            ylim=(0, 1),
+            bgcolor="#0d1117",
+            color="#58a6ff",
+            line_color="#0d1117",
+        )
+        if title:
+            opts["title"] = title
+        # Rectangles: (x0, y0, x1, y1) — single empty bin with gap styling.
+        return hv.Rectangles([(0.05, 0.0, 0.95, 0.0)], ["x0", "y0", "x1", "y1"]).opts(**opts)
+
+    def _hist_callback(self, data, x_range):
+        """DynamicMap callback: (plot_df, meta) + RangeX → gapped time bars."""
+        try:
+            return self._hist_callback_inner(data, x_range)
         except Exception as e:
-            logger.exception("hist")
-            return pn.pane.Alert(f"Histogram error: {e}", alert_type="warning")
+            # DynamicMap swallows errors as a blank pane — log and return a stub.
+            try:
+                logger.exception("hist callback: %s", e)
+            except Exception:
+                pass
+            return self._hist_empty_plot(title="histogram error (see logs)")
+
+    def _hist_callback_inner(self, data, x_range):
+        if not data or data.get("df") is None or data["df"].empty:
+            return self._hist_empty_plot()
+
+        plot_df = data["df"]
+        t0 = data["t0"]
+        t_max = float(data["t_max"])
+        ylabel = data["ylabel"]
+        use_sum = data["use_sum"]
+
+        # Critical split:
+        #  - Programmatic Pipe/RangeX push (live refresh): absolute viewport wins.
+        #    Stream holds *relative* secs from the previous t0 and must be ignored
+        #    or every discover poll rewrites the user's zoom to garbage / full range.
+        #  - User pan/zoom: RangeX is authoritative; persist as absolute timestamps.
+        if self._hist_applying:
+            xr = self._range_from_abs(t0, t_max)
+        else:
+            xr = self._range_from_stream(x_range, t0, t_max)
+            self._store_abs_viewport(xr, t0, t_max)
+        xr = self._clamp_xr(xr[0], xr[1], t_max)
+        span = max(xr[1] - xr[0], 1e-3)
+        n_bins = self._hist_n_bins(span, t_max)
+
+        sub = plot_df[(plot_df["t_sec"] >= xr[0]) & (plot_df["t_sec"] <= xr[1])]
+        if sub.empty:
+            edges = np.linspace(xr[0], xr[1], n_bins + 1)
+            vals = np.zeros(n_bins, dtype="float64")
+        elif _HAS_DS:
+            cvs = dsh.Canvas(
+                plot_width=n_bins,
+                plot_height=1,
+                x_range=xr,
+                y_range=(-0.5, 0.5),
+            )
+            agg = (
+                cvs.points(sub, "t_sec", "y", agg=dsh.sum("metric"))
+                if use_sum
+                else cvs.points(sub, "t_sec", "y", agg=dsh.count())
+            )
+            vals = np.nan_to_num(np.asarray(agg, dtype="float64").ravel(), nan=0.0)
+            # Force edge grid to match requested n_bins (agg width can differ by 1).
+            if len(vals) != n_bins:
+                n_bins = max(len(vals), 1)
+            edges = np.linspace(xr[0], xr[1], num=n_bins + 1)
+            if len(vals) != n_bins:
+                vals = np.resize(vals, n_bins)
+        else:
+            vals, edges = np.histogram(
+                sub["t_sec"].to_numpy(),
+                bins=n_bins,
+                range=xr,
+                weights=sub["metric"].to_numpy() if use_sum else None,
+            )
+            vals = np.asarray(vals, dtype="float64")
+
+        # Σ bytes / counts are non-negative — never let float noise paint below 0.
+        vals = np.maximum(np.asarray(vals, dtype="float64"), 0.0)
+        edges = np.asarray(edges, dtype="float64")
+        if len(edges) < 2 or not np.all(np.diff(edges) > 0):
+            edges = np.linspace(xr[0], max(xr[1], xr[0] + 1.0), num=n_bins + 1)
+            vals = np.zeros(len(edges) - 1, dtype="float64")
+        if len(vals) != len(edges) - 1:
+            vals = np.resize(vals, len(edges) - 1)
+
+        # Gapped rectangles so adjacent time bins stay visually distinct.
+        # hv.Histogram/Quad paints flush edges → solid wall when rates are even.
+        bin_w = np.diff(edges)
+        gap = np.minimum(bin_w * 0.18, np.maximum(bin_w * 0.05, 0.05))
+        x0s = edges[:-1] + gap * 0.5
+        x1s = edges[1:] - gap * 0.5
+        # Keep a minimum bar width when bins are very narrow.
+        too_thin = (x1s - x0s) < (bin_w * 0.4)
+        if np.any(too_thin):
+            mid = (edges[:-1] + edges[1:]) * 0.5
+            half = bin_w * 0.4
+            x0s = np.where(too_thin, mid - half, x0s)
+            x1s = np.where(too_thin, mid + half, x1s)
+        y0s = np.zeros_like(vals)
+        y1s = vals
+        y_hi = max(float(np.max(vals)) * 1.12, 1.0) if len(vals) else 1.0
+        t0s = pd.Timestamp(t0)
+        origin = t0s.strftime("%H:%M:%S")
+
+        def _axis_hook(plot, element):
+            """Force non-negative axes: time ∈ [0, t_max], value ∈ [0, ∞).
+
+            Bokeh DataRange1d defaults to range_padding≈0.1, which pads *below*
+            the data min — so a min of 0 becomes a visible negative axis. That
+            is wrong for both elapsed-seconds (x) and Σ bytes (y).
+            """
+            try:
+                from bokeh.models import CustomJS
+
+                x_rng = plot.handles.get("x_range")
+                y_rng = plot.handles.get("y_range")
+                tmax = float(self._hist_t_max)
+
+                if x_rng is not None:
+                    try:
+                        if hasattr(x_rng, "range_padding"):
+                            x_rng.range_padding = 0
+                        if hasattr(x_rng, "follow"):
+                            x_rng.follow = None
+                    except Exception:
+                        pass
+                    x_rng.bounds = (0.0, tmax)
+                    x_rng.min_interval = 0.5
+                    x_rng.max_interval = max(tmax, 0.5)
+                    try:
+                        x_rng.reset_start = 0.0
+                        x_rng.reset_end = tmax
+                    except Exception:
+                        pass
+                    if not getattr(x_rng, "_data_view_js_clamp", False):
+                        cb = CustomJS(
+                            args=dict(xr=x_rng),
+                            code="""
+                            const tmin = 0.0;
+                            const b = xr.bounds;
+                            const tmax = (b && b.length === 2) ? b[1] : xr.end;
+                            let s = xr.start, e = xr.end;
+                            if (e < s) { const t = s; s = e; e = t; }
+                            let span = e - s;
+                            if (!(span > 0)) span = 1.0;
+                            if (span >= tmax) { s = tmin; e = tmax; }
+                            else {
+                              if (s < tmin) { s = tmin; e = Math.min(tmax, s + span); }
+                              if (e > tmax) { e = tmax; s = Math.max(tmin, e - span); }
+                              if (s < tmin) s = tmin;
+                            }
+                            if (s !== xr.start || e !== xr.end) {
+                              xr.setv({start: s, end: e});
+                            }
+                            """,
+                        )
+                        x_rng.js_on_change("start", cb)
+                        x_rng.js_on_change("end", cb)
+                        x_rng._data_view_js_clamp = True
+                    if not getattr(x_rng, "_data_view_py_clamp", False):
+                        def _snap_x(attr, old, new):
+                            if self._hist_applying:
+                                return
+                            try:
+                                s, e = float(x_rng.start), float(x_rng.end)
+                                ns, ne = self._clamp_xr(s, e, float(self._hist_t_max))
+                                if abs(ns - s) > 1e-6 or abs(ne - e) > 1e-6:
+                                    x_rng.update(start=ns, end=ne)
+                                if self._hist_t0 is not None:
+                                    self._store_abs_viewport(
+                                        (ns, ne), self._hist_t0, float(self._hist_t_max)
+                                    )
+                            except Exception:
+                                pass
+
+                        x_rng.on_change("start", _snap_x)
+                        x_rng.on_change("end", _snap_x)
+                        x_rng._data_view_py_clamp = True
+                    s, e = float(x_rng.start), float(x_rng.end)
+                    ns, ne = self._clamp_xr(s, e, tmax)
+                    if abs(ns - s) > 1e-6 or abs(ne - e) > 1e-6:
+                        x_rng.update(start=ns, end=ne)
+
+                if y_rng is not None:
+                    try:
+                        if hasattr(y_rng, "range_padding"):
+                            y_rng.range_padding = 0
+                    except Exception:
+                        pass
+                    try:
+                        y_rng.bounds = (0.0, None)
+                    except Exception:
+                        pass
+                    try:
+                        if float(y_rng.start) < 0.0:
+                            y_rng.start = 0.0
+                    except Exception:
+                        pass
+                    if not getattr(y_rng, "_data_view_y_clamp", False):
+                        def _snap_y(attr, old, new):
+                            try:
+                                if float(y_rng.start) < 0.0:
+                                    y_rng.start = 0.0
+                            except Exception:
+                                pass
+
+                        y_rng.on_change("start", _snap_y)
+                        y_rng._data_view_y_clamp = True
+                        y_cb = CustomJS(
+                            args=dict(yr=y_rng),
+                            code="if (yr.start < 0) { yr.start = 0; }",
+                        )
+                        y_rng.js_on_change("start", y_cb)
+            except Exception:
+                pass
+
+        # Explicit (x0,y0,x1,y1) bars with gutters — readable time resolution.
+        x_lo = max(0.0, float(xr[0]))
+        x_hi = max(x_lo + 1e-3, float(xr[1]))
+        rects = hv.Rectangles(
+            (x0s, y0s, x1s, y1s),
+            kdims=["x0", "y0", "x1", "y1"],
+        ).opts(
+            height=160,
+            responsive=True,
+            color="#58a6ff",
+            line_color="#1f6feb",
+            line_width=1,
+            alpha=0.92,
+            tools=["hover", "xpan", "xwheel_zoom", "reset"],
+            active_tools=["xwheel_zoom"],
+            xlabel="seconds from %s UTC" % origin,
+            ylabel=ylabel,
+            bgcolor="#0d1117",
+            shared_axes=False,
+            default_tools=["xpan", "xwheel_zoom", "box_zoom", "reset", "save"],
+            fontsize={"labels": 10, "xticks": 9, "yticks": 9},
+            xlim=(x_lo, x_hi),
+            ylim=(0.0, y_hi),
+            hooks=[_axis_hook],
+        )
+        # Soft domain on x0/x1 so reset stays in [0, t_max].
+        return rects.redim.range(x0=(0.0, float(t_max)), x1=(0.0, float(t_max)))
+
+    def _ensure_histogram_widget(self):
+        """Build the DynamicMap once (Pipe for data, RangeX for viewport)."""
+        if self._hist_built or not _HAS_HV:
+            return
+        self._hist_pipe = hv.streams.Pipe(data={
+            "df": pd.DataFrame(),
+            "t0": pd.Timestamp.now(tz="UTC"),
+            "t_max": 1.0,
+            "ylabel": "value",
+            "use_sum": False,
+        })
+        self._hist_stream = hv.streams.RangeX(x_range=(0.0, 1.0))
+        dmap = hv.DynamicMap(self._hist_callback, streams=[self._hist_pipe, self._hist_stream])
+        hint = pn.pane.HTML(
+            "<div style='font-size:11px;color:#8b949e;"
+            "font-family:-apple-system,sans-serif;margin:0 0 4px 0;'>"
+            "Time histogram · gapped bins · Σ bytes · "
+            "wheel-zoom / pan rebins · viewport preserved across live refresh"
+            "</div>",
+        )
+        self._hist_view.objects = [
+            hint,
+            pn.pane.HoloViews(dmap, sizing_mode="stretch_width", height=180),
+        ]
+        self._hist_built = True
+
+    def _update_histogram_data(self):
+        """Push new frame into the Pipe; restore absolute user viewport if any.
+
+        Live refresh must NOT clobber the user's pan/zoom. t0 (window origin)
+        shifts every load, so relative RangeX seconds are meaningless across
+        refreshes — only ``_hist_view_abs`` (UTC) is stable.
+        """
+        df = self._df
+        if df is None or df.empty or "start" not in getattr(df, "columns", []):
+            # Keep abs viewport; only tear down the plot chrome so next paint
+            # can restore the same target range once data returns.
+            self._hist_view.objects = [
+                pn.pane.Markdown(
+                    "### Time histogram\n_No data in window — start vpc-flow-generator stream._",
+                    sizing_mode="stretch_width",
+                )
+            ]
+            self._hist_built = False
+            self._hist_pipe = None
+            self._hist_stream = None
+            return
+
+        if not _HAS_HV:
+            self._hist_view.objects = [
+                pn.pane.Markdown(
+                    f"**{len(df):,}** flows (histogram backend unavailable)",
+                    sizing_mode="stretch_width",
+                )
+            ]
+            return
+
+        try:
+            plot_df, t0, t_max, ylabel, use_sum = self._prepare_hist_frame(df)
+            if plot_df.empty:
+                return
+            self._hist_t0 = t0
+            self._hist_t_max = t_max
+            self._ensure_histogram_widget()
+            payload = {
+                "df": plot_df,
+                "t0": t0,
+                "t_max": t_max,
+                "ylabel": ylabel,
+                "use_sum": use_sum,
+            }
+            # Absolute → relative under the NEW t0. Never trust stream.x_range
+            # here (it is relative to the previous origin).
+            xr = self._range_from_abs(t0, t_max)
+            self._hist_applying = True
+            try:
+                # Set range first so a subsequent pipe-triggered callback that
+                # somehow sees the stream still gets a consistent pair; the
+                # applying flag forces abs either way.
+                if self._hist_stream is not None:
+                    self._hist_stream.event(x_range=xr)
+                self._hist_pipe.send(payload)
+            finally:
+                self._hist_applying = False
+        except Exception as e:
+            logger.exception("hist update: %s", e)
+            self._hist_applying = False
+            self._hist_view.objects = [
+                pn.pane.Alert(f"Histogram error: {e}", alert_type="warning")
+            ]
+            self._hist_built = False
 
     @param.depends("facet_token", "stream_epoch")
     def facets_pane(self):
@@ -561,16 +1017,26 @@ class DataView(param.Parameterized):
             layout="fit_data_stretch",
         )
 
-    @param.depends("status_line", "rps_est", "rows_in_window", "stream_epoch", "live", "last_event_ts")
+    @param.depends(
+        "status_line", "rps_est", "rows_in_window", "files_in_window",
+        "load_ms", "stream_epoch", "live", "last_event_ts",
+    )
     def status_strip(self):
-        live_col = "#3fb950" if self.live else "#d29922"
-        live_txt = "● LIVE" if self.live else "○ PAUSED"
+        # Keep badge text stable (LIVE / PAUSED only) so the strip doesn't
+        # jump when background refresh flips loading/cache states.
+        # Fixed slots for files/rows/load so stats never vanish between polls.
+        if self.live:
+            live_col, live_txt = "#3fb950", "● LIVE"
+        else:
+            live_col, live_txt = "#d29922", "○ PAUSED"
         return pn.pane.HTML(
             f"<div style='display:flex;gap:18px;align-items:center;font-size:12px;"
             f"color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,sans-serif;'>"
             f"<span style='color:{live_col};font-weight:700;'>{live_txt}</span>"
             f"<span>{self.status_line}</span>"
+            f"<span>files: <b>{self.files_in_window:,}</b></span>"
             f"<span>rows: <b>{self.rows_in_window:,}</b></span>"
+            f"<span>load: <b>{self.load_ms:.0f}ms</b></span>"
             f"<span>≈ {self.rps_est:.0f} Δrows/s</span>"
             f"<span>last event: {self.last_event_ts}</span>"
             f"</div>",
@@ -584,7 +1050,7 @@ class DataView(param.Parameterized):
             pn.panel(self.status_strip),
             pn.panel(self.filter_bar),
             pn.layout.Divider(),
-            pn.panel(self.histogram_pane),
+            self.histogram_pane(),
             pn.layout.Divider(),
             pn.pane.Markdown("### Documents", margin=(0, 0, 4, 0)),
             pn.panel(self.table_pane),
@@ -622,10 +1088,10 @@ class DataView(param.Parameterized):
 
 view = DataView()
 tmpl = view.layout()
-# panel serve re-executes this script per browser session, so a periodic
-# callback registered here is session-scoped and drives live updates.
+# Module-level: kick bg discover immediately (no Document required).
+# onload: attach periodic UI tick once the Bokeh Document exists so pending
+# frames paint into the histogram.
 view.start()
-# Also hook onload in case the callback needs a fully ready Document.
 pn.state.onload(view.start)
 tmpl.servable()
 print("[DATA-VIEW] App ready", flush=True)
