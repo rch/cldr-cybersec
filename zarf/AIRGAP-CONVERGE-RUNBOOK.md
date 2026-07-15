@@ -254,6 +254,9 @@ kc -n dask-operator run zz --image=ghcr.io/zarf-canary/agent-check:v1 --restart=
 Bare `ZARF_VAR_*` env does **not** reach zarf v0.70.1 templating (field-proven twice — it
 silently renders empty values). Non-secrets go on `--set-variables`:
 ```bash
+export PATH="$PATH:/var/lib/rancher/rke2/bin"   # actions run bare `kubectl` (field 2026-07-15:
+                                                # off root's PATH → every deploy failed on the
+                                                # dask-cluster S3-bucket after-action)
 set -a; . /dev/shm/s3-creds; set +a
 umask 077; cat > /dev/shm/zarf-secrets.toml <<EOF
 [package.deploy.set]

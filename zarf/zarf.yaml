@@ -175,7 +175,10 @@ components:
                 echo "S3 not fully configured (BUCKET=$BUCKET ENDPOINT=$ENDPOINT), skipping bucket ensure"
                 exit 0
               fi
-              SCHEDULER=$(kubectl get pod -n dask -l dask.org/component=scheduler -o jsonpath='{.items[0].metadata.name}')
+              # `./zarf tools kubectl` — the executing zarf binary substitutes itself, so
+              # the action needs NO kubectl on the node's PATH (air-gap RKE2 keeps kubectl
+              # in /var/lib/rancher/rke2/bin, off root's PATH — field 2026-07-15)
+              SCHEDULER=$(./zarf tools kubectl get pod -n dask -l dask.org/component=scheduler -o jsonpath='{.items[0].metadata.name}')
               if [ -z "$SCHEDULER" ]; then
                 echo "Warning: no Dask scheduler pod found, skipping bucket ensure"
                 exit 0
@@ -186,7 +189,7 @@ components:
               # scheduler pod's env (templated from ZARF_VAR_S3_*), so no secret rides this
               # argv. fs.exists() avoids depending on a specific s3fs exception type, and
               # any failure is PRINTED (not silently swallowed) so it shows in the log.
-              kubectl exec -n dask "$SCHEDULER" -- python -c "
+              ./zarf tools kubectl exec -n dask "$SCHEDULER" -- python -c "
               import s3fs, os, sys
               fs = s3fs.S3FileSystem(
                   key=os.environ.get('AWS_ACCESS_KEY_ID') or None,

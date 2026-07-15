@@ -18,6 +18,9 @@ Run as **root on the control-plane node**. Define the helpers (persist for your 
 
 ```bash
 export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+export PATH="$PATH:/var/lib/rancher/rke2/bin"   # zarf component actions run bare `kubectl` —
+                                                # off root's PATH on RKE2, deploys die
+                                                # `kubectl: command not found` without this
 kc()  { /var/lib/rancher/rke2/bin/kubectl --kubeconfig "$KUBECONFIG" "$@" 2>/dev/null \
         || zarf tools kubectl --kubeconfig "$KUBECONFIG" "$@"; }
 cri() { /var/lib/rancher/rke2/bin/crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock "$@"; }
