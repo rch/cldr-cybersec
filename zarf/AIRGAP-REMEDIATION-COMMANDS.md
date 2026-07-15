@@ -264,6 +264,24 @@ kc -n <NS> delete secret <NAME>
 # then redeploy the affected component (T2–T6 table below) — helm proceeds cleanly.
 ```
 
+### F2. DEAD Helm release — "has no deployed releases"
+Different from §F: here the release's **first install failed**, so its history holds only
+`failed` revisions — there is no previous deployed revision to fall back to, and every later
+`helm upgrade` refuses with `unable to install chart … has no deployed releases`, forever.
+Because required components ride every `zarf package deploy`, ONE dead release (field case:
+`dask-cluster-cr`) blocks EVERY component deploy — scheduler/jupyterhub/sample-notebooks all
+fail on the same chart hash. The engine auto-recovers on the next `converge --apply`; manual
+equivalent is zarf's own recommendation — remove the failing **component**, so the next deploy
+INSTALLS instead of upgrading:
+```bash
+# identify: latest revision failed AND no deployed/superseded revision anywhere in history
+kc get secrets -A -l owner=helm \
+   -o custom-columns='NS:.metadata.namespace,RELEASE:.metadata.labels.name,VER:.metadata.labels.version,STATUS:.metadata.labels.status'
+# the failing component is named in the deploy error: unable to deploy component "<name>"
+zarf package remove "$PKG" --confirm --components=<name>
+# then redeploy that component (T2–T6 table below; S3 env FIRST) — fresh install succeeds.
+```
+
 ### G. App namespace stuck `Terminating` during an APPLY
 A leftover Terminating `dask`/`panel-viz`/`jupyterhub` ns makes its component deploy fail with
 "namespace is being terminated". Clear pods FIRST (force-finalizing a ns with live pods orphans

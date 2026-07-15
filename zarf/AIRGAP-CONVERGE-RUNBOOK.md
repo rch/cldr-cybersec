@@ -274,6 +274,16 @@ shred -u /dev/shm/zarf-secrets.toml; unset ZARF_CONFIG
 > `required: true` components (`cybersec-images`, `dask-operator`, `dask-cluster`) ride EVERY
 > deploy — so pass the S3 setup to all of them, and don't be surprised by re-pushes.
 
+**If every deploy fails with `has no deployed releases`** (field-proven 2026-07-15): one chart's
+*first* install failed, leaving a release with only `failed` revisions — helm upgrade then refuses
+forever, and the required-component rider spreads the failure to every deploy. The engine
+auto-recovers on the next `converge --apply`; manually, remove the failing component (named in the
+error as `unable to deploy component "<name>"`) and redeploy — the fresh INSTALL succeeds:
+```bash
+zarf package remove "$PKG" --confirm --components=<name>
+zarf package deploy "$PKG" --confirm --components=<name> --retries 10 "${SETV[@]}"
+```
+
 ### 7. Dask repairs are CR-level
 The operator builds children only on CR **creation** — env changes never propagate; a deleted
 scheduler never returns. To repair stale creds or a stranded scheduler:
