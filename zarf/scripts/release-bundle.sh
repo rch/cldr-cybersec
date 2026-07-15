@@ -8,6 +8,9 @@
 #   • zarf-init-amd64-<ZARF_VER>.tar.zst  Layer-A init package (registry/agent/injector)
 #   • zarf                             the v<ZARF_VER> Linux binary
 #   • AIRGAP-CONVERGE-RUNBOOK.md       the operator procedure
+#   • AIRGAP-CHEATSHEET.md            one-page walkthrough (checksummed)
+#   • AIRGAP-DISCOVERY.md             read-only pre-flight audit (optional companion)
+#   • AIRGAP-REMEDIATION-COMMANDS.md  full manual mirror of engine remediations
 #   • SHA256SUMS                       over all of the above AND the 1.3 GB deploy package
 #                                      (referenced in place at zarf/, never copied)
 #
@@ -17,7 +20,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-VER="${RELEASE_VERSION:-1.6.3}"
+VER="${RELEASE_VERSION:-1.6.4}"
 ZARF_VER="${ZARF_VERSION:-v0.70.1}"
 PKG="zarf/zarf-package-cybersec-dask-amd64-${VER}.tar.zst"
 OUT="build/release"
@@ -29,8 +32,8 @@ ZARF_BIN="$OUT/zarf"
 mkdir -p "$OUT"
 
 # 1. Engine tarball — the exact tree converge-node.sh resolves: itself + converge/ +
-#    manifests/local-path-provisioner.yaml + artifacts.manifest.json (+ the runbook). Tarred
-#    so `tar xzf … -C <dir>` lays the files directly under <dir> (no wrapper dir).
+#    manifests/local-path-provisioner.yaml + artifacts.manifest.json (+ air-gap docs).
+#    Tarred so `tar xzf … -C <dir>` lays the files directly under <dir> (no wrapper dir).
 echo "→ building $(basename "$ENGINE_TGZ")"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/manifests"
@@ -38,7 +41,10 @@ cp -R zarf/converge "$STAGE/"
 cp zarf/scripts/converge-node.sh "$STAGE/"
 cp zarf/artifacts.manifest.json "$STAGE/"
 cp zarf/manifests/local-path-provisioner.yaml "$STAGE/manifests/"
-cp zarf/AIRGAP-CONVERGE-RUNBOOK.md "$STAGE/"
+for doc in AIRGAP-CONVERGE-RUNBOOK.md AIRGAP-CHEATSHEET.md \
+           AIRGAP-DISCOVERY.md AIRGAP-REMEDIATION-COMMANDS.md; do
+  [ -f "zarf/$doc" ] && cp "zarf/$doc" "$STAGE/"
+done
 find "$STAGE" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$STAGE" -name '*.pyc' -delete 2>/dev/null || true
 tar czf "$ENGINE_TGZ" -C "$STAGE" .
@@ -54,13 +60,20 @@ fetch "https://github.com/zarf-dev/zarf/releases/download/${ZARF_VER}/zarf-init-
 fetch "https://github.com/zarf-dev/zarf/releases/download/${ZARF_VER}/zarf_${ZARF_VER}_Linux_amd64" "$ZARF_BIN"
 chmod +x "$ZARF_BIN"
 
-# 3. Runbook standalone on the release page (also inside the engine tgz).
-cp zarf/AIRGAP-CONVERGE-RUNBOOK.md "$OUT/AIRGAP-CONVERGE-RUNBOOK.md"
+# 3. Operator docs standalone on the release page (also inside the engine tgz).
+DOCS=()
+for doc in AIRGAP-CONVERGE-RUNBOOK.md AIRGAP-CHEATSHEET.md \
+           AIRGAP-DISCOVERY.md AIRGAP-REMEDIATION-COMMANDS.md; do
+  if [ -f "zarf/$doc" ]; then
+    cp "zarf/$doc" "$OUT/$doc"
+    DOCS+=("$OUT/$doc")
+  fi
+done
 
 # 4. SHA256SUMS over every asset (basenames; deploy package referenced in place).
 echo "→ SHA256SUMS"
 : > "$OUT/SHA256SUMS"
-for f in "$ENGINE_TGZ" "$INIT_PKG" "$ZARF_BIN" "$OUT/AIRGAP-CONVERGE-RUNBOOK.md"; do
+for f in "$ENGINE_TGZ" "$INIT_PKG" "$ZARF_BIN" "${DOCS[@]}"; do
   ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" ) >> "$OUT/SHA256SUMS"
 done
 ( cd "$(dirname "$PKG")" && sha256sum "$(basename "$PKG")" ) >> "$OUT/SHA256SUMS"

@@ -457,3 +457,63 @@ mechanism-level post-asserts — dead agent (agent back AND canary-rewriting), w
 AND pods Running). Each storage case additionally asserts the registry PVC binds on
 `storageClassName=""`. The five v1.6.3 fixes were also validated individually by driving a live
 quadruple-wedged specimen to `✔ CONVERGED` with the engine alone.
+
+## Appendix D — anticipatory platform recovery (v1.6.4)
+
+Encoded from a live multi-day air-gap recovery session. The engine's
+`_pre_init_cleanup` / `_rem_registry_running` now treat these as first-class
+states (detect → remediate → re-detect), not operator folklore:
+
+| State | Detect cue | Remediation |
+|-------|------------|-------------|
+| hostPath not writable | mode ≠ 0777 / push 500s / seed deadline | `mkdir` + `chmod 0777 /var/lib/zarf-registry` |
+| PVC Terminating + mounts | `deletionTimestamp` + pods using claim | delete controllers/pods holding mount → strip finalizers |
+| Split-brain (ns gone, PVC listed) | `namespaces "zarf" not found` on patch | recreate ns → re-home husks → drain → delete PVC |
+| Active husk (`zarf-injector` 34d) | services without Ready registry | full ns drain (svc/cm/secret/pvc) then re-init |
+| Seed-registry Helm deadline | init rc=1/124 mid docker-registry | unwedge pending helm + clear partial workloads; retry init |
+| Default SC capture | PVC `sc=local-path` Pending | delete PVC; `zarf init --storage-class -` |
+| No StorageClass at all | `kc get sc` empty | **supported** resilient path — not an error |
+| Layer-A tools missing | `zarf` rc=127 / no init tarball | T0.layer-a-zarf-tools MANUAL (transport) |
+| hub-db local-path orphan | hub PVC Pending / Released hub-db-pv | T5: delete orphan PVC/PV + redeploy jupyterhub |
+
+**Generalized principles (CADS):** conservation of Layer A; empty-class static PV
+as the resilient attractor; drain-before-finalize; recreate-ns-before-namespaced-write;
+diagnose strings that name the unmet condition.
+
+Matrix: `just sandbox-test-fsm` — includes husk Service, PVC/ns split-brain, and
+hostPath permission inducers in addition to the v1.6.2/1.6.3 eight.
+
+## Appendix E — always-on discovery + vestige sweep (v0.3.0 / package 1.6.4+)
+
+Every `converge-node.sh` mode runs **multi-layer discovery** before catalog work:
+
+```
+nodes → managed namespaces → controllers/pods → PVC→PV→SC chains →
+helm pending secrets → VolumeAttachments → Dask CR finalizers
+```
+
+**Apply** additionally, **each reconcile pass**:
+
+1. Print discovery (entry → relationship → root condition)
+2. **Vestige sweep** (Layer-B only): pending helm, agent poison labels, Terminating
+   namespaces/PVCs, junk/Failed pods, Service-only husks, Deploy/STS with zero pods,
+   orphan app PVs, stuck VolumeAttachments, stuck Dask CRs
+3. Re-detect **every** invariant (no sticky OK)
+4. Remediate broken Layer-B tiers
+
+**Never disposed (Layer-A / foundational):** containerd images, `/var/lib/zarf-registry`
+data, zarf binary + init/deploy packages on disk, RKE2 system namespaces. A Bound
+registry PVC with Ready registry is left intact during sweep.
+
+## Appendix F — anticipatory platform edges (engine v0.4.0)
+
+| Edge | Invariant / behavior | Conservation |
+|------|----------------------|--------------|
+| Kubelet image-GC @85% | `T0.kubelet-gc` writes lenient `kubelet-arg` + restarts `rke2-server` (root) | Raises thresholds only; never prunes images |
+| RKE2 system plane | `T0.system-plane` observes API/DNS/ingress; uncordons only | Never restarts etcd; coredns ImagePull → MANUAL Layer-A |
+| Package mtime races | `T0.package-uniqueness` fails if multiple deploy tarballs | Never deletes packages (Layer-A MANUAL) |
+| Ingress class (traefik on RKE2) | Auto-detect `nginx`; stamp on every deploy; T6 checks class + `/ws` | Redeploy ingress only |
+| Hub SC-less | Package `sqlite-memory` + `storage: none`; T5 deletes any hub PVC/hub-db PV then redeploy | Hub DB ephemeral by design air-gap |
+| Worker default | Deploy path forces `DASK_WORKER_REPLICAS=1` if unset | Capacity cap still applies |
+
+Discovery always prints SYSTEM/RKE2 PLANE, LAYER-A PACKAGES, and KUBELET GC POLICY lines.

@@ -2,8 +2,12 @@
 fixpoint, the closure preflight, the structural Layer-A guard, and reporting.
 
 Two consumers of the same catalog:
-  * evaluate()  — single read-only pass (powers --verify and --dry-run)
-  * reconcile() — multi-pass apply loop with stall detection (powers --apply)
+  * evaluate()  — discovery + single read-only pass (powers --verify and --dry-run)
+  * reconcile() — discovery + vestige sweep + multi-pass apply to a fixpoint
+
+Every apply/verify/dry-run **always** walks K8s entry points (discovery). Apply
+additionally sweeps Layer-B vestiges each pass and **re-detects every invariant**
+every pass (no sticky OK that masks regressions). Layer-A remains detect-only.
 """
 from __future__ import annotations
 
@@ -11,10 +15,11 @@ from typing import Dict, List, Tuple
 
 import time
 
+from .discovery import print_discovery, sweep_vestiges
 from .kube import Ctx
 from .model import Cost, Eval, Invariant, Layer, Outcome
 
-MAX_PASSES = 8
+MAX_PASSES = 12
 PASS_DELAY = 15  # seconds between passes — let async cluster ops (pod term/sched) settle
 STALL_LIMIT = 3  # consecutive no-progress passes before declaring a stall; gives a freshly
                  # rescheduled pod time to pass its readiness probe before we give up on it
@@ -67,8 +72,12 @@ def _deps_satisfied(inv: Invariant, results: Dict[str, Eval]) -> bool:
 
 def evaluate(ctx: Ctx, catalog: List[Invariant], apply_preview: bool = False
              ) -> Tuple[Dict[str, Eval], List[Invariant]]:
-    """One read-only pass. Blocked deps short-circuit. ``apply_preview`` marks
-    fixable-but-broken Layer-B invariants WOULD_FIX (dry-run) vs MANUAL (verify)."""
+    """Discovery (always) + one read-only catalog pass.
+
+    ``apply_preview`` (dry-run) marks fixable Layer-B WOULD_FIX and previews the
+    vestige sweep; verify is detect-only after discovery.
+    """
+    print_discovery(ctx, preview_sweep=apply_preview)
     order = topo_order(catalog)
     results: Dict[str, Eval] = {}
     for inv in order:
@@ -89,48 +98,71 @@ def evaluate(ctx: Ctx, catalog: List[Invariant], apply_preview: bool = False
 
 
 def reconcile(ctx: Ctx, catalog: List[Invariant]) -> Tuple[Dict[str, Eval], List[Invariant]]:
-    """Multi-pass apply loop to a fixpoint or a stall. Expensive remediations are
-    skipped structurally (detect() gates remediate())."""
+    """Multi-pass apply to a fixpoint or stall.
+
+    Each pass:
+      1. Full discovery (entry points → relationships → roots)
+      2. Layer-B vestige sweep (husks, Terminating PVCs, helm pending, junk pods, …)
+      3. Re-detect **every** invariant (no sticky OK — regressions re-enter remediate)
+      4. Remediate broken Layer-B only; Layer-A stays MANUAL
+
+    Expensive remediations still gated by detect() (skipped when already healthy).
+    """
     order = topo_order(catalog)
     results: Dict[str, Eval] = {}
     stalls = 0
-    for _ in range(MAX_PASSES):
+    for pass_i in range(MAX_PASSES):
         progress = False
+        print(f"\n  ── reconcile pass {pass_i + 1}/{MAX_PASSES} ──")
+        print_discovery(ctx, preview_sweep=False)
+        swept = sweep_vestiges(ctx, dry_run=False)
+        if swept:
+            progress = True
+            print(f"  vestige sweep ({len(swept)} action(s)):")
+            for a in swept[:25]:
+                print(f"    • {a}")
+            if len(swept) > 25:
+                print(f"    … +{len(swept) - 25} more")
+        else:
+            print("  vestige sweep: clean (no Layer-B husks)")
+
+        # Fresh results each pass so dependency edges reflect this pass's detects.
+        pass_results: Dict[str, Eval] = {}
         for inv in order:
-            prev = results.get(inv.id)
-            if prev is not None and prev.outcome in (Outcome.OK, Outcome.REMEDIATED):
-                continue  # already converged in an earlier pass
-            if not _deps_satisfied(inv, results):
-                results[inv.id] = Eval(inv, Outcome.BLOCKED, "dependency unmet")
+            # Always re-detect — sticky OK from an earlier pass can mask mid-run drift.
+            if not _deps_satisfied(inv, pass_results):
+                pass_results[inv.id] = Eval(inv, Outcome.BLOCKED, "dependency unmet")
                 continue
             probe = inv.detect(ctx)
             if probe.ok:
-                results[inv.id] = Eval(inv, Outcome.OK, probe.detail)
-                progress = True
+                prev = results.get(inv.id)
+                pass_results[inv.id] = Eval(inv, Outcome.OK, probe.detail)
+                if prev is None or prev.outcome not in (Outcome.OK, Outcome.REMEDIATED):
+                    progress = True
                 continue
             if inv.layer is Layer.A or inv.remediate is None:
-                # CONSERVATION: never auto-mutate Layer A; hand off to the operator.
-                results[inv.id] = Eval(inv, Outcome.MANUAL, f"{probe.detail} → {inv.manual_hint}")
+                pass_results[inv.id] = Eval(
+                    inv, Outcome.MANUAL, f"{probe.detail} → {inv.manual_hint}")
                 continue
             cost = " (expensive)" if inv.cost is Cost.EXPENSIVE else ""
             print(f"  remediating {inv.id}{cost}: {probe.detail}")
             fix = inv.remediate(ctx)
             recheck = inv.detect(ctx)
             if recheck.ok:
-                results[inv.id] = Eval(inv, Outcome.REMEDIATED, fix.detail)
+                pass_results[inv.id] = Eval(inv, Outcome.REMEDIATED, fix.detail)
                 progress = True
             else:
-                results[inv.id] = Eval(inv, Outcome.FAILED, f"{fix.detail}; still: {recheck.detail}")
+                pass_results[inv.id] = Eval(
+                    inv, Outcome.FAILED, f"{fix.detail}; still: {recheck.detail}")
                 if fix.changed:
-                    # We changed the cluster (e.g. scaled workers); the effect is
-                    # async — keep looping + settling rather than declaring a stall.
                     progress = True
+        results = pass_results
         if _all_settled(order, results):
             break
         stalls = 0 if progress else stalls + 1
         if stalls >= STALL_LIMIT:
-            break  # genuine stall: STALL_LIMIT passes with no state change
-        time.sleep(PASS_DELAY)  # let pod termination / rescheduling settle before re-detect
+            break
+        time.sleep(PASS_DELAY)
     return results, order
 
 
@@ -143,7 +175,8 @@ def teardown(ctx: Ctx) -> Tuple[List[str], List[str]]:
     StorageClass), so a subsequent ``--apply`` redeploys fast from the still-present
     registry. Returns
     (attempted, remaining); remaining empty ⇒ clean slate reached."""
-    from .catalog import APP_NAMESPACES, DASK_CRD_KINDS, _force_finalize_ns
+    from .catalog import _force_finalize_ns
+    from .discovery import APP_NAMESPACES, DASK_CRD_KINDS
 
     # 1. neutralize Dask CR finalizers (avoid an operator-gone deletion deadlock)
     for kind in DASK_CRD_KINDS:

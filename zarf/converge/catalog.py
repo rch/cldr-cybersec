@@ -14,11 +14,21 @@ remediations degrade to a precise manual hint instead of failing.
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
+from .discovery import APP_NAMESPACES, DASK_CRD_KINDS
 from .kube import Ctx
 from .model import Cost, Fix, Invariant, Layer, Probe
+from . import platform as _platform
+
+# Registry hostPath — non-root registry container; fsGroup does NOT chown hostPath.
+REGISTRY_HOSTPATH = "/var/lib/zarf-registry"
+REGISTRY_PVC_NAME = "zarf-docker-registry"
+REGISTRY_PV_NAME = "zarf-registry-pv"
+ZARF_NS = "zarf"
 
 # --------------------------------------------------------------------------- #
 # Layer-B remediation primitives (kubectl-only, idempotent, NEVER touch Layer A)
@@ -64,17 +74,211 @@ def _force_finalize_ns(ctx: Ctx, ns: str) -> bool:
     return r.returncode == 0
 
 
+def _ensure_namespace(ctx: Ctx, ns: str) -> bool:
+    """Create ``ns`` if missing. Required for split-brain: force-finalize removed the
+    Namespace object while PVC/Service etcd keys survive; namespaced writes then fail
+    with ``namespaces \"X\" not found`` until the ns is recreated (husks re-surface —
+    expected; caller must drain). Returns True if it created the ns."""
+    if ctx.exists("namespace", ns):
+        return False
+    r = ctx.k(["create", "namespace", ns])
+    return r.returncode == 0
+
+
+def _release_pvc_mounts(ctx: Ctx, ns: str, pvc_name: str) -> List[str]:
+    """Stop controllers/pods that keep ``kubernetes.io/pvc-protection`` alive.
+    Field: deleting the PVC while the registry pod still mounts it → Terminating forever."""
+    actions: List[str] = []
+    # Controllers first so they stop recreating mount pods.
+    for kind in ("deploy", "sts", "ds", "job"):
+        r = ctx.k(["delete", kind, "--all", "-n", ns, "--wait=false", "--ignore-not-found"])
+        if r.returncode == 0 and (r.stdout or "").strip():
+            actions.append(f"deleted {kind} in {ns} (release PVC mounts)")
+    holders = []
+    for p in ctx.items("pods", ns=ns):
+        for v in p.get("spec", {}).get("volumes") or []:
+            claim = (v.get("persistentVolumeClaim") or {}).get("claimName")
+            if claim == pvc_name:
+                holders.append(p["metadata"]["name"])
+                break
+    for pod in holders:
+        ctx.k(["delete", "pod", pod, "-n", ns,
+               "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
+        actions.append(f"force-deleted pod {ns}/{pod} holding PVC {pvc_name}")
+    if not holders:
+        # Belt: nuke all pods in ns if any still running (partial init)
+        pods = ctx.items("pods", ns=ns)
+        if pods:
+            ctx.k(["delete", "pods", "--all", "-n", ns,
+                   "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
+            actions.append(f"force-deleted all pods in {ns} (PVC release)")
+    return actions
+
+
 def _force_delete_pvc(ctx: Ctx, ns: str, name: str) -> bool:
     """Delete a PVC and, if it lingers on the kubernetes.io/pvc-protection finalizer,
     clear the finalizer so it actually goes. A PVC's storageClassName is IMMUTABLE, so a
     registry PVC the cluster-default SC captured onto a dead provisioner can never be
     salvaged in place — it must be removed so `zarf init` recreates it clean. Layer-B:
-    the registry's hostPath DATA is conserved by the Retain PV, so images survive."""
+    the registry's hostPath DATA is conserved by the Retain PV, so images survive.
+
+    Anticipates: (1) mounts holding the protection finalizer, (2) ns absent (split-brain)
+    → re-create ns so the patch can address the object, (3) merge+json finalizer strip."""
+    if not ctx.exists("namespace", ns):
+        _ensure_namespace(ctx, ns)
+    _release_pvc_mounts(ctx, ns, name)
     ctx.k(["delete", "pvc", name, "-n", ns, "--ignore-not-found", "--wait=false"])
-    if ctx.get("pvc", name, ns=ns):                      # stuck Terminating on a finalizer
+    pvc = ctx.get("pvc", name, ns=ns)
+    if pvc is not None:
+        # merge null, then JSON remove if still present
         ctx.k(["patch", "pvc", name, "-n", ns, "--type=merge",
                "-p", '{"metadata":{"finalizers":null}}'])
+        if ctx.get("pvc", name, ns=ns):
+            ctx.k(["patch", "pvc", name, "-n", ns, "--type=json",
+                   "-p", '[{"op":"remove","path":"/metadata/finalizers"}]'])
+        # last resort: replace object with finalizers cleared (namespaced API; ns must exist)
+        if ctx.get("pvc", name, ns=ns):
+            obj = ctx.get("pvc", name, ns=ns)
+            if obj:
+                obj.setdefault("metadata", {})["finalizers"] = []
+                ctx.run(ctx.kubectl + ["replace", "-f", "-"], input_=json.dumps(obj))
     return ctx.get("pvc", name, ns=ns) is None
+
+
+def _drain_namespace(ctx: Ctx, ns: str, *, strip_finalizers: bool = True) -> List[str]:
+    """Empty a namespace's contents (workloads, services, config, PVCs) without
+    deleting the Namespace object. Used for: Terminating ns (must drain before
+    finalize), Active husk ns (34d zarf-injector Service with no Ready registry),
+    and pre-init cleanup of partial seed-registry installs.
+
+    Order: controllers → pods (force) → services/cm/secret → PVC (with mount release).
+    NEVER touches hostPath registry data. Layer-B only."""
+    if not ctx.exists("namespace", ns):
+        return []
+    actions: List[str] = []
+    for kind in ("deployments", "replicasets", "statefulsets", "daemonsets",
+                 "jobs", "cronjobs"):
+        ctx.k(["delete", kind, "--all", "-n", ns, "--wait=false", "--ignore-not-found"])
+    ctx.k(["delete", "pods", "--all", "-n", ns,
+           "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
+    for kind in ("services", "endpoints", "configmaps", "secrets", "roles",
+                 "rolebindings", "serviceaccounts"):
+        # keep default SA; deleting all SAs is fine — k8s recreates default
+        ctx.k(["delete", kind, "--all", "-n", ns, "--wait=false", "--ignore-not-found"])
+    # PVCs last among namespaced objects
+    for pvc in list(ctx.items("pvc", ns=ns)):
+        name = pvc.get("metadata", {}).get("name")
+        if not name:
+            continue
+        _release_pvc_mounts(ctx, ns, name)
+        if _force_delete_pvc(ctx, ns, name):
+            actions.append(f"drained PVC {ns}/{name}")
+        else:
+            actions.append(f"PVC {ns}/{name} still present after force-delete attempt")
+    if strip_finalizers:
+        for kind in _NS_CONTENT_KINDS + ("pods",):
+            for it in ctx.items(kind, ns=ns):
+                if (it.get("metadata", {}) or {}).get("finalizers"):
+                    n = it["metadata"]["name"]
+                    ctx.k(["patch", kind, n, "-n", ns, "--type=merge",
+                           "-p", '{"metadata":{"finalizers":null}}'])
+    leftovers = []
+    for kind in ("deployments", "pods", "services", "pvc"):
+        n = len(ctx.items(kind, ns=ns))
+        if n:
+            leftovers.append(f"{kind}={n}")
+    if leftovers:
+        actions.append(f"drain {ns} incomplete: {','.join(leftovers)}")
+    else:
+        actions.append(f"drained ns {ns} (empty)")
+    return actions
+
+
+def _ensure_registry_hostpath() -> List[str]:
+    """Make registry hostPath exist and world-writable (platform helper)."""
+    return _platform.ensure_registry_hostpath()
+
+def _registry_ready_count(ctx: Ctx) -> tuple:
+    ready, total = ctx.pods_ready(ZARF_NS, "app=docker-registry")
+    if ready < 1 and total == 0:
+        ready, total = ctx.pods_ready(
+            ZARF_NS, "app.kubernetes.io/name=zarf-docker-registry")
+    return ready, total
+
+
+def _zarf_ns_husk_detail(ctx: Ctx) -> Optional[str]:
+    """When the ``zarf`` ns should be drained before re-init.
+
+    Returns a detail string if: Terminating; or Active with no Ready registry AND
+    (bad/missing PVC or only husk leftovers). Returns None if healthy or if storage
+    is already correct (Bound PVC on sc \"\") — pod not Ready yet is *not* a husk
+    (would destroy an in-progress init).
+    """
+    ns = ctx.get("namespace", ZARF_NS)
+    if not ns:
+        return None
+    if ns.get("status", {}).get("phase") == "Terminating":
+        return "zarf ns Terminating (drain+finalize required)"
+    ready, total = _registry_ready_count(ctx)
+    if ready >= 1:
+        return None
+    pvc = ctx.get("pvc", REGISTRY_PVC_NAME, ns=ZARF_NS)
+    if pvc is not None:
+        phase = pvc.get("status", {}).get("phase")
+        sc = (pvc.get("spec", {}) or {}).get("storageClassName")
+        sc = "" if sc is None else sc
+        del_ts = (pvc.get("metadata", {}) or {}).get("deletionTimestamp")
+        if del_ts or phase == "Terminating":
+            return (f"registry PVC Terminating (deleting={bool(del_ts)}) — "
+                    "mount/finalizer wedge")
+        if phase == "Bound" and sc == "":
+            # Correct resilient bind; wait for registry pods — do NOT drain.
+            return None
+        if phase == "Pending" or sc != "":
+            return (f"registry PVC phase={phase} sc={sc!r} (capture or unbound) — "
+                    "delete before re-init")
+    bits = []
+    for kind in ("services", "deployments", "statefulsets", "secrets", "pvc", "pods"):
+        items = ctx.items(kind, ns=ZARF_NS)
+        if not items:
+            continue
+        created = (items[0].get("metadata", {}) or {}).get("creationTimestamp", "")
+        bits.append(f"{kind}={len(items)}" + (f"@{created[:10]}" if created else ""))
+    if bits:
+        return (f"zarf husk/partial: registry ready {ready}/{total}; leftovers "
+                + ", ".join(bits))
+    return None
+
+def _unwedge_failed_seed_registry(ctx: Ctx) -> List[str]:
+    """After a failed ``zarf init`` Helm install of zarf-seed-registry (context
+    deadline exceeded), clear pending helm secrets and partial chart objects so the
+    next init is a clean install, not an upgrade of a broken release."""
+    actions: List[str] = []
+    actions += _unwedge_pending_helm(ctx)
+    if not ctx.exists("namespace", ZARF_NS):
+        return actions
+    # seed chart objects without a Ready registry
+    ready, _ = _registry_ready_count(ctx)
+    if ready >= 1:
+        return actions
+    for kind in ("deploy", "sts", "job"):
+        ctx.k(["delete", kind, "--all", "-n", ZARF_NS,
+               "--wait=false", "--ignore-not-found"])
+    ctx.k(["delete", "pods", "--all", "-n", ZARF_NS,
+           "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
+    actions.append("cleared partial seed-registry workloads in zarf ns")
+    # Best-effort: zarf package remove for init seed component (syntax varies by version)
+    if ctx.have_zarf():
+        for args in (
+            ["package", "remove", "init", "--confirm",
+             "--components=zarf-seed-registry"],
+            ["package", "remove", "zarf-seed-registry", "--confirm"],
+        ):
+            r = ctx.zarf(args, timeout=120)
+            if r.returncode == 0:
+                actions.append(f"zarf {' '.join(args[:3])} ok")
+                break
+    return actions
 
 
 _HELM_PENDING = ("pending-install", "pending-upgrade", "pending-rollback")
@@ -242,25 +446,19 @@ def _unwedge_pending_helm(ctx: Ctx) -> List[str]:
 
 
 _NS_CONTENT_KINDS = ("deployments", "replicasets", "statefulsets", "daemonsets",
-                     "services", "configmaps", "secrets", "pvc", "jobs")
+                     "services", "configmaps", "secrets", "pvc", "jobs",
+                     "ingresses", "networkpolicies", "endpointslices")
 
 
 def _unwedge_terminating_app_ns(ctx: Ctx) -> List[str]:
-    """Two app-namespace wedge states, both field-proven:
+    """App-namespace wedges (also covered by discovery.sweep_vestiges each pass).
 
-    TERMINATING — a stuck ns fails its component deploy with 'namespace ... is being
-    terminated'. Crucially, force-finalizing removes ONLY the namespace object: its
-    contents' etcd keys survive and RESURFACE when the ns is recreated (as inert
-    husks — see below). So clear the CONTENTS first (workload kinds explicitly, pods
-    force-deleted; finalizer-bearing stragglers stripped), and force-finalize only
-    once the ns is actually empty — deferring to the next reconcile pass if not.
+    TERMINATING — drain contents (incl. ingress/finalizers) then finalize when empty.
+    ACTIVE HUSKS — controllers/services with zero pods, or all-junk pods: recycle ns.
+    Layer-B only; package redeploy recreates everything.
+    """
+    from .discovery import _drain_ns, _is_app_husk, _force_finalize_ns as _ff
 
-    ACTIVE HUSKS — a previously force-finalized-then-recreated ns re-exposes its old
-    Deployments/ReplicaSets with dead controller state (desired>0, current=0, no
-    events, no owning helm release): every deploy into it hangs until timeout. The
-    signature is crisp — Deployments present, ZERO pods. Delete the ns cleanly
-    (normal deletion works now and GCs the contents properly); the component deploy
-    recreates everything fresh. Layer-B only."""
     actions: List[str] = []
     for ns in APP_NAMESPACES:
         obj = ctx.get("namespace", ns)
@@ -268,39 +466,24 @@ def _unwedge_terminating_app_ns(ctx: Ctx) -> List[str]:
             continue
         phase = obj.get("status", {}).get("phase")
         if phase == "Terminating":
-            for kind in _NS_CONTENT_KINDS:
-                ctx.k(["delete", kind, "--all", "-n", ns, "--wait=false"])
-            ctx.k(["delete", "pods", "--all", "-n", ns,
-                   "--force", "--grace-period=0", "--wait=false"])
-            # strip finalizers off stragglers so GC can actually finish them
-            for kind in _NS_CONTENT_KINDS:
-                for it in ctx.items(kind, ns=ns):
-                    if (it.get("metadata", {}) or {}).get("finalizers"):
-                        ctx.k(["patch", kind, it["metadata"]["name"], "-n", ns,
-                               "--type=merge", "-p", '{"metadata":{"finalizers":null}}'])
-            leftovers = any(ctx.items(k, ns=ns) for k in ("deployments", "pods"))
+            actions.extend(_drain_ns(ctx, ns))
+            leftovers = any(ctx.items(k, ns=ns) for k in ("deployments", "pods", "pvc"))
             if not leftovers:
-                if _force_finalize_ns(ctx, ns):
+                if _ff(ctx, ns) or _force_finalize_ns(ctx, ns):
                     actions.append(f"force-finalized Terminating ns {ns} (contents cleared first)")
             else:
                 actions.append(f"clearing contents of Terminating ns {ns} (finalize next pass)")
         elif phase == "Active":
-            deps = ctx.items("deployments", ns=ns)
-            pods = ctx.items("pods", ns=ns)
-            if deps and not pods:
+            reason = _is_app_husk(ctx, ns)
+            if reason:
+                actions.extend(_drain_ns(ctx, ns))
                 ctx.k(["delete", "namespace", ns, "--wait=false"])
-                actions.append(f"deleted ns {ns} carrying resurrected husk workloads "
-                               "(Deployments with zero pods — etcd leftovers of a prior "
-                               "force-finalize; the deploy recreates it clean)")
+                actions.append(f"deleted husk ns {ns} ({reason})")
     return actions
 
 
-# S3/deploy variables that are SECRET — delivered via ZARF_VAR_* ENV only (kept off
-# argv / the process table). Everything else (bucket, region, endpoint, replica count)
-# is non-sensitive config and goes on --set-variables, the RELIABLE substitution path
-# (--set is its deprecated alias on zarf ≥0.70). A bare ZARF_VAR_* env did NOT reach the
-# rendered configMap in practice (live S3_BUCKET came out ""), so OTEL_DATA_PATH rendered
-# "s3:///" → runtime "Invalid bucket name 's3:'".
+# S3 secrets → ZARF_CONFIG tmpfs [package.deploy.set]. Non-secrets → --set-variables.
+# Bare ZARF_VAR_* env does NOT template in zarf v0.70.1 (field-proven empty renders).
 _S3_SECRET_KEYS = {"S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_SESSION_TOKEN"}
 # Components whose manifests template a non-empty S3_BUCKET into a configMap. Deploying
 # them with a blank bucket silently bricks the app at runtime, so we refuse instead.
@@ -320,14 +503,12 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
                    "converge (would render OTEL_DATA_PATH=s3:/// → runtime 'Invalid bucket "
                    "name s3:'). Re-run with S3_BUCKET set (export it before converge-aws.sh, "
                    "or pass --set-variables S3_BUCKET=… / --creds-file).")
-    # Unwind the deploy-blocking wedge states BEFORE invoking zarf, so a plain deploy
-    # can succeed: a Helm release left pending-* by a killed prior deploy ("another
-    # operation is in progress"), an app namespace stuck Terminating ("namespace is
-    # being terminated"), agent-poisoned namespaces (a re-init labeled them ignore —
-    # pods would admit with upstream refs), and pods ALREADY admitted unmutated (a
-    # no-diff helm upgrade never recreates them → --wait times out forever). All
-    # Layer-B bookkeeping/state. Ordering: labels are stripped before pods are
-    # deleted, so the controllers' replacements re-admit through an ACTIVE agent.
+    # Unwind deploy-blocking wedges BEFORE zarf. Stamp detected INGRESS_CLASS so
+    # redeploys never re-introduce traefik-on-RKE2 silent 404s.
+    _platform.ensure_ingress_class_in_ctx(ctx)
+    # Default resilient worker count if unset (package default may be multi-node).
+    if not ctx.s3.get("DASK_WORKER_REPLICAS"):
+        ctx.s3["DASK_WORKER_REPLICAS"] = "1"
     unwound = (_unwedge_pending_helm(ctx) + _unwedge_terminating_app_ns(ctx)
                + _strip_agent_ignore(ctx) + _unwedge_unmutated_pods(ctx)
                + _unwedge_broken_dask_cluster(ctx))
@@ -336,12 +517,7 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
             f"--components={components}", "--retries", "10"]
     if not ctx.registry_pvc_enabled:
         args.append("--set-variables=REGISTRY_PVC_ENABLED=false")
-    # Non-sensitive vars → --set-variables (reliable; --set is its deprecated alias on
-    # zarf ≥0.70). SECRETS → a ZARF_CONFIG tmpfs file ([package.deploy.set]), zarf's
-    # first-class config path: keeps them off argv/ps AND actually reaches variable
-    # templating — a bare ZARF_VAR_* env does NOT in v0.70.1 (field-proven twice: the
-    # live S3_BUCKET rendered "" in the configMap, and the sandbox DaskCluster CR
-    # rendered empty AWS creds, silently de-credentialing the workers).
+    # Non-sensitive vars → --set-variables; secrets → ZARF_CONFIG tmpfs.
     env = {}
     secrets = {}
     for k, v in ctx.s3.items():
@@ -407,6 +583,38 @@ def _apply_bundled_local_path(ctx: Ctx) -> Fix:
 # --------------------------------------------------------------------------- #
 # T0 — node / closure
 # --------------------------------------------------------------------------- #
+
+def _det_layer_a_zarf_tools(ctx: Ctx) -> Probe:
+    """Layer-A CLOSURE: zarf binary executable + zarf-init package discoverable.
+    Field: ``zarf init rc=127`` and 'requires a zarf-init package' both surface here
+    before T1 burns an EXPENSIVE remediation cycle."""
+    if not ctx.have_zarf():
+        return Probe(False, "zarf binary not available on PATH / --zarf")
+    r = ctx.zarf(["version"], timeout=30)
+    if r.returncode == 127:
+        return Probe(False, "zarf binary not executable (rc=127)")
+    if r.returncode != 0:
+        return Probe(False, f"zarf version failed rc={r.returncode}")
+    # init package: beside deploy package, /var/tmp, or cwd
+    search: List[Path] = []
+    if ctx.package_path:
+        search.append(Path(ctx.package_path).resolve().parent)
+    search += [Path("/var/tmp"), Path.cwd()]
+    found = None
+    for d in search:
+        try:
+            matches = sorted(d.glob("zarf-init-*.tar.zst"))
+        except OSError:
+            continue
+        if matches:
+            found = matches[0]
+            break
+    if not found:
+        return Probe(False,
+                     "zarf-init-*.tar.zst not found beside package or in /var/tmp "
+                     "(Layer A — transport the release init package)")
+    return Probe(True, f"zarf ok; init package {found.name}")
+
 
 def _det_api(ctx: Ctx) -> Probe:
     r = ctx.k(["get", "--raw", "/healthz"])
@@ -599,86 +807,99 @@ def _undefault_sc(ctx: Ctx, name: str) -> bool:
 
 
 def _pre_init_cleanup(ctx: Ctx) -> List[str]:
-    """Exhaustively unwind every registry/storage state that makes ``zarf init`` loop at
-    rc=1, so a plain init can succeed. Returns the actions taken (for the report).
-    Idempotent + CONSERVATION-safe: force-finalizes namespaces, neutralizes StorageClass
-    capture, and recreates the registry PV OBJECT to match the PVC — it NEVER deletes the
-    PV's hostPath DATA (Retain), so the pushed images survive and the registry rebinds.
+    """Exhaustively unwind every registry/storage state that makes ``zarf init`` fail
+    or hang (rc=1, rc=124 context deadline, rc=127 missing binary), so a plain init can
+    succeed. Idempotent + CONSERVATION-safe: never deletes hostPath registry DATA.
 
-    Permutations handled (all surfaced in the field):
-      • zarf ns wedged Terminating                → force-finalize it
-      • a cluster-default StorageClass present    → un-default it (hygiene; the registry
-        no longer depends on it once init runs with --storage-class -)
-      • the registry PVC captured onto a non-"" class (the chart omits storageClassName on
-        an empty value, so the default SC — RKE2 local-path, WFFC + dead provisioner —
-        gets stamped on; the class is IMMUTABLE and init reuses it by name)
-                                                   → delete it so init recreates it on ""
-      • the static claimRef PV is stale (Released/Failed, stale claimRef-uid) or its class
-        drifted off ""                            → reset it to "" (binds with NO
-        provisioner), conserving the hostPath data
-      • a fresh deploy with no PVC/PV yet         → ensure a "" static PV is present
-    Pairs with `zarf init --storage-class -` in `_rem_registry_running` (the "-" sentinel
-    renders the registry PVC's storageClassName:"" EXPLICITLY → binds the static PV, never
-    the cluster default).
+    Generalized from field sessions (anticipatory catalog — every special case is one
+    row of this procedure):
+
+      • hostPath /var/lib/zarf-registry not writable     → mkdir+chmod 0777
+      • zarf ns Terminating                              → drain contents, then finalize
+      • zarf ns absent + orphaned PVC/husk (split-brain) → create ns, drain husks
+      • zarf ns Active husk (injector Service, no registry) → full drain
+      • partial seed-registry Helm (deadline exceeded)   → pending-helm + partial workloads
+      • cluster-default StorageClass                     → un-default (hygiene)
+      • registry PVC Terminating / Pending / wrong class → release mounts + force-delete
+      • static PV Released/Failed/class-drift            → reset object (data retained)
+      • app ns agent=ignore poison                       → strip labels
+    Pairs with `zarf init --storage-class -` in `_rem_registry_running`.
     """
     actions: List[str] = []
-    # A. zarf ns wedged Terminating → release it so init can recreate it cleanly.
-    ns = ctx.get("namespace", "zarf")
+
+    # 0. HostPath first — seed-registry Helm waits on a registry that cannot write.
+    for a in _ensure_registry_hostpath():
+        if not a.startswith("hostPath ") or "ready" not in a:
+            actions.append(a)
+        elif "MANUAL" in a or "not writable" in a or "failed" in a:
+            actions.append(a)
+
+    # A. Namespace topology: Terminating | absent (split-brain) | Active husk | healthy
+    ns = ctx.get("namespace", ZARF_NS)
     if ns and ns.get("status", {}).get("phase") == "Terminating":
-        if _force_finalize_ns(ctx, "zarf"):
-            actions.append("force-finalized Terminating zarf ns")
+        actions += _drain_namespace(ctx, ZARF_NS)
+        leftovers = any(ctx.items(k, ns=ZARF_NS)
+                        for k in ("deployments", "pods", "pvc", "services"))
+        if not leftovers:
+            if _force_finalize_ns(ctx, ZARF_NS):
+                actions.append("force-finalized Terminating zarf ns (contents cleared first)")
+        else:
+            actions.append("zarf ns Terminating — contents still draining (next pass)")
+    elif ns is None:
+        # Split-brain path: PVC/Service may reappear when ns is recreated.
+        if _ensure_namespace(ctx, ZARF_NS):
+            actions.append("recreated absent zarf ns (split-brain re-home for husk objects)")
+        husk = _zarf_ns_husk_detail(ctx)
+        if husk or ctx.items("pvc", ns=ZARF_NS) or ctx.items("services", ns=ZARF_NS):
+            actions += _drain_namespace(ctx, ZARF_NS)
+            if husk:
+                actions.append(f"drained after recreate: {husk}")
+    else:
+        husk = _zarf_ns_husk_detail(ctx)
+        if husk:
+            actions += _drain_namespace(ctx, ZARF_NS)
+            actions.append(f"drained zarf husk/partial ({husk})")
 
-    # A2. A KILLED prior init/deploy leaves its Helm release pending-* — after which
-    #     zarf's own helm upgrade of that chart fails "another operation is in
-    #     progress" forever. Unwind before init (all modalities).
-    actions += _unwedge_pending_helm(ctx)
+    # A2. Failed seed chart / pending helm — before another init races the same release.
+    actions += _unwedge_failed_seed_registry(ctx)
 
-    # A3. Strip zarf.dev/agent=ignore from OUR app namespaces. `zarf init` labels every
-    #     PRE-EXISTING namespace ignore; a re-run over an existing deployment therefore
-    #     poisons the app namespaces, silently disabling image rewriting for all later
-    #     pod churn. Strip BEFORE init here (and the coming init won't re-poison what
-    #     matters: it labels pre-existing namespaces, so we strip again post-init in
-    #     _rem_registry_running).
+    # A3. Agent poison on app namespaces (re-init labels pre-existing ns ignore).
     actions += _strip_agent_ignore(ctx)
 
-    # The storage unwind belongs to the RESILIENT path (a static claimRef PV, no
-    # provisioner). Dynamic-provisioning mode deliberately relies on a default SC.
+    # Storage unwind is RESILIENT-path only (static claimRef PV).
     if not (ctx.registry_pvc_enabled and not ctx.dynamic_provisioning):
         return actions
 
-    # B. Un-default any cluster-default StorageClass (hygiene). With `zarf init
-    #    --storage-class -` the registry PVC is pinned to "" and no longer depends on this,
-    #    but a lingering default SC whose provisioner is dead in the air-gap would still
-    #    capture any OTHER class-omitting PVC, so drop the default annotation. Idempotent.
+    # B. Un-default cluster-default StorageClasses (hygiene; may be zero SCs — fine).
     for sc in _default_storage_classes(ctx):
         if _undefault_sc(ctx, sc):
             actions.append(f"un-defaulted StorageClass {sc!r}")
 
-    # C. Delete a vestigial/captured registry PVC so init recreates it clean. The
-    #    docker-registry chart OMITS storageClassName when its value is empty, so the
-    #    cluster default (RKE2 local-path: WaitForFirstConsumer + a provisioner that's
-    #    absent air-gapped) gets stamped onto the registry PVC → Pending forever. That
-    #    class is IMMUTABLE, and `zarf init` reuses an existing PVC by name, so the only
-    #    way forward is to remove it. `_rem_registry_running` then re-inits with
-    #    --storage-class - (explicit ""), which binds the static PV below. Skip a healthily
-    #    Bound "" PVC (already correct). Layer-B; the Retain PV conserves the images.
-    pvc = ctx.get("pvc", "zarf-docker-registry", ns="zarf")
+    # C. Registry PVC: Terminating, Pending, wrong class, or deletingTimestamp —
+    #    never salvage in place (class immutable). Healthy Bound + sc "" → keep.
+    if not ctx.exists("namespace", ZARF_NS):
+        _ensure_namespace(ctx, ZARF_NS)
+    pvc = ctx.get("pvc", REGISTRY_PVC_NAME, ns=ZARF_NS)
     if pvc is not None:
         phase = pvc.get("status", {}).get("phase")
         cur = (pvc.get("spec", {}) or {}).get("storageClassName")
         cur = "" if cur is None else cur
-        if phase != "Bound" or cur != "":
-            if _force_delete_pvc(ctx, "zarf", "zarf-docker-registry"):
-                actions.append(f"deleted captured registry PVC "
-                               f"(was phase={phase} storageClass={cur!r})")
+        del_ts = (pvc.get("metadata", {}) or {}).get("deletionTimestamp")
+        finals = (pvc.get("metadata", {}) or {}).get("finalizers") or []
+        bad = bool(del_ts) or phase in ("Terminating", "Pending", "Lost") \
+            or phase != "Bound" or cur != ""
+        if bad:
+            if _force_delete_pvc(ctx, ZARF_NS, REGISTRY_PVC_NAME):
+                actions.append(
+                    f"deleted registry PVC (was phase={phase} sc={cur!r} "
+                    f"deleting={bool(del_ts)} finals={finals})")
+            else:
+                actions.append(
+                    f"registry PVC STILL present after force-delete "
+                    f"(phase={phase} sc={cur!r}) — will block init")
 
-    # D. Ensure the static claimRef hostPath PV exists, is storageClassName:"" and is
-    #    bindable (Available, no stale claimRef uid). The resilient target class is ALWAYS
-    #    "" — NEVER adopt a captured class (a 'local-path' PV can't bind under WFFC + the
-    #    PVC's dynamic-provisioner annotation anyway). Reset a stale/mis-classed/Released
-    #    PV but never a healthily Bound one; deleting the PV OBJECT conserves the hostPath
-    #    images (Retain) and re-binds.
-    pv = ctx.get("pv", "zarf-registry-pv")
+    # D. Static claimRef hostPath PV on storageClass "" (never adopt local-path).
+    pv = ctx.get("pv", REGISTRY_PV_NAME)
     if pv is None:
         ctx.apply_yaml(_registry_pv_yaml(ctx, ""))
         actions.append('created static registry PV (storageClass="")')
@@ -687,7 +908,7 @@ def _pre_init_cleanup(ctx: Ctx) -> List[str]:
         cur_sc = (pv.get("spec", {}) or {}).get("storageClassName") or ""
         claim = (pv.get("spec", {}) or {}).get("claimRef") or {}
         if phase in ("Released", "Failed") or claim.get("uid") or cur_sc != "":
-            ctx.k(["delete", "pv", "zarf-registry-pv", "--ignore-not-found"])
+            ctx.k(["delete", "pv", REGISTRY_PV_NAME, "--ignore-not-found"])
             ctx.apply_yaml(_registry_pv_yaml(ctx, ""))
             actions.append(f'reset static registry PV → storageClass="" '
                            f"(was phase={phase} storageClass={cur_sc!r})")
@@ -695,68 +916,141 @@ def _pre_init_cleanup(ctx: Ctx) -> List[str]:
 
 
 def _diagnose_registry(ctx: Ctx) -> str:
-    """Inspect the live registry/storage state so a failed ``zarf init`` reports WHY it
-    failed, not a bare rc=1 — the difference between an afternoon of guessing and a fix."""
+    """Inspect live registry/storage so a failed ``zarf init`` names the unmet
+    condition (PVC Terminating, SC capture, hostPath, husk, rc=127, …)."""
     bits: List[str] = []
-    if not ctx.exists("namespace", "zarf"):
-        bits.append("zarf ns absent (init created nothing or rolled back)")
-    pvc = ctx.get("pvc", "zarf-docker-registry", ns="zarf")
+    if not ctx.have_zarf():
+        bits.append("zarf binary unavailable (rc=127 class — install Layer-A binary)")
+    ns = ctx.get("namespace", ZARF_NS)
+    if not ns:
+        bits.append("zarf ns absent (init created nothing, rolled back, or split-brain)")
+    else:
+        bits.append(f"zarf ns phase={ns.get('status', {}).get('phase', '?')}")
+    husk = _zarf_ns_husk_detail(ctx)
+    if husk:
+        bits.append(husk)
+    pvc = ctx.get("pvc", REGISTRY_PVC_NAME, ns=ZARF_NS) if ns else None
     if pvc:
         sc = (pvc.get("spec", {}) or {}).get("storageClassName")
         sc = "" if sc is None else sc
         phase = pvc.get("status", {}).get("phase", "?")
-        bits.append(f"registry PVC {phase} storageClass={sc!r}")
+        del_ts = (pvc.get("metadata", {}) or {}).get("deletionTimestamp")
+        finals = (pvc.get("metadata", {}) or {}).get("finalizers") or []
+        vol = (pvc.get("spec", {}) or {}).get("volumeName") or ""
+        bits.append(f"registry PVC phase={phase} sc={sc!r} vol={vol!r} "
+                    f"deleting={bool(del_ts)} finals={finals}")
+        if del_ts or phase == "Terminating":
+            bits.append("PVC Terminating — release mounts + strip finalizers "
+                        "(ns must exist for patch)")
         if sc != "":
-            bits.append(f"registry PVC is on {sc!r}, not '' — the cluster-default SC "
-                        "captured it (immutable); delete it so init recreates it on '' "
-                        "(init must pass --storage-class -)")
+            bits.append(f"registry PVC on {sc!r} not '' — default-SC capture (immutable); "
+                        "delete PVC; init with --storage-class -")
         if phase == "Pending":
-            pv = ctx.get("pv", "zarf-registry-pv")
+            pv = ctx.get("pv", REGISTRY_PV_NAME)
             if pv is None:
                 bits.append("no static registry PV present to bind it")
             else:
                 pvsc = (pv.get("spec", {}) or {}).get("storageClassName") or ""
                 pvp = pv.get("status", {}).get("phase", "?")
-                bits.append(f"static PV {pvp} storageClass={pvsc!r}"
-                            + ("" if pvsc == sc else f" (≠ PVC's {sc!r} → won't bind)"))
+                bits.append(f"static PV {pvp} sc={pvsc!r}"
+                            + ("" if pvsc == sc else f" (≠ PVC sc {sc!r} → won't bind)"))
+    elif ns:
+        bits.append("no registry PVC")
+    pv = ctx.get("pv", REGISTRY_PV_NAME)
+    if pv:
+        bits.append(
+            f"static PV phase={pv.get('status', {}).get('phase')} "
+            f"sc={(pv.get('spec') or {}).get('storageClassName')!r}")
     defs = _default_storage_classes(ctx)
     if defs:
-        bits.append(f"default StorageClass {defs} present — its PVCs wait on a provisioner "
-                    "that may be absent in the air-gap; the resilient path wants none")
-    if ctx.pod_image_missing("zarf", "app=docker-registry"):
+        bits.append(f"default StorageClass {defs} present — resilient path wants none")
+    if not defs and not ctx.items("storageclass"):
+        bits.append("no StorageClasses (OK for resilient path)")
+    # hostPath
+    hp = Path(REGISTRY_HOSTPATH)
+    if not hp.is_dir():
+        bits.append(f"hostPath {REGISTRY_HOSTPATH} missing")
+    else:
+        try:
+            mode = stat.S_IMODE(hp.stat().st_mode)
+            if mode != 0o777:
+                bits.append(f"hostPath mode={oct(mode)} (want 0777; registry is non-root)")
+        except OSError as e:
+            bits.append(f"hostPath stat failed: {e}")
+    if ctx.pod_image_missing(ZARF_NS, "app=docker-registry"):
         bits.append("registry pod cannot pull its image (absent in the closed world)")
-    return "; ".join(bits) or "registry not Ready (inspect `kubectl -n zarf get pvc,pv,pods` + events)"
+    # pod events (FailedMount / deadline clues)
+    for p in ctx.items("pods", ns=ZARF_NS)[:3]:
+        phase = p.get("status", {}).get("phase")
+        name = p.get("metadata", {}).get("name", "?")
+        if phase and phase != "Running":
+            bits.append(f"pod {name} phase={phase}")
+    return "; ".join(bits) or (
+        "registry not Ready — inspect `kubectl -n zarf get pvc,pv,pods` + events")
 
 
 def _rem_registry_running(ctx: Ctx) -> Fix:
-    # Exhaustively unwind the registry/storage state so a plain `zarf init` can succeed,
-    # rather than retrying it forever against a wedged ns / a captured PVC / a mis-classed
-    # PV. Layer-B throughout; never deletes a transported image.
+    """Unwind platform wedges, then ``zarf init --storage-class -``. On failure,
+    diagnose + second-pass cleanup for seed-registry deadline (partial Helm)."""
     actions = _pre_init_cleanup(ctx)
     if not ctx.have_zarf():
-        return Fix(False, "MANUAL: zarf init --confirm (zarf binary not available here)")
+        return Fix(False,
+                   "MANUAL: zarf binary missing (rc=127 class) — install Layer-A "
+                   f"v0.70.x to /usr/local/bin/zarf  [unwound: {'; '.join(actions)}]"
+                   if actions else
+                   "MANUAL: zarf binary missing — install Layer-A to /usr/local/bin/zarf")
+
+    # Prefer running init from the package directory so zarf-init-*.tar.zst is found.
+    pkg_dir = None
+    if ctx.package_path:
+        pkg_dir = str(Path(ctx.package_path).resolve().parent)
+
     args = ["init", "--confirm", f"--set=REGISTRY_PVC_SIZE={ctx.registry_pv_size}"]
     if ctx.registry_pvc_enabled:
-        # Pin the registry PVC to storageClassName:"" via the docker-registry chart's "-"
-        # sentinel. Without this, zarf's empty default makes the chart OMIT the field, so
-        # Kubernetes stamps the cluster-default SC (RKE2 local-path: WaitForFirstConsumer +
-        # a provisioner that's dead air-gapped) → PVC Pending forever. "" binds the static
-        # claimRef hostPath PV directly — no provisioner, no default-SC race.
+        # "-" sentinel → storageClassName:"" EXPLICITLY (binds static PV; no SC race).
         args += ["--storage-class=-"]
     else:
         args.append("--set=REGISTRY_PVC_ENABLED=false")
-    r = ctx.zarf(args)
-    # init labels PRE-EXISTING namespaces zarf.dev/agent=ignore — on a re-init that
-    # includes our app namespaces, which kills image rewriting for their future pods.
-    # Strip immediately after, every time. (Idempotent; no-op on a fresh deploy.)
+
+    def _run_init() -> "object":
+        # cwd via env is insufficient; use run with explicit chdir in subprocess
+        if pkg_dir and Path(pkg_dir).is_dir():
+            import subprocess as _sp
+            argv = [str(ctx.zarf_bin)] + args
+            try:
+                return _sp.run(
+                    argv, capture_output=True, text=True, timeout=1800,
+                    cwd=pkg_dir, env={**os.environ})
+            except FileNotFoundError as e:
+                return _sp.CompletedProcess(argv, 127, "", str(e))
+            except _sp.TimeoutExpired as e:
+                return _sp.CompletedProcess(argv, 124, e.stdout or "", "timeout")
+        return ctx.zarf(args)
+
+    r = _run_init()
     actions += _strip_agent_ignore(ctx)
     tail = f"  [unwound: {'; '.join(actions)}]" if actions else ""
+
     if r.returncode == 0:
         return Fix(True, f"zarf init: rc=0{tail}")
-    # Precise diagnosis instead of a bare rc=1, so the loop's stall report (or the
-    # operator) knows exactly which state is still unmet.
-    return Fix(False, f"zarf init rc={r.returncode}: {_diagnose_registry(ctx)}{tail}")
 
+    # Second pass: seed-registry deadline / partial install often leaves recoverable state
+    if r.returncode in (1, 124) or "deadline" in (r.stderr or "").lower():
+        more = _unwedge_failed_seed_registry(ctx)
+        more += _pre_init_cleanup(ctx)
+        if more:
+            actions += more
+            r2 = _run_init()
+            actions += _strip_agent_ignore(ctx)
+            tail = f"  [unwound: {'; '.join(actions)}]"
+            if r2.returncode == 0:
+                return Fix(True, f"zarf init (retry after seed unwedge): rc=0{tail}")
+            r = r2
+
+    if r.returncode == 127:
+        return Fix(False, f"zarf init rc=127 (command not found / not executable): "
+                          f"{_diagnose_registry(ctx)}{tail}")
+    return Fix(False, f"zarf init rc={r.returncode}: {_diagnose_registry(ctx)}{tail}")
 
 # --------------------------------------------------------------------------- #
 # T2 — images pushed to the internal registry (expensive)
@@ -923,14 +1217,49 @@ def _rem_engine(ctx: Ctx) -> Fix:
 
 
 def _det_jupyterhub(ctx: Ctx) -> Probe:
+    """Hub must be Ready; package uses sqlite-memory + singleuser storage none
+    (no PVC). Any jupyterhub PVC is a vestige from an older chart and a wedge."""
     ready, total = ctx.pods_ready("jupyterhub", "component=hub")
-    return Probe(ready >= 1, f"jupyterhub hub ready {ready}/{total}")
+    pvcs = ctx.items("pvc", ns="jupyterhub")
+    if pvcs:
+        names = [p.get("metadata", {}).get("name") for p in pvcs]
+        phases = [p.get("status", {}).get("phase") for p in pvcs]
+        return Probe(
+            False,
+            f"jupyterhub hub ready {ready}/{total}; unexpected PVC(s) {names} "
+            f"phases={phases} — resilient package is sqlite-memory/storage none; "
+            "delete PVC/PV vestiges then redeploy")
+    if ready >= 1:
+        return Probe(True, f"jupyterhub hub ready {ready}/{total} (no PVC — resilient)")
+    return Probe(False, f"jupyterhub hub ready {ready}/{total}")
 
 
 def _rem_jupyterhub(ctx: Ctx) -> Fix:
-    return _zarf_deploy_components(ctx, "jupyterhub")
-
-
+    """SC-less hub path: remove ALL jupyterhub PVCs + hub-db PVs (old sqlite-pvc /
+    local-path vestiges), then redeploy chart (sqlite-memory, storage none)."""
+    actions: List[str] = []
+    for pvc in list(ctx.items("pvc", ns="jupyterhub")):
+        name = pvc.get("metadata", {}).get("name", "")
+        phase = pvc.get("status", {}).get("phase")
+        sc = (pvc.get("spec", {}) or {}).get("storageClassName")
+        sc = "" if sc is None else sc
+        if name and _force_delete_pvc(ctx, "jupyterhub", name):
+            actions.append(f"deleted jupyterhub PVC {name} (phase={phase} sc={sc!r})")
+    for pv in list(ctx.items("pv")):
+        pname = (pv.get("metadata") or {}).get("name", "")
+        claim = (pv.get("spec") or {}).get("claimRef") or {}
+        if claim.get("namespace") == "jupyterhub" or "hub-db" in pname:
+            phase = pv.get("status", {}).get("phase")
+            if ctx.k(["delete", "pv", pname, "--ignore-not-found"]).returncode == 0:
+                actions.append(f"deleted hub-related PV {pname} (phase={phase})")
+    # Hub Deployment may still reference old volume — recycle hub pods after PVC gone
+    ctx.k(["delete", "pod", "-n", "jupyterhub", "-l", "component=hub",
+           "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
+    fix = _zarf_deploy_components(ctx, "jupyterhub")
+    if actions:
+        return Fix(fix.changed or bool(actions),
+                   f"{fix.detail}  [unwound: {'; '.join(actions)}]")
+    return fix
 def _det_sample_notebooks(ctx: Ctx) -> Probe:
     ok = ctx.exists("configmap", "sample-notebooks", ns="jupyterhub")
     return Probe(ok, "sample-notebooks ConfigMap present" if ok
@@ -945,22 +1274,34 @@ def _det_ingress(ctx: Ctx) -> Probe:
     ings = ctx.items("ingress")
     names = [i["metadata"]["name"] for i in ings]
     want = {"dask-dashboard", "panel-viz"}
-    return Probe(want.issubset(set(names)), f"ingress: {names}")
+    if not want.issubset(set(names)):
+        return Probe(False, f"ingress missing objects: have {names}, want {want}")
+    # Class alignment (traefik-on-RKE2 silent unbound)
+    cls_probe = _platform.det_ingress_class_aligned(ctx)
+    if not cls_probe.ok:
+        return cls_probe
+    # Optional: /ws path on panel-viz for terminal
+    for ing in ings:
+        if (ing.get("metadata") or {}).get("name") != "panel-viz":
+            continue
+        paths = []
+        for rule in (ing.get("spec") or {}).get("rules") or []:
+            for p in ((rule.get("http") or {}).get("paths") or []):
+                paths.append(p.get("path"))
+        if "/ws" not in paths:
+            return Probe(False,
+                         f"panel-viz ingress missing /ws path (have {paths}) — "
+                         "terminal WebSocket will not work through ingress")
+    return Probe(True, f"ingress: {names}; {cls_probe.detail}")
 
 
 def _rem_ingress(ctx: Ctx) -> Fix:
+    _platform.ensure_ingress_class_in_ctx(ctx)
     return _zarf_deploy_components(ctx, "ingress")
 
-
-# --------------------------------------------------------------------------- #
-# Clean-slate teardown targets (the disposable Layer-B APP STACK)
-# --------------------------------------------------------------------------- #
-# `converge --teardown` removes these and nothing else. The foundational tier
-# (zarf registry, local-path-storage / StorageClass) and ALL Layer-A node images
-# are CONSERVED — teardown is the clean slate of the WORKLOADS, not the platform,
-# so a subsequent `--apply` redeploys fast from the still-present registry.
-APP_NAMESPACES = ["dask", "dask-operator", "jupyterhub", "panel-viz"]
-DASK_CRD_KINDS = ["daskclusters", "daskworkergroups", "daskautoscalers", "daskjobs"]
+# APP_NAMESPACES / DASK_CRD_KINDS: imported from discovery (managed-scope SSOT).
+# Teardown and remediations mutate only those Layer-B targets; registry hostPath
+# data and Layer-A node images are never deleted.
 
 
 # --------------------------------------------------------------------------- #
@@ -992,11 +1333,31 @@ def build_catalog(dynamic_provisioning: bool = False,
                   manual_hint="RKE2 down — `systemctl status rke2-server` on the control plane"),
         Invariant("T0.node-ready", "T0", "Nodes Ready and schedulable", Layer.B,
                   _det_node_ready, _rem_node_ready, depends_on=("T0.api",)),
+        Invariant("T0.system-plane", "T0",
+                  "RKE2/system plane healthy (API, DNS, ingress controller observed)",
+                  Layer.B, _platform.det_system_plane, _platform.rem_system_plane,
+                  depends_on=("T0.api",)),
+        Invariant("T0.kubelet-gc", "T0",
+                  "Kubelet image-GC policy raised (protects Layer-A images on disk pressure)",
+                  Layer.B, _platform.det_kubelet_gc_policy, _platform.rem_kubelet_gc_policy,
+                  depends_on=("T0.api",)),
         Invariant("T0.no-disk-pressure", "T0", "No disk-pressure taint (lenient eviction persisted)",
                   Layer.A, _det_no_disk_pressure, depends_on=("T0.api",),
                   manual_hint="free disk SAFELY (never `crictl rmi --prune`; remove only the package "
                               "tarball / journald / Failed pods) and ensure the RKE2 lenient-eviction "
                               "config is applied (infra/aws/ansible/roles/rke2-*/templates)"),
+        # Layer-A tools: binary + init package must be on the node (rc=127 / air-gap init).
+        Invariant("T0.layer-a-zarf-tools", "T0",
+                  "Zarf binary + init package present (Layer A — CLOSURE)",
+                  Layer.A, _det_layer_a_zarf_tools, depends_on=("T0.api",),
+                  manual_hint="Transport the release's `zarf` binary (v0.70.x) to "
+                              "/usr/local/bin and `zarf-init-amd64-v0.70.1.tar.zst` next to "
+                              "the deploy package in /var/tmp — never download air-gapped"),
+        Invariant("T0.package-uniqueness", "T0",
+                  "At most one cybersec-dask deploy package staged (mtime-safe)",
+                  Layer.A, _platform.det_package_uniqueness, depends_on=("T0.api",),
+                  manual_hint="Remove extra zarf-package-cybersec-dask-amd64-*.tar.zst files; "
+                              "keep only the intended version (engine never deletes Layer-A)"),
     ]
 
     # T0.5 — storage. Resilient (default): the registry binds a claimRef hostPath PV,

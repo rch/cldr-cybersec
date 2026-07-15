@@ -26,7 +26,9 @@
 #   - export S3_ENDPOINT S3_BUCKET S3_REGION S3_ACCESS_KEY S3_SECRET_KEY
 #     S3_SESSION_TOKEN  (this script stages them to a tmpfs creds file + shreds it), or
 #   - point CONVERGE_CREDS_FILE at a KEY=VALUE file you manage (not shredded here).
-# Either way secrets reach zarf via ZARF_VAR_* env, NEVER on argv / the process table.
+# Secrets are staged to a tmpfs creds file; the engine delivers them via a 0600
+# ZARF_CONFIG ([package.deploy.set]) — bare ZARF_VAR_* env does NOT template in
+# zarf v0.70.1. Never put secrets on argv / the process table.
 #
 # Env tunables: S3_BUCKET (required for a first deploy), DASK_WORKER_REPLICAS
 # (default 1 — the resilient single-node baseline; raise for bigger clusters, the
@@ -145,6 +147,8 @@ fi
 ARGS+=(--set "DASK_WORKER_REPLICAS=${DASK_WORKER_REPLICAS:-1}")
 # Optional terminal-WS override (NodePort/tunnel access; empty = auto-detect / ingress /ws)
 [ -n "${PTY_PROXY_WS:-}" ] && ARGS+=(--set "PTY_PROXY_WS=${PTY_PROXY_WS}")
+# Optional explicit ingress class; engine auto-detects nginx on RKE2 when unset
+[ -n "${INGRESS_CLASS:-}" ] && ARGS+=(--set "INGRESS_CLASS=${INGRESS_CLASS}")
 case "${CONVERGE_DYNAMIC_PROVISIONING:-}" in 1|true|yes) ARGS+=(--enable-dynamic-provisioning) ;; esac
 case "${CONVERGE_NO_REGISTRY_PVC:-}" in 1|true|yes) ARGS+=(--no-registry-pvc) ;; esac
 ARGS+=("$MODE_FLAG")

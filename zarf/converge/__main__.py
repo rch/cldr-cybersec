@@ -1,9 +1,12 @@
 """CLI for the convergence engine.
 
-    python3 -m converge --verify                 # is the deployment at target? (oracle)
-    python3 -m converge --dry-run                # what's broken + what I'd remediate
-    python3 -m converge --apply                  # remediate to a fixpoint
+    python3 -m converge --verify                 # discovery + target oracle (no changes)
+    python3 -m converge --dry-run                # discovery + vestige preview + would-fix
+    python3 -m converge --apply                  # discovery + sweep husks + remediate to fixpoint
     python3 -m converge --apply --package zarf-package-...tar.zst --set S3_BUCKET=...
+
+Every mode walks K8s entry points first (nodes → ns → controllers → pods → PVC/PV →
+helm → CRs). Apply re-detects all invariants each pass and never deletes Layer-A.
 
 Exit: 0 = converged / clean dry-run; 1 = not converged; 2 = CLOSURE violation
 (a transported Layer-A artifact is missing — operator must re-import, engine won't).

@@ -78,7 +78,7 @@ run_case() {
   clean="$(printf '%s\n' "$out" | _strip)"
   t1="$(printf '%s\n' "$clean" | grep -E 'T1[[:space:]].*registry-running' | head -1)"
   act="$(printf '%s\n' "$clean" | grep -oE \
-        'un-defaulted StorageClass[^];]*|reset static registry PV[^];]*|force-finalized[^];]*|created static registry PV[^];]*|deleted captured registry PVC[^];]*|unwedged pending Helm release[^];]*|cleared pods in Terminating[^];]*' \
+        'un-defaulted StorageClass[^];]*|reset static registry PV[^];]*|force-finalized[^];]*|created static registry PV[^];]*|deleted (captured )?registry PVC[^];]*|unwedged pending Helm release[^];]*|cleared pods in Terminating[^];]*|drained ns zarf[^];]*|recreated absent zarf ns[^];]*|drained zarf husk[^];]*|chmod 0777[^];]*|cleared partial seed-registry[^];]*' \
         | head -4 | paste -sd'; ' -)"
   if printf '%s' "$t1" | grep -qiE '\[ *(ok|fixed) *\]'; then
     echo "  ✓ T1 recovered:${t1#*registry-running}"
@@ -284,6 +284,67 @@ post_ns_active() {
   echo "    ✗ panel-viz phase=${phase:-absent}, Running pods=${pods:-0}"; return 1
 }
 
+# ── CADS session inducers (2026-07 air-gap walkthrough — split-brain / husk / hostPath)
+induce_zarf_husk_service() {
+  # Active zarf ns with only an ancient Service (no Ready registry) — the 34d
+  # zarf-injector leftover after force-finalize + recreate. Re-init on top →
+  # seed-registry Helm deadline. Converge must drain then re-init.
+  on_node "$KCTL delete ns zarf --wait=false" >/dev/null 2>&1 || true
+  sleep 2
+  on_node "$KCTL create ns zarf" >/dev/null 2>&1 || true
+  cat <<'Y' | on_node "$KCTL apply -f -" >/dev/null 2>&1 || true
+apiVersion: v1
+kind: Service
+metadata:
+  name: zarf-injector
+  namespace: zarf
+spec:
+  ports: [{port: 5000, targetPort: 5000}]
+Y
+}
+
+induce_pvc_terminating_split() {
+  # PVC Terminating + ns force-finalized = split-brain: namespaced patch fails
+  # with "namespaces zarf not found" until ns is recreated and PVC re-homed.
+  _apply_hostile_default_sc
+  on_node "$KCTL create ns zarf" >/dev/null 2>&1 || true
+  cat <<'Y' | on_node "$KCTL apply -f -" >/dev/null 2>&1 || true
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zarf-docker-registry
+  namespace: zarf
+  finalizers: ["kubernetes.io/pvc-protection", "cybersec.sandbox/test-wedge"]
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 5Gi}}
+  storageClassName: local-path
+Y
+  on_node "$KCTL -n zarf delete pvc zarf-docker-registry --wait=false" >/dev/null 2>&1 || true
+  # force-finalize the ns while PVC still has finalizers (split-brain)
+  on_node "$KCTL get ns zarf -o json" 2>/dev/null | on_node "python3 -c '
+import sys,json
+o=json.load(sys.stdin)
+o[\"spec\"][\"finalizers\"]=[]
+print(json.dumps(o))
+'" 2>/dev/null | on_node "$KCTL replace --raw /api/v1/namespaces/zarf/finalize -f -" >/dev/null 2>&1 || true
+}
+
+induce_hostpath_perms() {
+  # Registry non-root cannot write hostPath → seed chart context deadline.
+  on_node "sudo mkdir -p /var/lib/zarf-registry && sudo chmod 0700 /var/lib/zarf-registry && sudo chown root:root /var/lib/zarf-registry" >/dev/null 2>&1 || true
+  on_node "$KCTL delete ns zarf --wait=false" >/dev/null 2>&1 || true
+}
+
+post_hostpath_writable() {
+  local mode
+  mode="$(on_node "stat -c '%a' /var/lib/zarf-registry" 2>/dev/null)" || true
+  if [ "$mode" = "777" ]; then
+    echo "    ↳ hostPath mode=777 ✓"; return 0
+  fi
+  echo "    ✗ hostPath mode=${mode:-absent} (want 777)"; return 1
+}
+
 # ── the permutation matrix ────────────────────────────────────────────────────
 run_case "baseline (idempotent converge stays green)"   induce_baseline
 run_case "default StorageClass capture (the field bug)"  induce_default_sc
@@ -293,6 +354,9 @@ run_case "class-drifted static PV"                       induce_class_drift
 run_case "dead zarf agent (registry up, init incomplete)" induce_dead_agent   post_agent_back
 run_case "wedged pending-upgrade Helm release"            induce_wedged_helm  post_helm_clean
 run_case "app namespace stuck Terminating (apply path)"   induce_terminating_ns post_ns_active
+run_case "zarf husk Service only (no registry)"          induce_zarf_husk_service
+run_case "PVC Terminating + ns split-brain"              induce_pvc_terminating_split
+run_case "hostPath not writable (seed deadline class)"   induce_hostpath_perms post_hostpath_writable
 
 on_node "$KCTL delete storageclass sb-fsm-default --ignore-not-found" >/dev/null 2>&1 || true
 

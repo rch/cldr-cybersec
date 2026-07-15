@@ -28,11 +28,26 @@ aws_region  = "us-east-1"
 # Network
 vpc_cidr = "10.100.0.0/16"
 
+# Availability zones — SINGLE-AZ on purpose.
+#
+# This is a parallel/distributed Dask compute cluster for algorithm dev, NOT an
+# HA service. Co-locating the scheduler + all workers in one AZ:
+#   - eliminates cross-AZ data-transfer charges on every shuffle (~$0.02/GB RT)
+#   - minimizes inter-worker / scheduler latency on the hot path
+#   - avoids the us-east-1e trap (1e only offers 2016-era m4/r4 — modern
+#     m6i/m7i/r6i are NOT available there, so a worker placed in 1e never launches)
+# Multi-AZ would not even buy real HA here: Dask's single scheduler is a SPOF.
+#
+# Pinned here (terraform.tfvars > TF_VAR_availability_zones the devenv task
+# exports), so it overrides the all-AZs auto-detection. If aws_region changes,
+# update this to a modern AZ in the new region.
+availability_zones = ["us-east-1d"]
+
 # Cluster sizing
 control_plane_count         = 1
 control_plane_instance_type = "m6i.xlarge"
 worker_count                = 8
-worker_instance_type        = "r6i.xlarge"  # 4 vCPU, 32 GiB memory-optimized
+worker_instance_type        = "m7i.large"  # 2 vCPU, 8 GiB general purpose (latest Intel)
 
 # Storage
 root_volume_size = 50

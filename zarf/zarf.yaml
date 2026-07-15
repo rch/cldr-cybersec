@@ -2,7 +2,7 @@ kind: ZarfPackageConfig
 metadata:
   name: cybersec-dask
   description: Air-gap deployment package for Dask, JupyterHub, and Panel-Viz on RKE2
-  version: "1.6.3"
+  version: "1.6.4"
   architecture: amd64
   authors: Cybersec Toolkit Team
   url: https://github.com/cloudera/cybersec
@@ -16,7 +16,7 @@ variables:
 
   # Ingress configuration
   - name: INGRESS_CLASS
-    description: Kubernetes ingress controller class
+    description: Kubernetes ingress controller class (RKE2 ships nginx; Traefik is K3s)
     default: nginx
   - name: INGRESS_DOMAIN
     description: Base domain for ingress hostnames
@@ -24,8 +24,8 @@ variables:
 
   # Dask configuration
   - name: DASK_WORKER_REPLICAS
-    description: Number of Dask worker replicas
-    default: "4"
+    description: Number of Dask worker replicas (1 = resilient single-node baseline)
+    default: "1"
   - name: DASK_SPILL_DIR
     description: Host path for Dask worker spill-to-disk (set to NFS mount if available)
     default: /tmp/dask-spill
