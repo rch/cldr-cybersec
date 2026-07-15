@@ -19,4 +19,4 @@ Stdlib-only; independent of the `cybersec` Python package; kubectl-only at runti
 (runnable node-side, operator-side, or as an in-cluster Job).
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

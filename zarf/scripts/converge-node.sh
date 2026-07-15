@@ -147,6 +147,8 @@ fi
 ARGS+=(--set "DASK_WORKER_REPLICAS=${DASK_WORKER_REPLICAS:-1}")
 # Optional terminal-WS override (NodePort/tunnel access; empty = auto-detect / ingress /ws)
 [ -n "${PTY_PROXY_WS:-}" ] && ARGS+=(--set "PTY_PROXY_WS=${PTY_PROXY_WS}")
+# Optional explicit ingress class; engine auto-detects nginx on RKE2 when unset
+[ -n "${INGRESS_CLASS:-}" ] && ARGS+=(--set "INGRESS_CLASS=${INGRESS_CLASS}")
 case "${CONVERGE_DYNAMIC_PROVISIONING:-}" in 1|true|yes) ARGS+=(--enable-dynamic-provisioning) ;; esac
 case "${CONVERGE_NO_REGISTRY_PVC:-}" in 1|true|yes) ARGS+=(--no-registry-pvc) ;; esac
 ARGS+=("$MODE_FLAG")

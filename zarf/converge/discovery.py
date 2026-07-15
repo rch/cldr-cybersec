@@ -694,4 +694,24 @@ def print_discovery(ctx: Ctx, *, preview_sweep: bool = False) -> DiscoveryReport
     if preview_sweep:
         rep.actions_preview = sweep_vestiges(ctx, dry_run=True)
     print(rep.format())
+    # System / RKE2 plane + package inventory (anticipatory edges)
+    try:
+        from . import platform as _platform
+        sys_lines = _platform.discover_system_plane(ctx)
+        if sys_lines:
+            print("  ── SYSTEM / RKE2 PLANE ──")
+            for line in sys_lines:
+                print(f"  · {line}")
+        pkgs = _platform.find_deploy_packages()
+        if pkgs:
+            print(f"  ── LAYER-A PACKAGES ({len(pkgs)}) ──")
+            for p in pkgs[:8]:
+                print(f"  · {p}")
+            if len(pkgs) > 8:
+                print(f"  · … +{len(pkgs) - 8} more")
+        gc_ok = _platform.kubelet_gc_policy_ok()
+        print(f"  ── KUBELET GC POLICY: "
+              f"{'raised (safe)' if gc_ok else 'DEFAULT/RISKY — apply will raise thresholds'} ──")
+    except Exception as e:  # noqa: BLE001 — discovery must never abort reconcile
+        print(f"  ── platform discovery partial: {e} ──")
     return rep

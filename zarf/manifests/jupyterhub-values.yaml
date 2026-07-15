@@ -19,6 +19,8 @@ hub:
   image:
     name: quay.io/jupyterhub/k8s-hub
     tag: "4.0.0"
+    # Air-gap: never attempt an upstream pull — image is in the internal registry
+    pullPolicy: IfNotPresent
   # Hub database — in-memory SQLite, no PVC required.
   # The default (sqlite-pvc) creates a 1Gi PVC with the cluster's default
   # StorageClass. On air-gapped RKE2 without a running local-path-provisioner,
@@ -57,6 +59,7 @@ proxy:
     image:
       name: quay.io/jupyterhub/configurable-http-proxy
       tag: "4.5.5"
+      pullPolicy: IfNotPresent
   service:
     type: NodePort
     nodePorts:
@@ -69,12 +72,14 @@ singleuser:
   image:
     name: localhost:5555/cybersec-dask
     tag: "2025.2.0"
+    pullPolicy: IfNotPresent
   # Network tools init container - uses our bundled image
   # (avoids needing a separate k8s-network-tools image in air-gap)
   networkTools:
     image:
       name: localhost:5555/cybersec-dask
       tag: "2025.2.0"
+      pullPolicy: IfNotPresent
   # Disable block-cloud-metadata init container (requires iptables,
   # which is not present in the cybersec-dask image)
   cloudMetadata:
@@ -86,6 +91,7 @@ singleuser:
   initContainers:
     - name: inject-jupyterhub-pkg
       image: quay.io/jupyterhub/k8s-hub:4.0.0
+      imagePullPolicy: IfNotPresent
       command:
         - sh
         - -c

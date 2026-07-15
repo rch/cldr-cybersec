@@ -504,3 +504,16 @@ helm pending secrets → VolumeAttachments → Dask CR finalizers
 **Never disposed (Layer-A / foundational):** containerd images, `/var/lib/zarf-registry`
 data, zarf binary + init/deploy packages on disk, RKE2 system namespaces. A Bound
 registry PVC with Ready registry is left intact during sweep.
+
+## Appendix F — anticipatory platform edges (engine v0.4.0)
+
+| Edge | Invariant / behavior | Conservation |
+|------|----------------------|--------------|
+| Kubelet image-GC @85% | `T0.kubelet-gc` writes lenient `kubelet-arg` + restarts `rke2-server` (root) | Raises thresholds only; never prunes images |
+| RKE2 system plane | `T0.system-plane` observes API/DNS/ingress; uncordons only | Never restarts etcd; coredns ImagePull → MANUAL Layer-A |
+| Package mtime races | `T0.package-uniqueness` fails if multiple deploy tarballs | Never deletes packages (Layer-A MANUAL) |
+| Ingress class (traefik on RKE2) | Auto-detect `nginx`; stamp on every deploy; T6 checks class + `/ws` | Redeploy ingress only |
+| Hub SC-less | Package `sqlite-memory` + `storage: none`; T5 deletes any hub PVC/hub-db PV then redeploy | Hub DB ephemeral by design air-gap |
+| Worker default | Deploy path forces `DASK_WORKER_REPLICAS=1` if unset | Capacity cap still applies |
+
+Discovery always prints SYSTEM/RKE2 PLANE, LAYER-A PACKAGES, and KUBELET GC POLICY lines.

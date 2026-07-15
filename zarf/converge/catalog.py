@@ -22,6 +22,7 @@ from typing import List, Optional
 from .discovery import APP_NAMESPACES, DASK_CRD_KINDS
 from .kube import Ctx
 from .model import Cost, Fix, Invariant, Layer, Probe
+from . import platform as _platform
 
 # Registry hostPath — non-root registry container; fsGroup does NOT chown hostPath.
 REGISTRY_HOSTPATH = "/var/lib/zarf-registry"
@@ -194,44 +195,8 @@ def _drain_namespace(ctx: Ctx, ns: str, *, strip_finalizers: bool = True) -> Lis
 
 
 def _ensure_registry_hostpath() -> List[str]:
-    """Make REGISTRY_HOSTPATH exist and be world-writable. The zarf registry runs
-    non-root; without this, image push 500s and Helm seed-registry hits context
-    deadline exceeded. No-op if already correct. PermissionError → report only
-    (engine may not be root; converge-node.sh also preps as root)."""
-    actions: List[str] = []
-    path = Path(REGISTRY_HOSTPATH)
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        mode = path.stat().st_mode
-        if (mode & 0o777) != 0o777:
-            os.chmod(path, 0o777)
-            actions.append(f"chmod 0777 {REGISTRY_HOSTPATH}")
-        elif not actions:
-            # still record readiness for diagnosis when verbose
-            pass
-        # verify writable
-        probe = path / ".converge-write-probe"
-        try:
-            probe.write_text("ok")
-            probe.unlink(missing_ok=True)  # type: ignore[call-arg]
-        except TypeError:
-            try:
-                probe.unlink()
-            except OSError:
-                pass
-        except OSError as e:
-            actions.append(f"hostPath {REGISTRY_HOSTPATH} not writable: {e}")
-            return actions
-        if not actions:
-            actions.append(f"hostPath {REGISTRY_HOSTPATH} ready (writable)")
-    except PermissionError:
-        actions.append(
-            f"MANUAL: cannot prepare {REGISTRY_HOSTPATH} (need root) — "
-            f"`mkdir -p {REGISTRY_HOSTPATH} && chmod 0777 {REGISTRY_HOSTPATH}`")
-    except OSError as e:
-        actions.append(f"hostPath prepare failed: {e}")
-    return actions
-
+    """Make registry hostPath exist and world-writable (platform helper)."""
+    return _platform.ensure_registry_hostpath()
 
 def _registry_ready_count(ctx: Ctx) -> tuple:
     ready, total = ctx.pods_ready(ZARF_NS, "app=docker-registry")
@@ -538,14 +503,12 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
                    "converge (would render OTEL_DATA_PATH=s3:/// → runtime 'Invalid bucket "
                    "name s3:'). Re-run with S3_BUCKET set (export it before converge-aws.sh, "
                    "or pass --set-variables S3_BUCKET=… / --creds-file).")
-    # Unwind the deploy-blocking wedge states BEFORE invoking zarf, so a plain deploy
-    # can succeed: a Helm release left pending-* by a killed prior deploy ("another
-    # operation is in progress"), an app namespace stuck Terminating ("namespace is
-    # being terminated"), agent-poisoned namespaces (a re-init labeled them ignore —
-    # pods would admit with upstream refs), and pods ALREADY admitted unmutated (a
-    # no-diff helm upgrade never recreates them → --wait times out forever). All
-    # Layer-B bookkeeping/state. Ordering: labels are stripped before pods are
-    # deleted, so the controllers' replacements re-admit through an ACTIVE agent.
+    # Unwind deploy-blocking wedges BEFORE zarf. Stamp detected INGRESS_CLASS so
+    # redeploys never re-introduce traefik-on-RKE2 silent 404s.
+    _platform.ensure_ingress_class_in_ctx(ctx)
+    # Default resilient worker count if unset (package default may be multi-node).
+    if not ctx.s3.get("DASK_WORKER_REPLICAS"):
+        ctx.s3["DASK_WORKER_REPLICAS"] = "1"
     unwound = (_unwedge_pending_helm(ctx) + _unwedge_terminating_app_ns(ctx)
                + _strip_agent_ignore(ctx) + _unwedge_unmutated_pods(ctx)
                + _unwedge_broken_dask_cluster(ctx))
@@ -554,12 +517,7 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
             f"--components={components}", "--retries", "10"]
     if not ctx.registry_pvc_enabled:
         args.append("--set-variables=REGISTRY_PVC_ENABLED=false")
-    # Non-sensitive vars → --set-variables (reliable; --set is its deprecated alias on
-    # zarf ≥0.70). SECRETS → a ZARF_CONFIG tmpfs file ([package.deploy.set]), zarf's
-    # first-class config path: keeps them off argv/ps AND actually reaches variable
-    # templating — a bare ZARF_VAR_* env does NOT in v0.70.1 (field-proven twice: the
-    # live S3_BUCKET rendered "" in the configMap, and the sandbox DaskCluster CR
-    # rendered empty AWS creds, silently de-credentialing the workers).
+    # Non-sensitive vars → --set-variables; secrets → ZARF_CONFIG tmpfs.
     env = {}
     secrets = {}
     for k, v in ctx.s3.items():
@@ -1259,58 +1217,49 @@ def _rem_engine(ctx: Ctx) -> Fix:
 
 
 def _det_jupyterhub(ctx: Ctx) -> Probe:
+    """Hub must be Ready; package uses sqlite-memory + singleuser storage none
+    (no PVC). Any jupyterhub PVC is a vestige from an older chart and a wedge."""
     ready, total = ctx.pods_ready("jupyterhub", "component=hub")
+    pvcs = ctx.items("pvc", ns="jupyterhub")
+    if pvcs:
+        names = [p.get("metadata", {}).get("name") for p in pvcs]
+        phases = [p.get("status", {}).get("phase") for p in pvcs]
+        return Probe(
+            False,
+            f"jupyterhub hub ready {ready}/{total}; unexpected PVC(s) {names} "
+            f"phases={phases} — resilient package is sqlite-memory/storage none; "
+            "delete PVC/PV vestiges then redeploy")
     if ready >= 1:
-        return Probe(True, f"jupyterhub hub ready {ready}/{total}")
-    # Anticipatory: hub often stuck on dynamic local-path PVC when no provisioner
-    # (or SC was un-defaulted/removed for the resilient zarf path).
-    for pvc in ctx.items("pvc", ns="jupyterhub"):
-        phase = pvc.get("status", {}).get("phase")
-        name = pvc.get("metadata", {}).get("name", "?")
-        sc = (pvc.get("spec", {}) or {}).get("storageClassName")
-        sc = "" if sc is None else sc
-        del_ts = (pvc.get("metadata", {}) or {}).get("deletionTimestamp")
-        if del_ts or phase in ("Pending", "Terminating", "Lost"):
-            return Probe(
-                False,
-                f"jupyterhub hub ready {ready}/{total}; PVC {name} phase={phase} "
-                f"sc={sc!r} deleting={bool(del_ts)} — dynamic provisioner/local-path "
-                "orphan (common after resilient SC un-default)")
+        return Probe(True, f"jupyterhub hub ready {ready}/{total} (no PVC — resilient)")
     return Probe(False, f"jupyterhub hub ready {ready}/{total}")
 
 
 def _rem_jupyterhub(ctx: Ctx) -> Fix:
-    """Redeploy hub; if hub PVC is Pending/Terminating on local-path (or any dead
-    dynamic class), delete the PVC and any Released hub-db PV so the chart can
-    recreate. Layer-B — hub DB is disposable unless the operator has preserved it
-    outside the cluster (air-gap default: prefer converge over stale local-path)."""
+    """SC-less hub path: remove ALL jupyterhub PVCs + hub-db PVs (old sqlite-pvc /
+    local-path vestiges), then redeploy chart (sqlite-memory, storage none)."""
     actions: List[str] = []
     for pvc in list(ctx.items("pvc", ns="jupyterhub")):
-        phase = pvc.get("status", {}).get("phase")
         name = pvc.get("metadata", {}).get("name", "")
+        phase = pvc.get("status", {}).get("phase")
         sc = (pvc.get("spec", {}) or {}).get("storageClassName")
         sc = "" if sc is None else sc
-        del_ts = (pvc.get("metadata", {}) or {}).get("deletionTimestamp")
-        bad = bool(del_ts) or phase in ("Pending", "Terminating", "Lost")
-        # local-path (or missing provisioner) with non-Bound is the field case
-        if bad or (phase != "Bound" and sc in ("local-path", "localpath", "")):
-            if name and _force_delete_pvc(ctx, "jupyterhub", name):
-                actions.append(f"deleted jupyterhub PVC {name} (phase={phase} sc={sc!r})")
-    # Orphan PVs left after claim delete (Retain / hub-db-pv)
-    for pv in ctx.items("pv"):
+        if name and _force_delete_pvc(ctx, "jupyterhub", name):
+            actions.append(f"deleted jupyterhub PVC {name} (phase={phase} sc={sc!r})")
+    for pv in list(ctx.items("pv")):
         pname = (pv.get("metadata") or {}).get("name", "")
         claim = (pv.get("spec") or {}).get("claimRef") or {}
         if claim.get("namespace") == "jupyterhub" or "hub-db" in pname:
             phase = pv.get("status", {}).get("phase")
-            if phase in ("Released", "Failed", "Available"):
-                if ctx.k(["delete", "pv", pname, "--ignore-not-found"]).returncode == 0:
-                    actions.append(f"deleted orphan PV {pname} (phase={phase})")
+            if ctx.k(["delete", "pv", pname, "--ignore-not-found"]).returncode == 0:
+                actions.append(f"deleted hub-related PV {pname} (phase={phase})")
+    # Hub Deployment may still reference old volume — recycle hub pods after PVC gone
+    ctx.k(["delete", "pod", "-n", "jupyterhub", "-l", "component=hub",
+           "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
     fix = _zarf_deploy_components(ctx, "jupyterhub")
     if actions:
-        detail = f"{fix.detail}  [unwound: {'; '.join(actions)}]"
-        return Fix(fix.changed or bool(actions), detail)
+        return Fix(fix.changed or bool(actions),
+                   f"{fix.detail}  [unwound: {'; '.join(actions)}]")
     return fix
-
 def _det_sample_notebooks(ctx: Ctx) -> Probe:
     ok = ctx.exists("configmap", "sample-notebooks", ns="jupyterhub")
     return Probe(ok, "sample-notebooks ConfigMap present" if ok
@@ -1325,12 +1274,30 @@ def _det_ingress(ctx: Ctx) -> Probe:
     ings = ctx.items("ingress")
     names = [i["metadata"]["name"] for i in ings]
     want = {"dask-dashboard", "panel-viz"}
-    return Probe(want.issubset(set(names)), f"ingress: {names}")
+    if not want.issubset(set(names)):
+        return Probe(False, f"ingress missing objects: have {names}, want {want}")
+    # Class alignment (traefik-on-RKE2 silent unbound)
+    cls_probe = _platform.det_ingress_class_aligned(ctx)
+    if not cls_probe.ok:
+        return cls_probe
+    # Optional: /ws path on panel-viz for terminal
+    for ing in ings:
+        if (ing.get("metadata") or {}).get("name") != "panel-viz":
+            continue
+        paths = []
+        for rule in (ing.get("spec") or {}).get("rules") or []:
+            for p in ((rule.get("http") or {}).get("paths") or []):
+                paths.append(p.get("path"))
+        if "/ws" not in paths:
+            return Probe(False,
+                         f"panel-viz ingress missing /ws path (have {paths}) — "
+                         "terminal WebSocket will not work through ingress")
+    return Probe(True, f"ingress: {names}; {cls_probe.detail}")
 
 
 def _rem_ingress(ctx: Ctx) -> Fix:
+    _platform.ensure_ingress_class_in_ctx(ctx)
     return _zarf_deploy_components(ctx, "ingress")
-
 
 # APP_NAMESPACES / DASK_CRD_KINDS: imported from discovery (managed-scope SSOT).
 # Teardown and remediations mutate only those Layer-B targets; registry hostPath
@@ -1366,6 +1333,14 @@ def build_catalog(dynamic_provisioning: bool = False,
                   manual_hint="RKE2 down — `systemctl status rke2-server` on the control plane"),
         Invariant("T0.node-ready", "T0", "Nodes Ready and schedulable", Layer.B,
                   _det_node_ready, _rem_node_ready, depends_on=("T0.api",)),
+        Invariant("T0.system-plane", "T0",
+                  "RKE2/system plane healthy (API, DNS, ingress controller observed)",
+                  Layer.B, _platform.det_system_plane, _platform.rem_system_plane,
+                  depends_on=("T0.api",)),
+        Invariant("T0.kubelet-gc", "T0",
+                  "Kubelet image-GC policy raised (protects Layer-A images on disk pressure)",
+                  Layer.B, _platform.det_kubelet_gc_policy, _platform.rem_kubelet_gc_policy,
+                  depends_on=("T0.api",)),
         Invariant("T0.no-disk-pressure", "T0", "No disk-pressure taint (lenient eviction persisted)",
                   Layer.A, _det_no_disk_pressure, depends_on=("T0.api",),
                   manual_hint="free disk SAFELY (never `crictl rmi --prune`; remove only the package "
@@ -1378,6 +1353,11 @@ def build_catalog(dynamic_provisioning: bool = False,
                   manual_hint="Transport the release's `zarf` binary (v0.70.x) to "
                               "/usr/local/bin and `zarf-init-amd64-v0.70.1.tar.zst` next to "
                               "the deploy package in /var/tmp — never download air-gapped"),
+        Invariant("T0.package-uniqueness", "T0",
+                  "At most one cybersec-dask deploy package staged (mtime-safe)",
+                  Layer.A, _platform.det_package_uniqueness, depends_on=("T0.api",),
+                  manual_hint="Remove extra zarf-package-cybersec-dask-amd64-*.tar.zst files; "
+                              "keep only the intended version (engine never deletes Layer-A)"),
     ]
 
     # T0.5 — storage. Resilient (default): the registry binds a claimRef hostPath PV,

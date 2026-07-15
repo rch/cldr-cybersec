@@ -16,16 +16,16 @@ variables:
 
   # Ingress configuration
   - name: INGRESS_CLASS
-    description: Kubernetes ingress controller class
-    default: traefik
+    description: Kubernetes ingress controller class (RKE2 ships nginx; Traefik is K3s)
+    default: nginx
   - name: INGRESS_DOMAIN
     description: Base domain for ingress hostnames
     default: cybersec.local
 
   # Dask configuration
   - name: DASK_WORKER_REPLICAS
-    description: Number of Dask worker replicas
-    default: "4"
+    description: Number of Dask worker replicas (1 = resilient single-node baseline)
+    default: "1"
   - name: DASK_SPILL_DIR
     description: Host path for Dask worker spill-to-disk (set to NFS mount if available)
     default: /tmp/dask-spill
@@ -49,6 +49,12 @@ variables:
     default: ""
     sensitive: true
   - name: S3_SESSION_TOKEN
+
+  # Terminal WebSocket override (empty = auto-detect / ingress /ws)
+  - name: PTY_PROXY_WS
+    description: Explicit terminal WebSocket URL (empty = auto-detect / ingress /ws)
+    default: ""
+
     description: AWS STS session token (for IAM role credentials)
     default: ""
     sensitive: true
