@@ -35,6 +35,7 @@ dependencies = [
     # PyFlink - uses patched thirdparty/flink for cloudpickle 3.x compatibility.
     # See tool.uv.sources below for local path override.
     "apache-flink>=1.20.0",
+    "h5py>=3.16.0",
 ]
 
 [project.optional-dependencies]
