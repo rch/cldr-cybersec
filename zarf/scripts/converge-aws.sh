@@ -21,9 +21,11 @@
 # Credentials: kubectl-only healing needs NONE — workloads read the in-cluster S3
 # secret. For a from-scratch deploy that must (re)create that secret, export the
 # S3_* vars below before calling this script (this IS the converge path that
-# `aws:deploy:zarf` drives — it exports them for you). They flow to zarf via
-# ZARF_VAR_* env, never argv: S3_ENDPOINT S3_BUCKET S3_REGION S3_ACCESS_KEY
-# S3_SECRET_KEY S3_SESSION_TOKEN. DASK_WORKER_REPLICAS (non-secret) → --set.
+# `aws:deploy:zarf` drives — it exports them for you): S3_ENDPOINT S3_BUCKET
+# S3_REGION S3_ACCESS_KEY S3_SECRET_KEY S3_SESSION_TOKEN. They're staged to a tmpfs
+# creds-file on the node (CONVERGE_CREDS_FILE); the engine delivers SECRETS via a
+# 0600 ZARF_CONFIG ([package.deploy.set]) and NON-secrets via --set-variables —
+# never argv, never bare ZARF_VAR_* env (which does not template in zarf v0.70.1).
 #
 # SSH access: assumes your egress is already allowed by the bastion SG
 # (allowed_ssh_cidrs — e.g. the WARP/Tailscale range). Add a temporary /32 only
@@ -80,9 +82,10 @@ scp -q -i "$SSH_KEY" -o ProxyCommand="$PROXY" "${SSH_OPTS[@]}" -r \
 scp -q -i "$SSH_KEY" -o ProxyCommand="$PROXY" "${SSH_OPTS[@]}" \
   zarf/manifests/local-path-provisioner.yaml "ec2-user@$CONTROL_IP:$STAGE/manifests/" </dev/null
 
-# --- optional S3 creds → ZARF_VAR_* env, transported over the SSH channel -----
+# --- optional S3 creds → tmpfs creds-file on the node, over the SSH channel ----
 # Written to tmpfs (RAM, mode 600) and removed after the run, NEVER placed on any
-# command line. The engine reads them and forwards to zarf as ZARF_VAR_* env.
+# command line. The engine reads them (CONVERGE_CREDS_FILE) and delivers secrets to
+# zarf via a 0600 ZARF_CONFIG file — not bare ZARF_VAR_* env (which won't template).
 CREDS_REMOTE=""
 CREDS_LINES=""
 for v in S3_ENDPOINT S3_BUCKET S3_REGION S3_ACCESS_KEY S3_SECRET_KEY S3_SESSION_TOKEN; do
