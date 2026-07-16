@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .kube import Ctx
+from . import manual as _manual
 from .model import Fix, Probe
 
 # --------------------------------------------------------------------------- #
@@ -128,10 +129,10 @@ def rem_kubelet_gc_policy(_ctx: Ctx) -> Fix:
     """Write canonical lenient kubelet-arg block. Restarts rke2-server when root
     (does not disrupt running pods — containerd keeps them). MANUAL if not root."""
     if os.geteuid() != 0:
-        return Fix(False,
-                   f"MANUAL: as root, install absolute-threshold kubelet-arg block in "
-                   f"{RKE2_CONFIG} and `systemctl restart rke2-server` "
-                   "(see AIRGAP-CHEATSHEET §1)")
+        return Fix(False, _manual.join_detail(
+            f"MANUAL: as root, install absolute-threshold kubelet-arg block in "
+            f"{RKE2_CONFIG} and `systemctl restart rke2-server`",
+            _manual.hint_for("T0.kubelet-gc")))
     try:
         RKE2_CONFIG.parent.mkdir(parents=True, exist_ok=True)
         raw = _read_rke2_config()
@@ -161,7 +162,9 @@ def rem_kubelet_gc_policy(_ctx: Ctx) -> Fix:
                              f"(policy on disk — restart manually if needed)")
         return Fix(True, f"{detail}; restarted rke2-server")
     except OSError as e:
-        return Fix(False, f"MANUAL: cannot write {RKE2_CONFIG}: {e}")
+        return Fix(False, _manual.join_detail(
+            f"MANUAL: cannot write {RKE2_CONFIG}: {e}",
+            _manual.hint_for("T0.kubelet-gc")))
     except subprocess.TimeoutExpired:
         return Fix(True, f"wrote GC policy; rke2-server restart still running")
 
@@ -280,9 +283,10 @@ def rem_package_uniqueness(ctx: Ctx) -> Fix:
     """Cannot auto-delete packages (Layer-A). Report MANUAL."""
     pkgs = find_deploy_packages()
     names = ", ".join(p.name for p in pkgs)
-    return Fix(False,
-               f"MANUAL: leave only the intended package tarball on disk "
-               f"(found: {names}). Engine will not delete Layer-A artifacts.")
+    return Fix(False, _manual.join_detail(
+        f"MANUAL: leave only the intended package tarball on disk "
+        f"(found: {names}). Engine will not delete Layer-A artifacts.",
+        _manual.hint_for("T0.package-uniqueness")))
 
 
 # --------------------------------------------------------------------------- #
@@ -358,16 +362,19 @@ def rem_system_plane(ctx: Ctx) -> Fix:
     # If coredns ImagePullBackOff — cannot pull air-gap
     miss = ctx.pod_image_missing("kube-system", "k8s-app=kube-dns")
     if miss is True:
-        return Fix(False,
-                   "MANUAL: coredns ImagePullBackOff — re-import RKE2 bundled images "
-                   "(Layer-A); engine will not pull"
-                   + (f"  [also: {'; '.join(actions)}]" if actions else ""))
+        head = (
+            "MANUAL: coredns ImagePullBackOff — re-import RKE2 bundled images "
+            "(Layer-A); engine will not pull"
+            + (f"  [also: {'; '.join(actions)}]" if actions else "")
+        )
+        return Fix(False, _manual.join_detail(head, _manual.hint_for("T0.system-plane")))
     if actions:
         return Fix(True, "; ".join(actions))
-    return Fix(False,
-               "system plane degraded — inspect kube-system pods; "
-               "engine does not restart etcd/control-plane automatically"
-               + (f"  [{'; '.join(discover_system_plane(ctx)[:3])}]"))
+    return Fix(False, _manual.join_detail(
+        "system plane degraded — inspect kube-system pods; "
+        "engine does not restart etcd/control-plane automatically"
+        + (f"  [{'; '.join(discover_system_plane(ctx)[:3])}]"),
+        _manual.hint_for("T0.system-plane")))
 
 
 # --------------------------------------------------------------------------- #

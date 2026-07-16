@@ -5,6 +5,11 @@ engine handles, so you can drive the deployment to target **by hand** — when `
 isn't on the host, when you want surgical control, or to understand exactly what the engine does.
 Each block is the manual equivalent of one remediation in `zarf/converge/catalog.py`.
 
+> **Engine emits these in situ.** On `MANUAL` / `FAILED` / dry-run `WOULD_FIX`, converge prints an
+> **IN SITU** section with the same DISCOVER + FIX recipes (SSOT: `zarf/converge/manual.py`),
+> including `zarf package deploy --components=…` for every app tier. This markdown file is the
+> human-readable mirror; prefer the live report when you are already on the node after a run.
+
 > **The supported path is still the engine.** It's idempotent, ordered, and structurally cannot
 > delete a transported (Layer-A) artifact. Reach for these manual commands deliberately, not by
 > default. Pair with [AIRGAP-DISCOVERY.md](AIRGAP-DISCOVERY.md) (confirm state first) and
@@ -362,7 +367,7 @@ zarf tools registry catalog | grep cybersec-dask        # confirm pushed
 | **T4** `scheduler` (dask-cluster) | `zarf package deploy "$PKG" --confirm --components=dask-cluster --retries 10 "${SETV[@]}"` |
 | **T5** `otel-navigator` | `zarf package deploy "$PKG" --confirm --components=cybersec-images,panel-viz --retries 10 "${SETV[@]}"` |
 | **T5** `navigator-engine` | `zarf package deploy "$PKG" --confirm --components=cybersec-images,navigator-engine --retries 10 "${SETV[@]}"` |
-| **T5** `jupyterhub` | `zarf package deploy "$PKG" --confirm --components=jupyterhub --retries 10 "${SETV[@]}"` |
+| **T5** `jupyterhub` | `zarf package deploy "$PKG" --confirm --components=jupyterhub,sample-notebooks --retries 10 "${SETV[@]}"`  (field unblock; engine co-deploys notebooks) |
 | **T5** `sample-notebooks` | `zarf package deploy "$PKG" --confirm --components=sample-notebooks --retries 10 "${SETV[@]}"` |
 | **T6** `ingress` | `zarf package deploy "$PKG" --confirm --components=ingress --retries 10 "${SETV[@]}"` |
 

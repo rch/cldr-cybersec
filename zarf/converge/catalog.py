@@ -10,6 +10,10 @@ shell to ``zarf package deploy --components=…`` (idempotent); surgical repairs
 (force-finalize, claimRef PV, default-SC annotation, worker cap) are inline kubectl.
 If ``zarf``/the package isn't on the host (e.g. an in-cluster Job), zarf-backed
 remediations degrade to a precise manual hint instead of failing.
+
+Every invariant carries a ``manual_hint`` from ``manual.HINTS``: copy-paste **DISCOVER**
+(in-situ read-only commands) + **FIX** (the intervention). The engine report prints an
+IN SITU section on MANUAL/FAILED/WOULD_FIX so operators never guess the next command.
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ from typing import List, Optional
 from .discovery import APP_NAMESPACES, DASK_CRD_KINDS
 from .kube import Ctx
 from .model import Cost, Fix, Invariant, Layer, Probe
+from . import manual as _manual
 from . import platform as _platform
 
 # Registry hostPath — non-root registry container; fsGroup does NOT chown hostPath.
@@ -493,17 +498,20 @@ _S3_DEPENDENT_COMPONENTS = ("panel-viz", "navigator-engine")
 
 def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
     if not (ctx.have_zarf() and ctx.package_path):
-        return Fix(False, f"MANUAL: zarf package deploy --components={components} "
-                          "(zarf/package not available to this engine instance)")
+        reason = "zarf binary and/or package tarball not available to this engine instance"
+        return Fix(False, _manual.zarf_deploy_manual_line(components, reason=reason))
     # Fail LOUD rather than render an empty S3_BUCKET. An S3-dependent component
     # deployed with a blank bucket renders OTEL_DATA_PATH=s3:/// and bricks the app
     # ("Invalid bucket name 's3:'"), so refuse instead of silently breaking it.
     if any(c in components for c in _S3_DEPENDENT_COMPONENTS) and not ctx.s3.get("S3_BUCKET"):
-        return Fix(False,
-                   f"MANUAL: refusing to deploy {components} — S3_BUCKET not provided to "
-                   "converge (would render OTEL_DATA_PATH=s3:/// → runtime 'Invalid bucket "
-                   "name s3:'). Re-run with S3_BUCKET set (export it before converge-aws.sh, "
-                   "or pass --set-variables S3_BUCKET=… / --creds-file).")
+        recipe = _manual.zarf_deploy_recipe(
+            components, needs_s3=True,
+            note="S3_BUCKET required — blank bucket renders OTEL_DATA_PATH=s3:/// "
+                 "(runtime 'Invalid bucket name s3:'). Export S3_* or use --creds-file.",
+        )
+        return Fix(False, _manual.join_detail(
+            f"MANUAL: refusing to deploy {components} — S3_BUCKET not provided to converge",
+            recipe))
     # Unwind deploy-blocking wedges BEFORE zarf. Stamp detected INGRESS_CLASS so
     # redeploys never re-introduce traefik-on-RKE2 silent 404s.
     _platform.ensure_ingress_class_in_ctx(ctx)
@@ -594,10 +602,18 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
     # Surface the actual zarf/Helm error tail, not a bare rc=1 — the deploy failures
     # (dask-operator/jupyterhub) only showed "rc=1" all afternoon. Last lines tend to
     # carry the cause (chart timeout, image pull, CRD hook); S3 secrets ride env, not
-    # stdout, so this stays clean.
+    # stdout, so this stays clean. Always attach in-situ DISCOVER/FIX so operators can
+    # re-run the same ``zarf package deploy --components=…`` that unblocks installs.
     tail = (r.stderr or r.stdout or "").strip().splitlines()[-3:]
     suffix = f" — {' / '.join(s.strip() for s in tail)}" if tail else ""
-    return Fix(False, f"zarf deploy {components}: rc={r.returncode}{suffix}{pre}")
+    head = f"zarf deploy {components}: rc={r.returncode}{suffix}{pre}"
+    return Fix(False, _manual.join_detail(
+        head,
+        _manual.zarf_deploy_recipe(
+            components,
+            pkg=ctx.package_path or "$PKG",
+            note=f"Engine deploy failed — re-run in situ with --components={components}",
+        )))
 
 
 def _ensure_default_sc(ctx: Ctx, sc: str = "local-path") -> bool:
@@ -615,8 +631,16 @@ def _apply_bundled_local_path(ctx: Ctx) -> Fix:
     MANUAL hint if the manifest wasn't staged next to the engine (--manifests-dir)."""
     path = Path(ctx.manifests_dir) / "local-path-provisioner.yaml" if ctx.manifests_dir else None
     if not path or not path.exists():
-        return Fix(False, "MANUAL: kubectl apply local-path-provisioner.yaml "
-                          "(bundled manifest not staged — pass --manifests-dir)")
+        return Fix(False, _manual.join_detail(
+            "MANUAL: kubectl apply local-path-provisioner.yaml "
+            "(bundled manifest not staged — pass --manifests-dir)",
+            _manual.hint_for("T0.5.provisioner") or _manual.block(
+                ["kc get sc; kc -n local-path-storage get pods 2>/dev/null"],
+                ["kc apply -f manifests/local-path-provisioner.yaml",
+                 "kc patch sc local-path -p "
+                 '\'{"metadata":{"annotations":'
+                 '{"storageclass.kubernetes.io/is-default-class":"true"}}}\''],
+            )))
     r = ctx.apply_yaml(path.read_text())
     return Fix(r.returncode == 0,
                f"applied bundled local-path-provisioner.yaml (node image): rc={r.returncode}")
@@ -1036,11 +1060,13 @@ def _rem_registry_running(ctx: Ctx) -> Fix:
     diagnose + second-pass cleanup for seed-registry deadline (partial Helm)."""
     actions = _pre_init_cleanup(ctx)
     if not ctx.have_zarf():
-        return Fix(False,
-                   "MANUAL: zarf binary missing (rc=127 class) — install Layer-A "
-                   f"v0.70.x to /usr/local/bin/zarf  [unwound: {'; '.join(actions)}]"
-                   if actions else
-                   "MANUAL: zarf binary missing — install Layer-A to /usr/local/bin/zarf")
+        head = (
+            "MANUAL: zarf binary missing (rc=127 class) — install Layer-A "
+            f"v0.70.x to /usr/local/bin/zarf  [unwound: {'; '.join(actions)}]"
+            if actions else
+            "MANUAL: zarf binary missing — install Layer-A to /usr/local/bin/zarf"
+        )
+        return Fix(False, _manual.join_detail(head, _manual.hint_for("T0.layer-a-zarf-tools")))
 
     # Prefer running init from the package directory so zarf-init-*.tar.zst is found.
     pkg_dir = None
@@ -1090,9 +1116,12 @@ def _rem_registry_running(ctx: Ctx) -> Fix:
             r = r2
 
     if r.returncode == 127:
-        return Fix(False, f"zarf init rc=127 (command not found / not executable): "
-                          f"{_diagnose_registry(ctx)}{tail}")
-    return Fix(False, f"zarf init rc={r.returncode}: {_diagnose_registry(ctx)}{tail}")
+        head = (f"zarf init rc=127 (command not found / not executable): "
+                f"{_diagnose_registry(ctx)}{tail}")
+        return Fix(False, _manual.join_detail(
+            head, _manual.hint_for("T0.layer-a-zarf-tools")))
+    head = f"zarf init rc={r.returncode}: {_diagnose_registry(ctx)}{tail}"
+    return Fix(False, _manual.join_detail(head, _manual.hint_for("T1.registry-running")))
 
 # --------------------------------------------------------------------------- #
 # T2 — images pushed to the internal registry (expensive)
@@ -1385,36 +1414,35 @@ def build_catalog(dynamic_provisioning: bool = False,
     modalities; only the T0.5 storage tier and ``T1.registry-running``'s dependency
     differ.
     """
+    # manual_hint SSOT: zarf/converge/manual.py HINTS (DISCOVER + FIX, copy-paste in situ).
+    H = _manual.hint_for
+
     inv: List[Invariant] = [
         Invariant("T0.api", "T0", "Kubernetes API reachable", Layer.B, _det_api,
-                  manual_hint="RKE2 down — `systemctl status rke2-server` on the control plane"),
+                  manual_hint=H("T0.api")),
         Invariant("T0.node-ready", "T0", "Nodes Ready and schedulable", Layer.B,
-                  _det_node_ready, _rem_node_ready, depends_on=("T0.api",)),
+                  _det_node_ready, _rem_node_ready, depends_on=("T0.api",),
+                  manual_hint=H("T0.node-ready")),
         Invariant("T0.system-plane", "T0",
                   "RKE2/system plane healthy (API, DNS, ingress controller observed)",
                   Layer.B, _platform.det_system_plane, _platform.rem_system_plane,
-                  depends_on=("T0.api",)),
+                  depends_on=("T0.api",), manual_hint=H("T0.system-plane")),
         Invariant("T0.kubelet-gc", "T0",
                   "Kubelet image-GC policy raised (protects Layer-A images on disk pressure)",
                   Layer.B, _platform.det_kubelet_gc_policy, _platform.rem_kubelet_gc_policy,
-                  depends_on=("T0.api",)),
+                  depends_on=("T0.api",), manual_hint=H("T0.kubelet-gc")),
         Invariant("T0.no-disk-pressure", "T0", "No disk-pressure taint (lenient eviction persisted)",
                   Layer.A, _det_no_disk_pressure, depends_on=("T0.api",),
-                  manual_hint="free disk SAFELY (never `crictl rmi --prune`; remove only the package "
-                              "tarball / journald / Failed pods) and ensure the RKE2 lenient-eviction "
-                              "config is applied (infra/aws/ansible/roles/rke2-*/templates)"),
+                  manual_hint=H("T0.no-disk-pressure")),
         # Layer-A tools: binary + init package must be on the node (rc=127 / air-gap init).
         Invariant("T0.layer-a-zarf-tools", "T0",
                   "Zarf binary + init package present (Layer A — CLOSURE)",
                   Layer.A, _det_layer_a_zarf_tools, depends_on=("T0.api",),
-                  manual_hint="Transport the release's `zarf` binary (v0.70.x) to "
-                              "/usr/local/bin and `zarf-init-amd64-v0.70.1.tar.zst` next to "
-                              "the deploy package in /var/tmp — never download air-gapped"),
+                  manual_hint=H("T0.layer-a-zarf-tools")),
         Invariant("T0.package-uniqueness", "T0",
                   "At most one cybersec-dask deploy package staged (mtime-safe)",
                   Layer.A, _platform.det_package_uniqueness, depends_on=("T0.api",),
-                  manual_hint="Remove extra zarf-package-cybersec-dask-amd64-*.tar.zst files; "
-                              "keep only the intended version (engine never deletes Layer-A)"),
+                  manual_hint=H("T0.package-uniqueness")),
     ]
 
     # T0.5 — storage. Resilient (default): the registry binds a claimRef hostPath PV,
@@ -1424,21 +1452,22 @@ def build_catalog(dynamic_provisioning: bool = False,
         inv += [
             Invariant("T0.layer-a-images", "T0", "Bootstrap images present (CLOSURE)", Layer.A,
                       _det_layer_a_images, depends_on=("T0.api",),
-                      manual_hint="a bootstrap image (local-path-provisioner/busybox) is missing from the "
-                                  "node's containerd. RE-IMPORT it from the package OCI layout or RKE2's "
-                                  "bundled-images dir — NEVER pull/prune (it cannot be re-fetched in air-gap)"),
+                      manual_hint=H("T0.layer-a-images")),
             Invariant("T0.5.sc-default", "T0.5", "Default StorageClass exists", Layer.B,
                       _det_sc_default, _rem_sc_default,
-                      depends_on=("T0.node-ready", "T0.layer-a-images")),
+                      depends_on=("T0.node-ready", "T0.layer-a-images"),
+                      manual_hint=H("T0.5.sc-default")),
             Invariant("T0.5.provisioner", "T0.5", "local-path-provisioner Running", Layer.B,
-                      _det_provisioner, _rem_provisioner, depends_on=("T0.5.sc-default",)),
+                      _det_provisioner, _rem_provisioner, depends_on=("T0.5.sc-default",),
+                      manual_hint=H("T0.5.provisioner")),
         ]
         registry_dep = ("T0.5.sc-default",)
     elif registry_pvc_enabled:
         inv += [
             Invariant("T0.5.registry-pv", "T0.5",
                       "Registry storage prebound (claimRef hostPath PV — no default SC needed)",
-                      Layer.B, _det_registry_pv, _rem_registry_pv, depends_on=("T0.node-ready",)),
+                      Layer.B, _det_registry_pv, _rem_registry_pv, depends_on=("T0.node-ready",),
+                      manual_hint=H("T0.5.registry-pv")),
         ]
         registry_dep = ("T0.5.registry-pv",)
     else:
@@ -1448,33 +1477,40 @@ def build_catalog(dynamic_provisioning: bool = False,
     inv += [
         Invariant("T1.registry-running", "T1", "Zarf internal registry initialized + Running",
                   Layer.B, _det_registry_running, _rem_registry_running, cost=Cost.EXPENSIVE,
-                  depends_on=registry_dep),
+                  depends_on=registry_dep, manual_hint=H("T1.registry-running")),
 
         Invariant("T2.images-pushed", "T2", "App images pushed to internal registry",
                   Layer.B, _det_images_pushed, _rem_images_pushed, cost=Cost.EXPENSIVE,
-                  depends_on=("T1.registry-running",)),
+                  depends_on=("T1.registry-running",), manual_hint=H("T2.images-pushed")),
 
         Invariant("T3.dask-operator", "T3", "Dask operator + CRDs", Layer.B,
-                  _det_operator, _rem_operator, depends_on=("T2.images-pushed",)),
+                  _det_operator, _rem_operator, depends_on=("T2.images-pushed",),
+                  manual_hint=H("T3.dask-operator")),
 
         Invariant("T4.scheduler", "T4", "Dask scheduler Ready", Layer.B,
-                  _det_scheduler, _rem_scheduler, depends_on=("T3.dask-operator",)),
+                  _det_scheduler, _rem_scheduler, depends_on=("T3.dask-operator",),
+                  manual_hint=H("T4.scheduler")),
         Invariant("T4.workers-capacity", "T4", "Workers fit schedulable capacity (no oversubscription)",
                   Layer.B, _det_workers_capacity, _rem_workers_capacity,
-                  depends_on=("T4.scheduler",)),
+                  depends_on=("T4.scheduler",), manual_hint=H("T4.workers-capacity")),
 
         Invariant("T5.otel-navigator", "T5", "otel-navigator Ready (2/2, fits memory)", Layer.B,
                   _det_otel_navigator, _rem_otel_navigator,
-                  depends_on=("T4.scheduler", "T4.workers-capacity")),
+                  depends_on=("T4.scheduler", "T4.workers-capacity"),
+                  manual_hint=H("T5.otel-navigator")),
         Invariant("T5.navigator-engine", "T5", "navigator-engine Ready", Layer.B,
-                  _det_engine, _rem_engine, depends_on=("T4.scheduler",)),
+                  _det_engine, _rem_engine, depends_on=("T4.scheduler",),
+                  manual_hint=H("T5.navigator-engine")),
         Invariant("T5.jupyterhub", "T5", "JupyterHub hub Ready", Layer.B,
-                  _det_jupyterhub, _rem_jupyterhub, depends_on=("T2.images-pushed",)),
+                  _det_jupyterhub, _rem_jupyterhub, depends_on=("T2.images-pushed",),
+                  manual_hint=H("T5.jupyterhub")),
         Invariant("T5.sample-notebooks", "T5", "Sample-notebooks ConfigMap present", Layer.B,
-                  _det_sample_notebooks, _rem_sample_notebooks, depends_on=("T2.images-pushed",)),
+                  _det_sample_notebooks, _rem_sample_notebooks, depends_on=("T2.images-pushed",),
+                  manual_hint=H("T5.sample-notebooks")),
 
         Invariant("T6.ingress", "T6", "Ingress resources present", Layer.B,
-                  _det_ingress, _rem_ingress, depends_on=("T5.otel-navigator",)),
+                  _det_ingress, _rem_ingress, depends_on=("T5.otel-navigator",),
+                  manual_hint=H("T6.ingress")),
     ]
     return inv
 

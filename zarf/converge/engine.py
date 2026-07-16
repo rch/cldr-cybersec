@@ -17,6 +17,7 @@ import time
 
 from .discovery import print_discovery, sweep_vestiges
 from .kube import Ctx
+from . import manual as _manual
 from .model import Cost, Eval, Invariant, Layer, Outcome
 
 MAX_PASSES = 12
@@ -88,10 +89,14 @@ def evaluate(ctx: Ctx, catalog: List[Invariant], apply_preview: bool = False
         if probe.ok:
             results[inv.id] = Eval(inv, Outcome.OK, probe.detail)
         elif inv.layer is Layer.A or inv.remediate is None:
-            hint = inv.manual_hint
-            results[inv.id] = Eval(inv, Outcome.MANUAL, f"{probe.detail} → {hint}")
+            results[inv.id] = Eval(
+                inv, Outcome.MANUAL,
+                _manual.join_detail(probe.detail, inv.manual_hint or _manual.hint_for(inv.id)))
         elif apply_preview:
-            results[inv.id] = Eval(inv, Outcome.WOULD_FIX, probe.detail)
+            # Preview: include the same in-situ recipe an operator would run.
+            results[inv.id] = Eval(
+                inv, Outcome.WOULD_FIX,
+                _manual.join_detail(probe.detail, inv.manual_hint or _manual.hint_for(inv.id)))
         else:
             results[inv.id] = Eval(inv, Outcome.FAILED, probe.detail)
     return results, order
@@ -142,7 +147,9 @@ def reconcile(ctx: Ctx, catalog: List[Invariant]) -> Tuple[Dict[str, Eval], List
                 continue
             if inv.layer is Layer.A or inv.remediate is None:
                 pass_results[inv.id] = Eval(
-                    inv, Outcome.MANUAL, f"{probe.detail} → {inv.manual_hint}")
+                    inv, Outcome.MANUAL,
+                    _manual.join_detail(
+                        probe.detail, inv.manual_hint or _manual.hint_for(inv.id)))
                 continue
             cost = " (expensive)" if inv.cost is Cost.EXPENSIVE else ""
             print(f"  remediating {inv.id}{cost}: {probe.detail}")
@@ -152,8 +159,13 @@ def reconcile(ctx: Ctx, catalog: List[Invariant]) -> Tuple[Dict[str, Eval], List
                 pass_results[inv.id] = Eval(inv, Outcome.REMEDIATED, fix.detail)
                 progress = True
             else:
-                pass_results[inv.id] = Eval(
-                    inv, Outcome.FAILED, f"{fix.detail}; still: {recheck.detail}")
+                # Rem failed: keep engine detail + attach DISCOVER/FIX if not already
+                # embedded (e.g. zarf deploy failures already include the recipe).
+                fail_detail = _manual.join_detail(
+                    f"{fix.detail}; still: {recheck.detail}",
+                    inv.manual_hint or _manual.hint_for(inv.id),
+                )
+                pass_results[inv.id] = Eval(inv, Outcome.FAILED, fail_detail)
                 if fix.changed:
                     progress = True
         results = pass_results
@@ -256,11 +268,20 @@ def closure_violations(results: Dict[str, Eval]) -> List[Eval]:
             if ev.inv.layer is Layer.A and ev.outcome is Outcome.MANUAL]
 
 
+def _print_detail_block(detail: str, indent: str = "            ") -> None:
+    """Print multi-line detail (DISCOVER/FIX recipes) with stable indentation."""
+    if not detail:
+        return
+    for line in detail.splitlines():
+        print(f"{indent}{line}" if line else indent.rstrip())
+
+
 def report(results: Dict[str, Eval], order: List[Invariant]) -> bool:
     """Print the status table; return True iff fully converged (all OK/REMEDIATED)."""
     print("\n  TIER  STATUS    INVARIANT")
     print("  ----  --------  " + "-" * 56)
     converged = True
+    needs_action: List[Eval] = []
     for inv in order:
         ev = results.get(inv.id)
         if ev is None:
@@ -269,22 +290,34 @@ def report(results: Dict[str, Eval], order: List[Invariant]) -> bool:
             converged = False
         print(f"  {inv.tier:<4}  {_SYMBOL[ev.outcome]:<8}  {inv.id}")
         if ev.outcome not in (Outcome.OK,):
-            print(f"            {ev.detail}")
+            # One-line summary in the table; full recipes in the IN SITU section below
+            # when multi-line, so the table stays scannable.
+            first = (ev.detail or "").splitlines()[0] if ev.detail else ""
+            if first:
+                print(f"            {first}")
+            if ev.outcome in (Outcome.MANUAL, Outcome.FAILED, Outcome.WOULD_FIX):
+                needs_action.append(ev)
 
     cv = closure_violations(results)
     if cv:
         print("\n  \033[35m── CLOSURE / CONSERVATION violations (operator action required) ──\033[0m")
         for ev in cv:
-            print(f"    • {ev.inv.id}: {ev.detail}")
+            print(f"    • {ev.inv.id}")
+            _print_detail_block(ev.detail, indent="      ")
         print("    These cannot be auto-fixed: a transported (Layer-A) artifact is missing or the")
         print("    node disk policy is wrong. Resolve, then re-run converge.")
 
-    manual = [ev for ev in results.values()
-              if ev.outcome is Outcome.MANUAL and ev.inv.layer is Layer.B]
-    if manual:
-        print("\n  Manual (engine couldn't act — likely zarf/package not on this host):")
-        for ev in manual:
-            print(f"    • {ev.inv.id}: {ev.detail}")
+    # Full in-situ DISCOVER + FIX for every non-OK Layer-B (and any Layer-A not in cv).
+    action_l_b = [ev for ev in needs_action if ev.inv.layer is Layer.B
+                  or ev.outcome is Outcome.FAILED]
+    if action_l_b:
+        print("\n  \033[35m── IN SITU (discovery + intervention; copy-paste on the node) ──\033[0m")
+        print("  Session setup once:")
+        for line in _manual.SETUP_PREAMBLE.strip().splitlines():
+            print(f"    {line}")
+        for ev in action_l_b:
+            print(f"\n  • {ev.inv.id}  [{ev.outcome.value}]  {ev.inv.title}")
+            _print_detail_block(ev.detail, indent="    ")
 
     print()
     print("  \033[32m✔ CONVERGED — deployment matches target state\033[0m" if converged
