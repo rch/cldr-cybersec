@@ -120,17 +120,19 @@ carry the S3 endpoint + credentials:
 2. Open **`OTEL_Data_Generator.ipynb`** (in the sample-notebooks the deploy mounted).
 3. Run all cells — it writes partitioned OTel parquet (`…/spans/date=…/hour=…/`) **and** the
    `_active_dataset.json` marker to the given bucket, using the pod's own env (no secrets typed).
-4. Prove the data path end-to-end (readiness probes cannot see it) — the in-pod S3 check from
-   [AIRGAP-DISCOVERY.md](AIRGAP-DISCOVERY.md) §9:
+4. Prove the data path end-to-end (readiness probes cannot see it). Prefer the staged script
+   (also run automatically at the end of `converge-node.sh verify|apply`, and as catalog
+   invariant **T5.s3-datapath**):
    ```bash
-   kubectl -n dask exec deploy/cybersec-dask-scheduler -- python -c "
-   import os, s3fs
-   fs = s3fs.S3FileSystem(key=os.environ.get('AWS_ACCESS_KEY_ID') or None,
-                          secret=os.environ.get('AWS_SECRET_ACCESS_KEY') or None,
-                          client_kwargs={'endpoint_url': os.environ.get('S3_ENDPOINT') or None})
-   b = os.environ.get('S3_BUCKET') or '<bucket>'
-   print('marker:', fs.exists(f'{b}/_active_dataset.json'))"
+   # Reads panel-viz ConfigMap (configured location), execs into otel-navigator (or
+   # dask scheduler), checks: auth, _active_dataset.json, span parquet readable.
+   # Secrets never leave the pod / never appear on argv.
+   sudo bash ~/cybersec-converge/scripts/verify-s3-datapath.sh
+   sudo bash ~/cybersec-converge/scripts/verify-s3-datapath.sh --json   # CI-friendly
+   # Auth only (empty bucket OK while seeding):
+   #   bash …/verify-s3-datapath.sh --allow-empty
    ```
+   Manual one-liner equivalent (AIRGAP-DISCOVERY.md §9) still works; the script is the SSOT.
 5. Load/refresh the app — it discovers the dataset from the marker; nothing is hardcoded.
 
 ## 7. Access the app + the embedded terminal (`switch` and friends)

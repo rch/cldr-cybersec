@@ -496,6 +496,28 @@ HINTS = {
         ],
         note="navigator-engine not Ready — redeploy; shared S3 config via panel-viz",
     ),
+    "T5.s3-datapath": block(
+        [
+            "kc -n panel-viz get cm otel-navigator-config "
+            "-o jsonpath='S3_BUCKET={.data.S3_BUCKET}{\"\\n\"}OTEL_DATA_PATH={.data.OTEL_DATA_PATH}{\"\\n\"}'",
+            "kc -n panel-viz get secret otel-navigator-credentials >/dev/null && echo creds:present",
+            "# Full probe (reads ConfigMap + exec into app/scheduler — no secrets on argv):",
+            "bash zarf/scripts/verify-s3-datapath.sh",
+            "bash zarf/scripts/verify-s3-datapath.sh --json   # machine-readable",
+            "# Auth only (bucket empty OK): bash zarf/scripts/verify-s3-datapath.sh --allow-empty",
+        ],
+        [
+            "# If blank S3 in ConfigMap → redeploy panel-viz with SETV/ZARF_CONFIG (T5.otel-navigator)",
+            "# If auth fails (403/InvalidAccessKey) → fix S3_* and redeploy panel-viz + dask-cluster",
+            "# If marker/parquet missing — data is operator-provided; seed in-cluster:",
+            "#   JupyterHub → OTEL_Data_Generator.ipynb (sample-notebooks) run-all",
+            "#   or: zarf/scripts/generate-otel-data.py from a pod with S3 env",
+            "# Re-check:",
+            "bash zarf/scripts/verify-s3-datapath.sh && echo datapath OK",
+        ],
+        note="S3 datapath: ConfigMap bucket must be reachable from the app and "
+             "_active_dataset.json + span parquet must be readable (spans already in place).",
+    ),
     "T5.jupyterhub": zarf_deploy_recipe(
         "jupyterhub,sample-notebooks",
         note="JupyterHub missing/broken — same as field unblock: "

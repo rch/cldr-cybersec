@@ -339,24 +339,35 @@ kc -n panel-viz get secret otel-navigator-credentials -o jsonpath='cred keys: {r
 kc -n dask get pods -l dask.org/component=scheduler -o jsonpath='{.items[0].spec.containers[0].env[?(@.name=="S3_ENDPOINT")].value}{"\n"}' 2>/dev/null
 ```
 
-Reachability **and auth** of the S3 endpoint from inside the cluster — exec the **already-running
-Dask scheduler** (its image has boto3, its env already carries the deployed creds; nothing is
-exposed, nothing is pulled — closure-safe). This catches the failure mode `verify` cannot see:
-pods all `Ready` but the data path dead (wrong endpoint/creds/bucket).
+Reachability **and auth** of the S3 endpoint from inside the cluster, **plus** that generated
+spans are readable (marker + parquet). Prefer the SSOT script (also catalog **T5.s3-datapath**
+and the trailing section of `converge-node.sh`):
+
+```bash
+# ConfigMap (configured location) → exec otel-navigator/scheduler → marker + span parquet
+bash zarf/scripts/verify-s3-datapath.sh
+bash zarf/scripts/verify-s3-datapath.sh --json
+```
+
+Manual one-liners (same checks, no script staged):
 
 ```bash
 kc -n panel-viz get configmap otel-navigator-config -o jsonpath='configured data path: {.data.OTEL_DATA_PATH}{"\n"}' 2>/dev/null
-kc -n dask exec deploy/cybersec-dask-scheduler -- python -c "
-import os, boto3
-from botocore.client import Config
-s3 = boto3.client('s3', endpoint_url=os.environ.get('S3_ENDPOINT') or None,
-                  region_name=os.environ.get('AWS_REGION') or 'us-east-1',
-                  config=Config(signature_version='s3v4', connect_timeout=5, retries={'max_attempts':1}))
-b = '<the-given-bucket>'   # set to the deployed S3_BUCKET
-s3.head_bucket(Bucket=b); n = s3.list_objects_v2(Bucket=b, MaxKeys=1)
-print('S3 AUTH OK — bucket reachable:', b, '| has objects:', n['KeyCount'] >= 1)
+# Prefer the app pod (same env as the UI); fall back to the Dask scheduler.
+kc -n panel-viz exec deploy/otel-navigator -c otel-navigator -- python -c "
+import os, json, s3fs
+b=os.environ['S3_BUCKET']; ep=os.environ.get('S3_ENDPOINT') or None
+kw=dict(key=os.environ['AWS_ACCESS_KEY_ID'], secret=os.environ['AWS_SECRET_ACCESS_KEY'],
+        client_kwargs={'endpoint_url': ep})
+if ep: kw['config_kwargs']={'s3':{'addressing_style':'path'}}
+fs=s3fs.S3FileSystem(**kw); fs.ls(b)
+m=json.load(fs.open(f'{b}/_active_dataset.json')); ds=m['dataset']
+files=fs.glob(f'{b}/{ds}/spans/**/*.parquet') or fs.glob(f'{b}/{ds}/**/*.parquet')
+print('AUTH+MARKER OK', 'dataset=', ds, 'parquet=', len(files), 'sample=', (files or [None])[0])
+open=fs.open; f=files[0]; open(f,'rb').read(64); print('READ OK', f)
 "
-# ConnectTimeoutError => endpoint unreachable from pods; 403 => wrong creds; 404 => wrong bucket.
+# ConnectTimeoutError => endpoint unreachable; 403 => wrong creds; 404 => wrong bucket;
+# marker missing / parquet=0 => seed OTEL_Data_Generator notebook (data already expected in target).
 ```
 
 | Confirm | Good | Red flag |

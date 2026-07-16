@@ -203,4 +203,19 @@ env PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH="$ZARF_DIR" KUBECONF
   python3 -u -m converge "${ARGS[@]}"
 RC=$?
 set -e
+
+# After verify/apply: if the staged tree has verify-s3-datapath.sh, surface a clear
+# human report (catalog T5.s3-datapath also gates converge). Skip on teardown.
+S3_SCRIPT=""
+for cand in "$ZARF_DIR/scripts/verify-s3-datapath.sh" "$SELF/verify-s3-datapath.sh"; do
+  [ -f "$cand" ] && S3_SCRIPT="$cand" && break
+done
+if [ -n "$S3_SCRIPT" ] && [ "$MODE" != "teardown" ]; then
+  echo ""
+  echo "── S3 datapath (configured bucket + marker + span parquet) ──"
+  set +e
+  bash "$S3_SCRIPT" || true
+  set -e
+fi
+
 exit "$RC"

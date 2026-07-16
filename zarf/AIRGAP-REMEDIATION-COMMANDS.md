@@ -428,7 +428,31 @@ kc -n panel-viz get cm otel-navigator-config \
 curl -sS -o /dev/null -w '%{http_code}\n' --connect-timeout 3 http://127.0.0.1:30506/otel-navigator
 ```
 
+### T5.s3-datapath — configured S3 + generated spans readable
+
+Pods can be Ready while the data path is dead. **SSOT script** (no secrets on argv;
+reads ConfigMap + exec into app/scheduler):
+
+```bash
+bash zarf/scripts/verify-s3-datapath.sh          # human report; exit 0/1
+bash zarf/scripts/verify-s3-datapath.sh --json   # machine-readable
+bash zarf/scripts/verify-s3-datapath.sh --allow-empty   # auth only (pre-seed)
+```
+
+| Failure | Meaning | Fix |
+|---|---|---|
+| blank ConfigMap bucket | panel-viz rendered empty S3 | redeploy with SETV (T5.otel-navigator) |
+| akid_len=0 | secret never templated | redeploy panel-viz + dask-cluster with ZARF_CONFIG secrets |
+| cannot list bucket | endpoint/network/creds | fix S3_ENDPOINT / keys; path-style used when endpoint set |
+| marker missing | no `_active_dataset.json` | run `OTEL_Data_Generator.ipynb` or `generate-otel-data.py` |
+| parquet_count=0 | marker points at empty prefix | re-generate spans under `{dataset}/spans/` |
+| sample unreadable | list OK, GET fails | bucket policy / path-style / gateway |
+
+`converge --verify` includes **T5.s3-datapath** (depends on otel-navigator + scheduler).
+`converge-node.sh` also prints the script report after every verify/apply.
+
 ---
+
 
 
 ## Teardown — clean-slate the Layer-B app stack (registry/SC + images CONSERVED)

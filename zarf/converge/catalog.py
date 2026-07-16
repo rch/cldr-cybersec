@@ -1519,6 +1519,134 @@ def _rem_engine(ctx: Ctx) -> Fix:
                    _manual.hint_for("T5.navigator-engine")))
 
 
+# --------------------------------------------------------------------------- #
+# T5.s3-datapath — app can reach configured S3 and read generated spans
+# --------------------------------------------------------------------------- #
+# TCP readiness cannot see this. SSOT for the human/CI path is
+# zarf/scripts/verify-s3-datapath.sh; detect shells to it when staged, else
+# runs the same in-cluster probe via kubectl exec (no secrets on argv).
+
+_S3_DATAPATH_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "verify-s3-datapath.sh"
+
+# Compact in-pod probe (mirrors verify-s3-datapath.sh / otel-navigator loader).
+_S3_DATAPATH_PY = r"""
+import json, os, sys
+bucket = (os.environ.get("S3_BUCKET") or "").strip()
+akid = os.environ.get("AWS_ACCESS_KEY_ID") or ""
+secret = os.environ.get("AWS_SECRET_ACCESS_KEY") or ""
+endpoint = (os.environ.get("S3_ENDPOINT") or "").strip()
+region = (os.environ.get("AWS_REGION") or "us-east-1").strip()
+out = {"ok": False, "bucket": bucket, "akid_len": len(akid), "endpoint_set": bool(endpoint)}
+if not bucket:
+    out["error"] = "S3_BUCKET empty in pod"; print(json.dumps(out)); sys.exit(1)
+if not akid or not secret:
+    out["error"] = "AWS keys empty in pod env"; print(json.dumps(out)); sys.exit(1)
+import s3fs
+kw = {"key": akid, "secret": secret,
+      "client_kwargs": {"endpoint_url": endpoint or None, "region_name": region}}
+if endpoint:
+    kw["config_kwargs"] = {"s3": {"addressing_style": "path"}}
+tok = os.environ.get("AWS_SESSION_TOKEN") or ""
+if tok:
+    kw["token"] = tok
+fs = s3fs.S3FileSystem(**kw)
+try:
+    fs.ls(bucket)
+except Exception as e:
+    out["error"] = f"list bucket: {type(e).__name__}: {e}"; print(json.dumps(out)); sys.exit(1)
+mk = f"{bucket}/_active_dataset.json"
+if not fs.exists(mk):
+    out["error"] = f"marker missing s3://{mk}"; print(json.dumps(out)); sys.exit(1)
+with fs.open(mk, "r") as f:
+    marker = json.load(f)
+ds = marker.get("dataset") or marker.get("prefix")
+if not ds:
+    out["error"] = "marker has no dataset"; print(json.dumps(out)); sys.exit(1)
+files = []
+for pat in (f"{bucket}/{ds}/spans/**/*.parquet",
+            f"{bucket}/{ds}/**/spans/**/*.parquet",
+            f"{bucket}/{ds}/**/*.parquet"):
+    try:
+        files = list(fs.glob(pat)) or []
+    except Exception:
+        files = []
+    if files:
+        break
+out["dataset"] = ds
+out["parquet_count"] = len(files)
+if not files:
+    out["error"] = f"no parquet under s3://{bucket}/{ds}/"; print(json.dumps(out)); sys.exit(1)
+with fs.open(files[0], "rb") as f:
+    f.read(64)
+out["ok"] = True
+out["sample"] = files[0]
+print(json.dumps(out))
+"""
+
+
+def _det_s3_datapath(ctx: Ctx) -> Probe:
+    """Configured bucket reachable from the app pod; marker + span parquet readable.
+
+    Data is operator-provided (or notebook-generated) — engine never fetches.
+    Failures are MANUAL (fix endpoint/creds, or seed spans under the marker path).
+    """
+    s3i = _panel_s3_config_issue(ctx)
+    if s3i:
+        return Probe(False, s3i)
+
+    # Prefer the staged script (full diagnosis, human + --json).
+    if _S3_DATAPATH_SCRIPT.is_file():
+        import subprocess
+        env = {**os.environ}
+        r = subprocess.run(
+            ["bash", str(_S3_DATAPATH_SCRIPT), "--quiet", "--json"],
+            capture_output=True, text=True, timeout=180, env=env,
+        )
+        raw = (r.stdout or "").strip() or (r.stderr or "").strip()
+        try:
+            # last JSON object in output
+            line = raw.strip().splitlines()[-1] if raw else "{}"
+            data = json.loads(line)
+        except (json.JSONDecodeError, IndexError):
+            data = {}
+        if r.returncode == 0 and data.get("ok"):
+            m = data.get("marker") or {}
+            return Probe(
+                True,
+                f"S3 OK bucket={data.get('bucket_configmap')} "
+                f"dataset={m.get('dataset')} parquet={data.get('parquet_count')}",
+            )
+        err = data.get("error") or raw[-300:] or f"verify-s3-datapath rc={r.returncode}"
+        return Probe(False, f"S3 datapath: {err}")
+
+    # Fallback: kubectl exec into otel-navigator (or dask scheduler).
+    target = None  # (ns, resource, extra_args)
+    if ctx.pods_ready(_PANEL_NS, "app=otel-navigator")[0] >= 1:
+        target = (_PANEL_NS, "deploy/otel-navigator", ["-c", "otel-navigator"])
+    elif ctx.pods_ready("dask", "dask.org/component=scheduler")[0] >= 1:
+        target = ("dask", "deploy/cybersec-dask-scheduler", [])
+    if not target:
+        return Probe(False, "no Ready otel-navigator or dask scheduler to probe S3")
+    ns, res, extra = target
+    r = ctx.run(
+        ctx.kubectl + ["exec", "-n", ns, res] + extra + ["--", "python3", "-c", _S3_DATAPATH_PY],
+        timeout=120,
+    )
+    raw = (r.stdout or "").strip()
+    try:
+        data = json.loads(raw.splitlines()[-1]) if raw else {}
+    except json.JSONDecodeError:
+        data = {}
+    if r.returncode == 0 and data.get("ok"):
+        return Probe(
+            True,
+            f"S3 OK bucket={data.get('bucket')} dataset={data.get('dataset')} "
+            f"parquet={data.get('parquet_count')}",
+        )
+    err = data.get("error") or (r.stderr or raw or f"rc={r.returncode}")[-300:]
+    return Probe(False, f"S3 datapath: {err}")
+
+
 def _det_jupyterhub(ctx: Ctx) -> Probe:
     """Hub must be Ready; package uses sqlite-memory + singleuser storage none
     (no PVC). Any jupyterhub PVC is a vestige from an older chart and a wedge."""
@@ -1739,6 +1867,12 @@ def build_catalog(dynamic_provisioning: bool = False,
         Invariant("T5.sample-notebooks", "T5", "Sample-notebooks ConfigMap present", Layer.B,
                   _det_sample_notebooks, _rem_sample_notebooks, depends_on=("T2.images-pushed",),
                   manual_hint=H("T5.sample-notebooks")),
+        # Data path: Ready pods ≠ app can load spans. Layer-B detect-only — seed data
+        # / fix creds is operator action (script: zarf/scripts/verify-s3-datapath.sh).
+        Invariant("T5.s3-datapath", "T5",
+                  "Configured S3 reachable; active-dataset marker + span parquet readable",
+                  Layer.B, _det_s3_datapath, depends_on=("T5.otel-navigator", "T4.scheduler"),
+                  manual_hint=H("T5.s3-datapath")),
 
         Invariant("T6.ingress", "T6", "Ingress resources present", Layer.B,
                   _det_ingress, _rem_ingress, depends_on=("T5.otel-navigator",),
