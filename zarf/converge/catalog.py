@@ -1391,6 +1391,161 @@ def _diagnose_panel(ctx: Ctx, which: str = "otel-navigator") -> str:
     return "; ".join(bits) if bits else "no panel issues detected"
 
 
+def _panel_live_state(ctx: Ctx) -> str:
+    """Compact multi-line snapshot of panel-viz for verify / MANUAL guidance.
+
+    Always safe to print: never secret values — only bucket name, path, key
+    presence, pod readiness, and the recommended intervention class.
+    """
+    lines: List[str] = ["LIVE STATE (panel-viz):"]
+    if not ctx.exists("namespace", _PANEL_NS):
+        lines.append("  namespace: ABSENT — need zarf package deploy --components=panel-viz")
+        return "\n".join(lines)
+    lines.append(f"  namespace: {_PANEL_NS} present")
+
+    cm = ctx.get("configmap", _PANEL_CM, ns=_PANEL_NS)
+    if not cm:
+        lines.append(f"  configmap/{_PANEL_CM}: ABSENT")
+    else:
+        data = cm.get("data") or {}
+        bucket = (data.get("S3_BUCKET") or "").strip()
+        path = (data.get("OTEL_DATA_PATH") or "").strip()
+        region = (data.get("AWS_REGION") or "").strip()
+        lines.append(f"  configmap/{_PANEL_CM}:")
+        lines.append(f"    S3_BUCKET={bucket!r}  OTEL_DATA_PATH={path!r}  AWS_REGION={region!r}")
+        want = (ctx.s3.get("S3_BUCKET") or "").strip()
+        if want:
+            lines.append(f"    converge S3_BUCKET={want!r}  "
+                         f"{'MATCH' if want == bucket else 'DRIFT — will patch/redeploy'}")
+        elif not bucket or path in ("s3:///", "s3://", ""):
+            lines.append("    ⚠ blank/unrendered S3 — provide --creds-file / S3_* then "
+                         "converge --apply (config-only patch if deploys exist)")
+
+    sec = ctx.get("secret", _PANEL_SECRET, ns=_PANEL_NS)
+    if not sec:
+        lines.append(f"  secret/{_PANEL_SECRET}: ABSENT")
+    else:
+        sdata = sec.get("data") or {}
+        keys = sorted(sdata.keys())
+        has_ak = bool(sdata.get("AWS_ACCESS_KEY_ID"))
+        has_sk = bool(sdata.get("AWS_SECRET_ACCESS_KEY"))
+        has_ep = bool(sdata.get("S3_ENDPOINT"))
+        lines.append(
+            f"  secret/{_PANEL_SECRET}: keys={keys}  "
+            f"AKID={'yes' if has_ak else 'NO'} SECRET={'yes' if has_sk else 'NO'} "
+            f"ENDPOINT={'yes' if has_ep else 'no'}"
+        )
+
+    for sel, label, n_expect in (
+        ("app=otel-navigator", "otel-navigator", 2),
+        ("app=navigator-engine", "navigator-engine", 1),
+    ):
+        ready, total = ctx.pods_ready(_PANEL_NS, sel)
+        issues = _panel_workload_issues(ctx, sel, expect_containers=n_expect)
+        lines.append(f"  {label}: ready {ready}/{total}"
+                     + (f"  issues=[{'; '.join(issues[:3])}]" if issues else "  OK"))
+
+    s3i = _panel_s3_config_issue(ctx)
+    if s3i:
+        lines.append(f"  config verdict: FAIL — {s3i}")
+        if ctx.s3.get("S3_BUCKET"):
+            lines.append("  recommended: config-only rem "
+                         "(patch CM/Secret from converge S3_* + rollout restart) "
+                         "— no package required if Deployments already exist")
+        else:
+            lines.append("  recommended: supply S3_BUCKET/S3_ACCESS_KEY/S3_SECRET_KEY "
+                         "(--creds-file) then converge --apply")
+    else:
+        lines.append("  config verdict: CM/Secret look populated")
+        lines.append("  next: bash zarf/scripts/verify-s3-datapath.sh  "
+                     "(auth + marker + span parquet)")
+    return "\n".join(lines)
+
+
+def _panel_deployments_exist(ctx: Ctx) -> bool:
+    return bool(
+        ctx.exists("deploy", "otel-navigator", ns=_PANEL_NS)
+        or ctx.exists("deployment", "otel-navigator", ns=_PANEL_NS)
+    )
+
+
+def _patch_panel_s3_config(ctx: Ctx) -> Fix:
+    """Config-only remediation: write S3 settings from ctx.s3 into the live
+    ConfigMap + Secret and rollout-restart panel apps — **no zarf package**.
+
+    Use when Deployments already exist and the failure is blank/drifted S3
+    config (the common air-gap field case). Secrets never printed.
+    """
+    bucket = (ctx.s3.get("S3_BUCKET") or "").strip()
+    if not bucket:
+        return Fix(False, "config-only rem needs S3_BUCKET in converge context")
+    if not _panel_deployments_exist(ctx):
+        return Fix(False, "config-only rem needs existing otel-navigator Deployment "
+                          "(use zarf package deploy --components=panel-viz)")
+    if not ctx.exists("configmap", _PANEL_CM, ns=_PANEL_NS):
+        return Fix(False, f"{_PANEL_CM} absent — need component deploy to create objects")
+
+    region = (ctx.s3.get("S3_REGION") or "us-east-1").strip()
+    endpoint = (ctx.s3.get("S3_ENDPOINT") or "").strip()
+    path = f"s3://{bucket}/"
+    actions: List[str] = []
+
+    cm_patch = {
+        "data": {
+            "S3_BUCKET": bucket,
+            "OTEL_DATA_PATH": path,
+            "AWS_REGION": region,
+        }
+    }
+    r = ctx.k(["patch", "configmap", _PANEL_CM, "-n", _PANEL_NS,
+               "--type", "merge", "-p", json.dumps(cm_patch)])
+    if r.returncode != 0:
+        return Fix(False, f"patch {_PANEL_CM} failed: {(r.stderr or r.stdout or '')[:200]}")
+    actions.append(f"patched {_PANEL_CM} S3_BUCKET={bucket} OTEL_DATA_PATH={path}")
+
+    # stringData lets the API server base64-encode; never log values.
+    string_data: dict = {}
+    if ctx.s3.get("S3_ACCESS_KEY"):
+        string_data["AWS_ACCESS_KEY_ID"] = ctx.s3["S3_ACCESS_KEY"]
+    if ctx.s3.get("S3_SECRET_KEY"):
+        string_data["AWS_SECRET_ACCESS_KEY"] = ctx.s3["S3_SECRET_KEY"]
+    if ctx.s3.get("S3_SESSION_TOKEN") is not None:
+        string_data["AWS_SESSION_TOKEN"] = ctx.s3.get("S3_SESSION_TOKEN") or ""
+    string_data["S3_ENDPOINT"] = endpoint
+
+    if ctx.exists("secret", _PANEL_SECRET, ns=_PANEL_NS):
+        r = ctx.k(["patch", "secret", _PANEL_SECRET, "-n", _PANEL_NS,
+                   "--type", "merge", "-p", json.dumps({"stringData": string_data})])
+        if r.returncode != 0:
+            return Fix(False,
+                       f"patch {_PANEL_SECRET} failed: {(r.stderr or r.stdout or '')[:200]}  "
+                       f"[{'; '.join(actions)}]")
+        actions.append(f"patched {_PANEL_SECRET} (AKID/SECRET/ENDPOINT; values not logged)")
+    else:
+        # Create via apply stringData (avoids --from-literal on process table).
+        sec_obj = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": _PANEL_SECRET, "namespace": _PANEL_NS},
+            "type": "Opaque",
+            "stringData": string_data,
+        }
+        r = ctx.apply_yaml(json.dumps(sec_obj))  # JSON is valid YAML
+        if r.returncode != 0:
+            return Fix(False, f"create {_PANEL_SECRET} failed: {(r.stderr or '')[:200]}")
+        actions.append(f"created {_PANEL_SECRET}")
+
+    for dep in ("otel-navigator", "navigator-engine"):
+        if ctx.exists("deploy", dep, ns=_PANEL_NS) or ctx.exists("deployment", dep, ns=_PANEL_NS):
+            rr = ctx.k(["rollout", "restart", f"deployment/{dep}", "-n", _PANEL_NS])
+            if rr.returncode == 0:
+                actions.append(f"rollout restart deployment/{dep}")
+            else:
+                actions.extend(_recycle_panel_pods(ctx, f"app={dep}"))
+
+    return Fix(True, "config-only: " + "; ".join(actions))
+
+
 def _recycle_panel_pods(ctx: Ctx, selector: str) -> List[str]:
     """Force-delete pods so a stuck rollout/CrashLoop gets a clean schedule."""
     actions: List[str] = []
@@ -1405,39 +1560,79 @@ def _det_otel_navigator(ctx: Ctx) -> Probe:
     """Target: otel-navigator 2/2 Ready AND S3 config non-brick AND no image drift.
 
     Ready-only was insufficient: field pods stayed Ready with blank S3_BUCKET
-    (TCP :5006 up) while the UI/data path was dead.
+    (TCP :5006 up) while the UI/data path was dead. Probe detail always includes
+    LIVE STATE so ``converge --verify`` guides manual intervention.
     """
+    live = _panel_live_state(ctx)
     s3i = _panel_s3_config_issue(ctx)
     issues = _panel_workload_issues(ctx, "app=otel-navigator", expect_containers=2)
     ready, total = ctx.pods_ready(_PANEL_NS, "app=otel-navigator")
     if s3i:
-        # Config is wrong even if Ready — still FAIL so rem redeploys with S3.
-        return Probe(False, s3i + (f"; ready {ready}/{total}" if total else ""))
+        head = s3i + (f"; ready {ready}/{total}" if total else "")
+        return Probe(False, f"{head}\n{live}")
     if issues:
-        return Probe(False, "; ".join(issues[:4]))
+        return Probe(False, f"{'; '.join(issues[:4])}\n{live}")
     if ready < 1:
-        return Probe(False, f"otel-navigator ready {ready}/{total}")
+        return Probe(False, f"otel-navigator ready {ready}/{total}\n{live}")
     return Probe(True, f"otel-navigator ready {ready}/{total} (2-container, S3 config OK)")
 
 
 def _rem_otel_navigator(ctx: Ctx) -> Fix:
     """Heal panel-viz (otel-navigator + sidecar + shared CM/Secret).
 
-    Order (field-proven paths):
+    Order (prefer lightest change that unblocks):
       1. Refuse blank S3 if converge has no S3_BUCKET (would re-brick).
-      2. ``zarf package deploy --components=cybersec-images,panel-viz``
-         (push + redeploy; dead-helm remove-retry inside _zarf_deploy_components).
-      3. If still broken: force-delete pods (stuck CrashLoop / old RS).
-      4. Optional co-heal: if engine missing and S3 present, deploy navigator-engine
-         (PTY/terminal path; separate invariant also covers it).
+      2. **Config-only** when Deployments exist and the failure is S3 CM/Secret
+         (patch from ctx.s3 + rollout restart — no package required).
+      3. Capacity cap when Pending.
+      4. ``zarf package deploy --components=cybersec-images,panel-viz`` when
+         missing objects / image pull / drift / config-only insufficient.
+      5. Force-delete stuck pods; co-deploy engine if absent.
     """
     actions: List[str] = []
     diag = _diagnose_panel(ctx, "otel-navigator")
     s3i = _panel_s3_config_issue(ctx)
     if s3i and not ctx.s3.get("S3_BUCKET"):
         return Fix(False, _manual.join_detail(
-            f"MANUAL: panel S3 config broken and no S3_BUCKET given to converge — {s3i}",
+            f"MANUAL: panel S3 config broken and no S3_BUCKET given to converge — {s3i}\n"
+            f"{_panel_live_state(ctx)}",
             _manual.hint_for("T5.otel-navigator")))
+
+    # --- Config-only path (existing deployment + operator-supplied S3_*) -----
+    # Covers: blank bucket, unrendered templates, bucket drift, missing secret keys.
+    workload = _panel_workload_issues(ctx, "app=otel-navigator", expect_containers=2)
+    needs_package = (
+        not _panel_deployments_exist(ctx)
+        or any(
+            x in " ".join(workload)
+            for x in ("ImagePull", "image drift", "no pods and no Deployment",
+                      "namespace absent")
+        )
+    )
+    if s3i and ctx.s3.get("S3_BUCKET") and not needs_package:
+        cfg = _patch_panel_s3_config(ctx)
+        actions.append(cfg.detail)
+        if cfg.changed:
+            # Give kubelet a moment is the reconcile loop's job; re-detect now.
+            re = _det_otel_navigator(ctx)
+            # Config issue cleared even if pod not Ready yet counts as progress;
+            # still continue to recycle if workload issues remain.
+            if _panel_s3_config_issue(ctx) is None and not workload:
+                return Fix(True, " | ".join(actions))
+            if _panel_s3_config_issue(ctx) is None and re.ok:
+                return Fix(True, " | ".join(actions))
+            if _panel_s3_config_issue(ctx) is None:
+                # Config good; recycle for env pickup if still not ready
+                actions.extend(_recycle_panel_pods(ctx, "app=otel-navigator"))
+                re = _det_otel_navigator(ctx)
+                if re.ok or _panel_s3_config_issue(ctx) is None and not any(
+                        "CrashLoop" in w or "ImagePull" in w for w in workload):
+                    # Config fixed — report success if only readiness is settling
+                    if re.ok:
+                        return Fix(True, " | ".join(actions))
+                    # Config-only done; readiness may need another reconcile pass
+                    return Fix(True, " | ".join(actions)
+                               + f"  (config applied; pod settling: {re.detail.splitlines()[0]})")
 
     # Capacity: if Pending, try worker cap first (cheap) before expensive redeploy.
     pods = ctx.items("pods", ns=_PANEL_NS, selector="app=otel-navigator")
@@ -1446,66 +1641,89 @@ def _rem_otel_navigator(ctx: Ctx) -> Fix:
         if cap_fix.changed:
             actions.append(cap_fix.detail)
 
-    fix = _zarf_deploy_components(ctx, "cybersec-images,panel-viz")
-    actions.append(fix.detail)
+    if needs_package or _panel_s3_config_issue(ctx) or not _det_otel_navigator(ctx).ok:
+        if ctx.have_zarf() and ctx.package_path:
+            fix = _zarf_deploy_components(ctx, "cybersec-images,panel-viz")
+            actions.append(fix.detail)
+        elif _panel_s3_config_issue(ctx) and ctx.s3.get("S3_BUCKET"):
+            # No package — config-only is the only lever
+            cfg = _patch_panel_s3_config(ctx)
+            actions.append(cfg.detail)
+        elif not (ctx.have_zarf() and ctx.package_path):
+            return Fix(False, _manual.join_detail(
+                "MANUAL: package/zarf unavailable and config-only insufficient — "
+                f"{diag}\n{_panel_live_state(ctx)}",
+                _manual.hint_for("T5.otel-navigator")))
 
-    # Recycle if deploy claimed success but pods still wedged, or deploy failed
-    # with CrashLoop (new RS may need a kick; old pods may be terminating slowly).
     re = _det_otel_navigator(ctx)
     if not re.ok:
         actions.extend(_recycle_panel_pods(ctx, "app=otel-navigator"))
-        # second chance: deploy alone if first was images-only partial
-        if not fix.changed and ctx.have_zarf() and ctx.package_path:
+        if (ctx.have_zarf() and ctx.package_path
+                and not any("panel-viz" in a for a in actions)):
             fix2 = _zarf_deploy_components(ctx, "panel-viz")
             actions.append(f"retry panel-viz-only: {fix2.detail}")
-            fix = fix2 if fix2.changed else fix
 
     # Co-deploy engine when completely absent (shared CM; terminal path).
     eng_pods = ctx.items("pods", ns=_PANEL_NS, selector="app=navigator-engine")
     if not eng_pods and ctx.s3.get("S3_BUCKET") and ctx.have_zarf() and ctx.package_path:
         eng = _zarf_deploy_components(ctx, "navigator-engine")
         actions.append(f"co-deploy navigator-engine: {eng.detail}")
+    elif not eng_pods and ctx.s3.get("S3_BUCKET") and _panel_s3_config_issue(ctx) is None:
+        # Config was patched; engine deploy still needs package — note it
+        actions.append("navigator-engine absent — need zarf --components=navigator-engine "
+                       "or re-run apply with package")
 
     re = _det_otel_navigator(ctx)
-    detail = f"{' | '.join(actions)}"
+    detail = " | ".join(a for a in actions if a)
     if re.ok:
         return Fix(True, detail)
-    return Fix(fix.changed or bool(actions),
+    return Fix(bool(actions),
                _manual.join_detail(
-                   f"{detail}; still: {re.detail}; diag=[{diag}]",
+                   f"{detail}; still: {re.detail.splitlines()[0]}; diag=[{diag}]\n"
+                   f"{_panel_live_state(ctx)}",
                    _manual.hint_for("T5.otel-navigator")))
 
 
 def _det_engine(ctx: Ctx) -> Probe:
+    live = _panel_live_state(ctx)
     s3i = _panel_s3_config_issue(ctx)
     issues = _panel_workload_issues(ctx, "app=navigator-engine", expect_containers=1)
     ready, total = ctx.pods_ready(_PANEL_NS, "app=navigator-engine")
     # Engine shares otel-navigator-config — blank S3 is also an engine failure mode
     # (dataset commands / S3 listing via Dask).
     if s3i and total > 0:
-        return Probe(False, s3i + f"; engine ready {ready}/{total}")
+        return Probe(False, f"{s3i}; engine ready {ready}/{total}\n{live}")
     if issues:
-        return Probe(False, "; ".join(issues[:4]))
+        return Probe(False, f"{'; '.join(issues[:4])}\n{live}")
     if ready < 1:
-        return Probe(False, f"navigator-engine ready {ready}/{total}")
+        return Probe(False, f"navigator-engine ready {ready}/{total}\n{live}")
     return Probe(True, f"navigator-engine ready {ready}/{total}")
 
 
 def _rem_engine(ctx: Ctx) -> Fix:
-    """Heal navigator-engine; if shared S3 config is blank, redeploy panel-viz first
-    so the ConfigMap/Secret exist with real values (engine envFrom those objects)."""
+    """Heal navigator-engine. Prefer config-only patch of shared S3 when that is
+    the only failure; otherwise zarf deploy navigator-engine (+ panel-viz if needed)."""
     actions: List[str] = []
     s3i = _panel_s3_config_issue(ctx)
     if s3i and not ctx.s3.get("S3_BUCKET"):
         return Fix(False, _manual.join_detail(
-            f"MANUAL: shared panel S3 config broken — {s3i}",
+            f"MANUAL: shared panel S3 config broken — {s3i}\n{_panel_live_state(ctx)}",
             _manual.hint_for("T5.navigator-engine")))
-    if s3i and ctx.s3.get("S3_BUCKET"):
-        # Config owned by panel-viz component — must redeploy that first.
+    if s3i and ctx.s3.get("S3_BUCKET") and _panel_deployments_exist(ctx):
+        cfg = _patch_panel_s3_config(ctx)
+        actions.append(cfg.detail)
+        if _panel_s3_config_issue(ctx) is None and _det_engine(ctx).ok:
+            return Fix(True, " | ".join(actions))
+    if s3i and ctx.s3.get("S3_BUCKET") and ctx.have_zarf() and ctx.package_path:
         pf = _zarf_deploy_components(ctx, "cybersec-images,panel-viz")
         actions.append(f"panel-viz (S3 config): {pf.detail}")
-    fix = _zarf_deploy_components(ctx, "cybersec-images,navigator-engine")
-    actions.append(fix.detail)
+    if ctx.have_zarf() and ctx.package_path:
+        fix = _zarf_deploy_components(ctx, "cybersec-images,navigator-engine")
+        actions.append(fix.detail)
+    elif not actions:
+        return Fix(False, _manual.join_detail(
+            f"MANUAL: cannot deploy navigator-engine without package\n{_panel_live_state(ctx)}",
+            _manual.hint_for("T5.navigator-engine")))
     re = _det_engine(ctx)
     if not re.ok:
         actions.extend(_recycle_panel_pods(ctx, "app=navigator-engine"))
@@ -1513,9 +1731,11 @@ def _rem_engine(ctx: Ctx) -> Fix:
     detail = " | ".join(actions)
     if re.ok:
         return Fix(True, detail)
-    return Fix(fix.changed or bool(actions),
+    return Fix(bool(actions),
                _manual.join_detail(
-                   f"{detail}; still: {re.detail}; diag=[{_diagnose_panel(ctx, 'navigator-engine')}]",
+                   f"{detail}; still: {re.detail.splitlines()[0]}; "
+                   f"diag=[{_diagnose_panel(ctx, 'navigator-engine')}]\n"
+                   f"{_panel_live_state(ctx)}",
                    _manual.hint_for("T5.navigator-engine")))
 
 
@@ -1617,7 +1837,7 @@ def _det_s3_datapath(ctx: Ctx) -> Probe:
                 f"dataset={m.get('dataset')} parquet={data.get('parquet_count')}",
             )
         err = data.get("error") or raw[-300:] or f"verify-s3-datapath rc={r.returncode}"
-        return Probe(False, f"S3 datapath: {err}")
+        return Probe(False, f"S3 datapath: {err}\n{_panel_live_state(ctx)}")
 
     # Fallback: kubectl exec into otel-navigator (or dask scheduler).
     target = None  # (ns, resource, extra_args)
@@ -1626,7 +1846,9 @@ def _det_s3_datapath(ctx: Ctx) -> Probe:
     elif ctx.pods_ready("dask", "dask.org/component=scheduler")[0] >= 1:
         target = ("dask", "deploy/cybersec-dask-scheduler", [])
     if not target:
-        return Probe(False, "no Ready otel-navigator or dask scheduler to probe S3")
+        return Probe(False,
+                     f"no Ready otel-navigator or dask scheduler to probe S3\n"
+                     f"{_panel_live_state(ctx)}")
     ns, res, extra = target
     r = ctx.run(
         ctx.kubectl + ["exec", "-n", ns, res] + extra + ["--", "python3", "-c", _S3_DATAPATH_PY],
@@ -1644,7 +1866,7 @@ def _det_s3_datapath(ctx: Ctx) -> Probe:
             f"parquet={data.get('parquet_count')}",
         )
     err = data.get("error") or (r.stderr or raw or f"rc={r.returncode}")[-300:]
-    return Probe(False, f"S3 datapath: {err}")
+    return Probe(False, f"S3 datapath: {err}\n{_panel_live_state(ctx)}")
 
 
 def _det_jupyterhub(ctx: Ctx) -> Probe:

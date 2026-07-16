@@ -290,13 +290,23 @@ def report(results: Dict[str, Eval], order: List[Invariant]) -> bool:
             converged = False
         print(f"  {inv.tier:<4}  {_SYMBOL[ev.outcome]:<8}  {inv.id}")
         if ev.outcome not in (Outcome.OK,):
-            # One-line summary in the table; full recipes in the IN SITU section below
-            # when multi-line, so the table stays scannable.
+            # One-line summary in the table; full LIVE STATE + recipes in IN SITU.
             first = (ev.detail or "").splitlines()[0] if ev.detail else ""
             if first:
                 print(f"            {first}")
             if ev.outcome in (Outcome.MANUAL, Outcome.FAILED, Outcome.WOULD_FIX):
                 needs_action.append(ev)
+            # Panel stack: always expand LIVE STATE under the row during verify so
+            # operators see configured bucket / secret presence / pod issues without
+            # scrolling only the trailing section.
+            if inv.id.startswith("T5.") and "LIVE STATE" in (ev.detail or ""):
+                for line in (ev.detail or "").splitlines()[1:]:
+                    if line.startswith("LIVE STATE") or line.startswith("  "):
+                        print(f"            {line}")
+                    elif line.strip() == "":
+                        continue
+                    else:
+                        break
 
     cv = closure_violations(results)
     if cv:

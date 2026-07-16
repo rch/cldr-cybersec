@@ -447,37 +447,41 @@ HINTS = {
         _discover_for_components("cybersec-images,panel-viz") + [
             "kc get pods -A --field-selector=status.phase=Pending -o wide | head -20",
             "kc -n dask get pods -l dask.org/component=worker --field-selector=status.phase=Pending 2>/dev/null | head",
-            # NodePort smoke (from control plane)
             "curl -sS -o /dev/null -w 'nodeport30506:%{http_code}\\n' --connect-timeout 3 "
             "http://127.0.0.1:30506/otel-navigator || true",
+            "bash zarf/scripts/verify-s3-datapath.sh --allow-empty 2>/dev/null || true",
         ],
         [
             'export KUBECONFIG="${KUBECONFIG:-/etc/rancher/rke2/rke2.yaml}"',
             'export PATH="$PATH:/var/lib/rancher/rke2/bin"',
             'test -n "${S3_BUCKET:-}" || { echo "S3_BUCKET required"; exit 1; }',
-            'PKG="${PKG:-$PKG}"; test -f "$PKG" || { echo "set PKG to package tarball"; exit 1; }',
-            "# 1) capacity: if Pending, cap workers first (4Gi request needs a free node)",
+            "# ── A) CONFIG-ONLY (Deployments already exist; blank/wrong S3) ──",
+            "# Preferred when verify LIVE STATE says 'recommended: config-only rem'.",
+            "# Engine does this on --apply when S3_* given + deploys present.",
+            "kc -n panel-viz patch cm otel-navigator-config --type merge -p \"{\\\"data\\\":{"
+            "\\\"S3_BUCKET\\\":\\\"${S3_BUCKET}\\\","
+            "\\\"OTEL_DATA_PATH\\\":\\\"s3://${S3_BUCKET}/\\\","
+            "\\\"AWS_REGION\\\":\\\"${S3_REGION:-us-east-1}\\\"}}\"",
+            "kc -n panel-viz patch secret otel-navigator-credentials --type merge -p \"{\\\"stringData\\\":{"
+            "\\\"AWS_ACCESS_KEY_ID\\\":\\\"${S3_ACCESS_KEY}\\\","
+            "\\\"AWS_SECRET_ACCESS_KEY\\\":\\\"${S3_SECRET_KEY}\\\","
+            "\\\"S3_ENDPOINT\\\":\\\"${S3_ENDPOINT:-}\\\"}}\"",
+            "kc -n panel-viz rollout restart deploy/otel-navigator deploy/navigator-engine 2>/dev/null || true",
+            "kc -n panel-viz rollout status deploy/otel-navigator --timeout=180s",
+            "# ── B) PACKAGE path (missing ns/deploy, ImagePull, tag drift) ──",
+            'PKG="${PKG:-$PKG}"; test -f "$PKG" && zarf package deploy "$PKG" --confirm '
+            '--components=cybersec-images,panel-viz --retries 10 "${SETV[@]}"',
+            "# ── C) capacity if Pending ──",
             "TARGET=$(( $(kc get nodes --no-headers 2>/dev/null | wc -l) - 1 )); "
-            "[ \"$TARGET\" -lt 1 ] && TARGET=1; echo TARGET=$TARGET",
+            "[ \"${TARGET:-1}\" -lt 1 ] && TARGET=1",
             "kc -n dask patch daskcluster cybersec-dask --type merge "
             "-p \"{\\\"spec\\\":{\\\"worker\\\":{\\\"replicas\\\":$TARGET}}}\" 2>/dev/null || true",
-            "# 2) primary in-situ path — push image + redeploy panel (CM/Secret/S3)",
-            'zarf package deploy "$PKG" --confirm --components=cybersec-images,panel-viz '
-            '--retries 10 "${SETV[@]}"',
-            "# 3) if 'has no deployed releases': remove dead helm then re-deploy",
-            '#   zarf package remove "$PKG" --confirm --components=panel-viz',
-            "# 4) stuck CrashLoop / old RS: recycle pods",
             "kc -n panel-viz delete pod -l app=otel-navigator --force --grace-period=0 --wait=false",
-            "# 5) optional full stack: engine (terminal gRPC) + ingress (/ws)",
-            'zarf package deploy "$PKG" --confirm --components=navigator-engine,ingress '
-            '--retries 10 "${SETV[@]}"',
-            "# 6) verify",
-            "kc -n panel-viz get pods -o wide; "
-            "kc -n panel-viz get cm otel-navigator-config "
-            "-o jsonpath='S3_BUCKET={.data.S3_BUCKET}{\"\\n\"}'",
+            "# ── D) datapath (spans already in bucket) ──",
+            "bash zarf/scripts/verify-s3-datapath.sh",
         ],
-        note="otel-navigator broken/missing — multi-path heal (capacity → zarf panel-viz → "
-             "recycle → engine/ingress). Blank S3_BUCKET is a FAIL even if pod Ready.",
+        note="otel-navigator: prefer CONFIG-ONLY (patch CM/Secret + rollout) when deploys "
+             "exist; zarf package deploy when missing/ImagePull/drift. verify prints LIVE STATE.",
     ),
     "T5.navigator-engine": block(
         _discover_for_components("cybersec-images,navigator-engine"),
