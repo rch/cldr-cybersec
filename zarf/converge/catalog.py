@@ -1513,27 +1513,23 @@ def _patch_panel_s3_config(ctx: Ctx) -> Fix:
         string_data["AWS_SESSION_TOKEN"] = ctx.s3.get("S3_SESSION_TOKEN") or ""
     string_data["S3_ENDPOINT"] = endpoint
 
-    if ctx.exists("secret", _PANEL_SECRET, ns=_PANEL_NS):
-        r = ctx.k(["patch", "secret", _PANEL_SECRET, "-n", _PANEL_NS,
-                   "--type", "merge", "-p", json.dumps({"stringData": string_data})])
-        if r.returncode != 0:
-            return Fix(False,
-                       f"patch {_PANEL_SECRET} failed: {(r.stderr or r.stdout or '')[:200]}  "
-                       f"[{'; '.join(actions)}]")
-        actions.append(f"patched {_PANEL_SECRET} (AKID/SECRET/ENDPOINT; values not logged)")
-    else:
-        # Create via apply stringData (avoids --from-literal on process table).
-        sec_obj = {
-            "apiVersion": "v1",
-            "kind": "Secret",
-            "metadata": {"name": _PANEL_SECRET, "namespace": _PANEL_NS},
-            "type": "Opaque",
-            "stringData": string_data,
-        }
-        r = ctx.apply_yaml(json.dumps(sec_obj))  # JSON is valid YAML
-        if r.returncode != 0:
-            return Fix(False, f"create {_PANEL_SECRET} failed: {(r.stderr or '')[:200]}")
-        actions.append(f"created {_PANEL_SECRET}")
+    # Apply Secret via stdin (stringData) — never put key material on kubectl argv/ps.
+    sec_obj = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": _PANEL_SECRET, "namespace": _PANEL_NS},
+        "type": "Opaque",
+        "stringData": string_data,
+    }
+    r = ctx.apply_yaml(json.dumps(sec_obj))
+    if r.returncode != 0:
+        return Fix(False,
+                   f"apply {_PANEL_SECRET} failed: {(r.stderr or r.stdout or '')[:200]}  "
+                   f"[{'; '.join(actions)}]")
+    actions.append(
+        f"{'updated' if ctx.exists('secret', _PANEL_SECRET, ns=_PANEL_NS) else 'created'} "
+        f"{_PANEL_SECRET} via apply (AKID/SECRET/ENDPOINT; values not on argv)"
+    )
 
     for dep in ("otel-navigator", "navigator-engine"):
         if ctx.exists("deploy", dep, ns=_PANEL_NS) or ctx.exists("deployment", dep, ns=_PANEL_NS):
