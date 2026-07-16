@@ -1,4 +1,4 @@
-# Air-Gap Convergent Deploy — Operator Runbook (v1.6.3)
+# Air-Gap Convergent Deploy — Operator Runbook (v1.6.5)
 
 **Audience.** You have a single-node, air-gapped Kubernetes (RKE2) and need to stand up the
 cybersec-dask / OTEL Navigator stack with **no internet**. The node may already carry a **partial
@@ -10,7 +10,7 @@ deploy` path does not recover from these states; the convergence engine does.
 
 **How to read this document.**
 - **Part I** — the procedure. Step-by-step, assuming the automation produces the intended result
-  (it is validated 8/8 against induced wedge states on real air-gapped RKE2 before every release).
+  (it is validated 13/13 against induced wedge states on real air-gapped RKE2 before every release).
 - **Part II** — the manual equivalents: how to replicate, by hand, each procedure the engine
   automates — for when you want surgical control or the engine isn't available.
 - **Part III** — in-situ investigation: the methods for diagnosing and remediating **unforeseen**
@@ -53,16 +53,16 @@ Verify integrity (`sha256sum -c SHA256SUMS`), then place each asset:
 
 | Asset | Destination |
 |-------|-------------|
-| `zarf-package-cybersec-dask-amd64-1.6.3.tar.zst` | `/var/tmp/` — **keep only ONE version there** (discovery is newest-by-mtime) |
+| `zarf-package-cybersec-dask-amd64-1.6.5.tar.zst` | `/var/tmp/` — **keep only ONE version there** (discovery is newest-by-mtime) |
 | `zarf-init-amd64-v0.70.1.tar.zst` *(Layer A — the piece partial procedures most often lack)* | `/var/tmp/` (beside the deploy package) |
 | `zarf` *(v0.70.1 binary)* | `/usr/local/bin/zarf` (`chmod +x`) |
-| `cybersec-converge-1.6.3.tar.gz` *(the engine)* | unpack anywhere writable |
+| `cybersec-converge-1.6.5.tar.gz` *(the engine)* | unpack anywhere writable |
 
 ```bash
 sha256sum -c SHA256SUMS
 install -m0755 zarf /usr/local/bin/zarf
-mv zarf-package-cybersec-dask-amd64-1.6.3.tar.zst zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
-mkdir -p ~/cybersec-converge && tar xzf cybersec-converge-1.6.3.tar.gz -C ~/cybersec-converge
+mv zarf-package-cybersec-dask-amd64-1.6.5.tar.zst zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
+mkdir -p ~/cybersec-converge && tar xzf cybersec-converge-1.6.5.tar.gz -C ~/cybersec-converge
 ```
 
 ## 4. Converge — one command
@@ -495,8 +495,11 @@ states (detect → remediate → re-detect), not operator folklore:
 as the resilient attractor; drain-before-finalize; recreate-ns-before-namespaced-write;
 diagnose strings that name the unmet condition.
 
-Matrix: `just sandbox-test-fsm` — includes husk Service, PVC/ns split-brain, and
-hostPath permission inducers in addition to the v1.6.2/1.6.3 eight.
+Matrix: `just sandbox-test-fsm` — **13 cases, 13 passed (2026-07-15)**: the v1.6.2/1.6.3
+eight plus husk Service, PVC/ns split-brain, hostPath permissions (seed-deadline replay),
+dead helm release (`has no deployed releases` — failed first install, engine removes the
+component and fresh-installs), and kubectl-off-PATH (zarf actions run bare `kubectl`; the
+engine hands every zarf subprocess a PATH that resolves it, shim fallback included).
 
 ## Appendix E — always-on discovery + vestige sweep (v0.3.0 / package 1.6.4+)
 

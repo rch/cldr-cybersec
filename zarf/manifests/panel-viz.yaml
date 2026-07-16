@@ -105,7 +105,7 @@ spec:
       containers:
         - name: otel-navigator
           # Image will be rewritten by Zarf to use internal registry
-          image: localhost:5555/cybersec-dask:2025.2.0-fbc70781a3
+          image: localhost:5555/cybersec-dask:2025.2.0-111e854736
           imagePullPolicy: IfNotPresent
           # Serve OTEL Navigator with ghostty-web WASM assets for terminal
           command:
@@ -161,7 +161,7 @@ spec:
             failureThreshold: 5
         # PTY proxy sidecar: bridges terminal WebSocket to gRPC engine
         - name: pty-proxy
-          image: localhost:5555/cybersec-dask:2025.2.0-fbc70781a3
+          image: localhost:5555/cybersec-dask:2025.2.0-111e854736
           imagePullPolicy: IfNotPresent
           command:
             - python

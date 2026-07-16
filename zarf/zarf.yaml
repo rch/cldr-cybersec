@@ -2,7 +2,7 @@ kind: ZarfPackageConfig
 metadata:
   name: cybersec-dask
   description: Air-gap deployment package for Dask, JupyterHub, and Panel-Viz on RKE2
-  version: "1.6.4"
+  version: "1.6.5"
   architecture: amd64
   authors: Cybersec Toolkit Team
   url: https://github.com/cloudera/cybersec
@@ -123,7 +123,7 @@ components:
     images:
       # Custom Dask image with pre-baked Python dependencies (Panel, HoloViews, etc.)
       # Note: Use localhost:5555 for local builds, will be rewritten by Zarf during deploy
-      - localhost:5555/cybersec-dask:2025.2.0-fbc70781a3
+      - localhost:5555/cybersec-dask:2025.2.0-111e854736
       # Dask Kubernetes Operator
       - ghcr.io/dask/dask-kubernetes-operator:2024.1.0
 
@@ -225,7 +225,7 @@ components:
       - quay.io/jupyterhub/k8s-hub:4.0.0
       - quay.io/jupyterhub/configurable-http-proxy:4.5.5
       # User notebook environment uses the custom cybersec-dask image
-      - localhost:5555/cybersec-dask:2025.2.0-fbc70781a3
+      - localhost:5555/cybersec-dask:2025.2.0-111e854736
     charts:
       - name: jupyterhub
         namespace: jupyterhub
