@@ -345,6 +345,77 @@ post_hostpath_writable() {
   echo "    ✗ hostPath mode=${mode:-absent} (want 777)"; return 1
 }
 
+induce_dead_release() {   # THE 2026-07-15 field wedge: a chart whose FIRST install failed
+  # (only `failed` revisions, never deployed) → every helm upgrade refuses with
+  # "has no deployed releases", and the required dask-cluster rider blocks EVERY
+  # component deploy. Manufacture: rewrite ALL revisions of the dask-cluster-cr
+  # release to failed + delete the DaskCluster CR (as a failed install leaves it).
+  cat <<'PY' | on_node "cat > /tmp/sb-dead-release.py"
+import base64, gzip, json, subprocess
+KC = "/var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml".split()
+def k(*a, inp=None):
+    return subprocess.run(KC + list(a), capture_output=True, text=True, input=inp)
+o = json.loads(k("get", "secrets", "-A", "-l", "owner=helm", "-o", "json").stdout)
+touched = 0
+for s in o.get("items", []):
+    md, lab = s["metadata"], s["metadata"].get("labels", {}) or {}
+    try:
+        rel = json.loads(gzip.decompress(base64.b64decode(base64.b64decode(s["data"]["release"]))))
+    except Exception:
+        continue
+    if "dask-cluster-cr" not in (rel.get("chart", {}).get("metadata", {}) or {}).get("name", ""):
+        continue
+    rel["info"]["status"] = "failed"
+    blob = base64.b64encode(gzip.compress(json.dumps(rel).encode())).decode()
+    patch = {"data": {"release": base64.b64encode(blob.encode()).decode()},
+             "metadata": {"labels": {"status": "failed"}}}
+    r = k("patch", "secret", md["name"], "-n", md["namespace"], "--type=merge",
+          "-p", json.dumps(patch))
+    touched += 1 if r.returncode == 0 else 0
+print("revisions set to failed:", touched)
+r = k("delete", "daskcluster", "cybersec-dask", "-n", "dask", "--ignore-not-found", "--wait=false")
+print("daskcluster CR delete rc:", r.returncode)
+PY
+  on_node "sudo python3 /tmp/sb-dead-release.py" 2>&1 | sed 's/^/    induce: /'
+  # clear operator-created children so T4 detect fails and the deploy path runs
+  on_node "$KCTL -n dask delete deploy --all --wait=false" >/dev/null 2>&1 || true
+}
+
+induce_kubectl_off_path() {  # THE 2026-07-15 field wedge #2: zarf component actions run bare
+  # `kubectl`; on real RKE2 it lives only in /var/lib/rancher/rke2/bin (off root's
+  # PATH) — the dask-cluster S3-bucket after-action died `command not found` and the
+  # required rider blocked every deploy. Our provisioning MASKS this with a
+  # /usr/local/bin symlink — hide it, then force a dask-cluster redeploy so the
+  # after-action must run. Engine v0.4.2 must hand zarf a PATH that resolves kubectl.
+  on_node "sudo mv /usr/local/bin/kubectl /usr/local/bin/kubectl.sb-hidden 2>/dev/null; sudo mv /usr/bin/kubectl /usr/bin/kubectl.sb-hidden 2>/dev/null; true"
+  on_node "$KCTL -n dask delete daskcluster cybersec-dask --ignore-not-found --wait=false; $KCTL -n dask delete deploy --all --wait=false; true" >/dev/null 2>&1 || true
+}
+
+post_kubectl_path_healed() {
+  # kubectl must STILL be hidden (prove the engine shim/PATH did it, not the mask),
+  # and the scheduler must be back (deploy + after-action both succeeded)
+  local hidden sched
+  hidden="$(on_node "command -v kubectl >/dev/null 2>&1 && echo visible || echo hidden")"
+  sched="$(on_node "$KCTL -n dask get pods -l dask.org/component=scheduler --no-headers 2>/dev/null" | grep -c Running)" || true
+  on_node "sudo mv /usr/local/bin/kubectl.sb-hidden /usr/local/bin/kubectl 2>/dev/null; sudo mv /usr/bin/kubectl.sb-hidden /usr/bin/kubectl 2>/dev/null; true"
+  if [ "$hidden" = "hidden" ] && [ "${sched:-0}" -ge 1 ]; then
+    echo "    ↳ kubectl off PATH throughout, deploy+after-action succeeded, scheduler Running ✓"
+    return 0
+  fi
+  echo "    ✗ kubectl=$hidden (want hidden), scheduler Running=${sched:-0}"; return 1
+}
+
+post_dead_release_healed() {
+  # the release must have a DEPLOYED revision again + the CR + scheduler back
+  local dep sched
+  dep="$(on_node "$KCTL get secrets -A -l 'owner=helm,status=deployed' -o name 2>/dev/null | grep -c ." )" || true
+  sched="$(on_node "$KCTL -n dask get pods -l dask.org/component=scheduler --no-headers 2>/dev/null" | grep -c Running)" || true
+  if [ "${sched:-0}" -ge 1 ] && [ "${dep:-0}" -ge 1 ]; then
+    echo "    ↳ dead release healed: deployed revisions present, scheduler Running ✓"; return 0
+  fi
+  echo "    ✗ scheduler Running=${sched:-0}, deployed releases=${dep:-0}"; return 1
+}
+
 # ── the permutation matrix ────────────────────────────────────────────────────
 run_case "baseline (idempotent converge stays green)"   induce_baseline
 run_case "default StorageClass capture (the field bug)"  induce_default_sc
@@ -357,6 +428,8 @@ run_case "app namespace stuck Terminating (apply path)"   induce_terminating_ns 
 run_case "zarf husk Service only (no registry)"          induce_zarf_husk_service
 run_case "PVC Terminating + ns split-brain"              induce_pvc_terminating_split
 run_case "hostPath not writable (seed deadline class)"   induce_hostpath_perms post_hostpath_writable
+run_case "dead helm release (failed first install, no deployed rev)" induce_dead_release post_dead_release_healed
+run_case "kubectl off PATH (zarf action 'command not found')" induce_kubectl_off_path post_kubectl_path_healed
 
 on_node "$KCTL delete storageclass sb-fsm-default --ignore-not-found" >/dev/null 2>&1 || true
 

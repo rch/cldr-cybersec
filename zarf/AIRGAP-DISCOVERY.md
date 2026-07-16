@@ -262,6 +262,19 @@ kc get secrets -A -l 'owner=helm,status in (pending-install,pending-upgrade,pend
   && echo "⚠ WEDGED release(s) above — remediation §helm-pending" || echo "no wedged releases"
 ```
 
+**DEAD releases** are a distinct wedge: a release whose *first* install failed has only `failed`
+revisions in its history — no deployed revision to fall back to — and every later `helm upgrade`
+refuses with `has no deployed releases`, forever. Because required components ride every deploy,
+one dead release blocks EVERY component deploy. Detect (failed latest + no deployed/superseded
+anywhere in that release's history):
+
+```bash
+kc get secrets -A -l owner=helm -o custom-columns='NS:.metadata.namespace,RELEASE:.metadata.labels.name,VER:.metadata.labels.version,STATUS:.metadata.labels.status' \
+  | sort -k2,2 -k3,3n
+# a release showing ONLY failed status rows is DEAD — remediation §F2 (zarf package remove
+# the failing component, then redeploy: fresh INSTALL instead of the refused upgrade).
+```
+
 ---
 
 ## 7. T2 — App images pushed to the internal registry

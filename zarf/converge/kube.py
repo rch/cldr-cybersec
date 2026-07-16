@@ -44,6 +44,7 @@ class Ctx:
     timeout: int = 90
     verbose: bool = False
     _cap_cache: Optional[dict] = None
+    _zarf_path: Optional[str] = None        # cached PATH guaranteeing kubectl (see zarf())
 
     # ------------------------------------------------------------------ process
     def run(self, argv: List[str], timeout: Optional[int] = None,
@@ -122,7 +123,42 @@ class Ctx:
 
     def zarf(self, args: List[str], timeout: int = 1800,
              env: Optional[dict] = None) -> subprocess.CompletedProcess:
-        return self.run([str(self.zarf_bin)] + args, timeout=timeout, env=env)
+        # Zarf component actions run bare `kubectl` in a plain shell — but air-gap
+        # RKE2 nodes keep kubectl at /var/lib/rancher/rke2/bin, off root's PATH
+        # (field 2026-07-15: every dask-cluster after-action died `kubectl: command
+        # not found`, and the required-component rider blocked ALL deploys). Hand
+        # the zarf subprocess a PATH guaranteed to resolve kubectl, and a
+        # KUBECONFIG if the environment lacks one.
+        e = dict(env or {})
+        e.setdefault("PATH", self._path_with_kubectl())
+        if not os.environ.get("KUBECONFIG"):
+            rke2_kc = "/etc/rancher/rke2/rke2.yaml"
+            if os.access(rke2_kc, os.R_OK):
+                e.setdefault("KUBECONFIG", rke2_kc)
+        return self.run([str(self.zarf_bin)] + args, timeout=timeout, env=e)
+
+    def _path_with_kubectl(self) -> str:
+        """PATH for zarf subprocesses that is guaranteed to resolve `kubectl`:
+        the inherited PATH, plus known node locations, plus — if kubectl is
+        genuinely absent — a shim directory whose `kubectl` delegates to
+        `zarf tools kubectl` (always available: we ship the binary)."""
+        if self._zarf_path:
+            return self._zarf_path
+        path = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+        parts = path.split(os.pathsep)
+        for d in ("/var/lib/rancher/rke2/bin", "/var/lib/rancher/k3s/bin"):
+            if d not in parts and Path(d, "kubectl").exists():
+                path = path + os.pathsep + d
+        if not shutil.which("kubectl", path=path) and self.zarf_bin:
+            zarf_abs = shutil.which(str(self.zarf_bin)) or str(Path(self.zarf_bin).resolve())
+            import tempfile
+            shim_dir = tempfile.mkdtemp(prefix="converge-kubectl-shim-")
+            shim = Path(shim_dir, "kubectl")
+            shim.write_text(f'#!/bin/sh\nexec "{zarf_abs}" tools kubectl "$@"\n')
+            shim.chmod(0o755)
+            path = shim_dir + os.pathsep + path
+        self._zarf_path = path
+        return path
 
     # ------------------------------------------------------------------ derived
     def pod_image_missing(self, ns: str, selector: str) -> Optional[bool]:

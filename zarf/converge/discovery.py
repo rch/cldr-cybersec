@@ -313,9 +313,10 @@ def discover(ctx: Ctx) -> DiscoveryReport:
                 rep.add("warn", f"pv/{pname}", f"Available with stale claimRef to {cns}",
                         root="may block rebinding — clear or re-apply claimRef")
 
-    # --- helm pending ---
+    # --- helm pending + DEAD releases ---
     obj = ctx.kjson(["get", "secrets", "-A", "-l", "owner=helm"]) or {}
     latest: dict = {}
+    history: dict = {}   # (ns, release) -> set of all revision statuses
     for s in obj.get("items", []):
         md = s.get("metadata", {}) or {}
         lab = md.get("labels", {}) or {}
@@ -324,6 +325,7 @@ def discover(ctx: Ctx) -> DiscoveryReport:
         except (TypeError, ValueError):
             continue
         key = (md.get("namespace"), lab.get("name"))
+        history.setdefault(key, set()).add(lab.get("status"))
         if key not in latest or ver > latest[key][0]:
             latest[key] = (ver, md.get("name"), lab.get("status"), md.get("namespace"))
     for (ns, rel), (ver, name, status, _) in latest.items():
@@ -331,6 +333,16 @@ def discover(ctx: Ctx) -> DiscoveryReport:
             rep.add("wedge", f"helm/{ns}/{rel}",
                     f"latest rev {ver} status={status}",
                     root="delete pending secret so next deploy can proceed")
+        elif (status == "failed"
+              and not (history.get((ns, rel), set()) & {"deployed", "superseded"})):
+            # DEAD release (field-proven): first install failed, no revision ever
+            # deployed → every `helm upgrade` refuses with "has no deployed releases".
+            # The deploy path auto-recovers (zarf package remove <component> + retry).
+            rep.add("wedge", f"helm/{ns}/{rel}",
+                    f"DEAD release: rev {ver} failed, no deployed revision in history",
+                    root="helm upgrade will always fail 'has no deployed releases' — "
+                         "remove the component's failed chart and redeploy (engine "
+                         "auto-recovers on the next apply)")
 
     # --- junk / ImagePull pods (relationship walk sample) ---
     for ns in MANAGED_NAMESPACES:

@@ -540,6 +540,31 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
         env["ZARF_CONFIG"] = cfg_path
     try:
         r = ctx.zarf(args, env=env)
+
+        # DEAD HELM RELEASE — field-proven (2026-07-15): a chart whose FIRST install
+        # failed leaves a release with only `failed` revisions; every later
+        # `helm upgrade` refuses with "has no deployed releases" — forever. Because
+        # required components ride every deploy, ONE dead release (dask-cluster-cr in
+        # the field) blocks EVERY component deploy. The pending-* unwedge cannot see
+        # this state (status `failed`, not pending-*). Remedy is zarf's own
+        # recommendation: `zarf package remove` the failing COMPONENT (named in the
+        # error), then a fresh deploy INSTALLS instead of upgrading. One retry.
+        err = (r.stderr or "") + (r.stdout or "")
+        if r.returncode != 0 and "no deployed releases" in err and ctx.package_path:
+            try:
+                dead_comp = err.split('unable to deploy component "')[1].split('"')[0]
+            except IndexError:
+                dead_comp = components.split(",")[0]
+            rm = ctx.zarf(["package", "remove", ctx.package_path, "--confirm",
+                           f"--components={dead_comp}"], timeout=600)
+            note = (f"removed dead-release component {dead_comp!r} "
+                    f"(helm 'has no deployed releases'): rc={rm.returncode}")
+            r2 = ctx.zarf(args, env=env)
+            if r2.returncode == 0:
+                return Fix(True, f"zarf deploy {components}: rc=0 "
+                                 f"(retry after dead-release removal)  [{note}]{pre}")
+            pre += f"  [{note}]"
+            r = r2
     finally:
         if cfg_path:
             try:
