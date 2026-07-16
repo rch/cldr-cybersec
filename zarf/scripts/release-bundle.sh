@@ -36,9 +36,11 @@ mkdir -p "$OUT"
 #    Tarred so `tar xzf … -C <dir>` lays the files directly under <dir> (no wrapper dir).
 echo "→ building $(basename "$ENGINE_TGZ")"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
-mkdir -p "$STAGE/manifests"
+mkdir -p "$STAGE/manifests" "$STAGE/scripts"
 cp -R zarf/converge "$STAGE/"
 cp zarf/scripts/converge-node.sh "$STAGE/"
+# runbook §6 + converge-node.sh post-verify resolve this at <unpack>/scripts/
+cp zarf/scripts/verify-s3-datapath.sh "$STAGE/scripts/"
 cp zarf/artifacts.manifest.json "$STAGE/"
 cp zarf/manifests/local-path-provisioner.yaml "$STAGE/manifests/"
 for doc in AIRGAP-CONVERGE-RUNBOOK.md AIRGAP-CHEATSHEET.md \
