@@ -391,14 +391,45 @@ kc -n dask get deploy -l dask.org/component=worker --sort-by=.status.readyReplic
 kc -n dask get pods -l dask.org/component=worker -o wide
 ```
 
-## T5.otel-navigator — `Pending` (capacity)
-Same root cause — free a node by capping workers (above). Confirm it schedules:
+## T5.otel-navigator / panel stack — full remediation matrix
+
+The engine (`T5.otel-navigator`, `T5.navigator-engine`) walks this matrix on
+`converge --apply`. Use the same order by hand when driving install in situ.
+
+| Failure mode | DISCOVER | FIX |
+|---|---|---|
+| **Namespace / deploy missing** | `kc get ns panel-viz; kc -n panel-viz get deploy` | `zarf package deploy "$PKG" --confirm --components=cybersec-images,panel-viz --retries 10 "${SETV[@]}"` |
+| **Blank `S3_BUCKET` / `OTEL_DATA_PATH=s3:///`** (pod may still be Ready — TCP probe) | `kc -n panel-viz get cm otel-navigator-config -o jsonpath='…'` | Redeploy **with** S3 env (SETV + ZARF_CONFIG). Never redeploy with empty bucket. |
+| **ImagePullBackOff** | `kc -n panel-viz describe pod -l app=otel-navigator \| sed -n '/Events:/,$p'` | `--components=cybersec-images,panel-viz` (push then roll). If upstream refs: strip `zarf.dev/agent=ignore` on ns (§E). |
+| **Image tag drift** | compare running tag vs package | same deploy line (images + panel-viz) |
+| **Pending / unschedulable (4Gi)** | `kc get pods -A --field-selector=status.phase=Pending`; worker Pending count | Cap workers (T4.workers-capacity) **then** redeploy/recycle panel |
+| **CrashLoopBackOff / OOMKilled** | `kc -n panel-viz logs deploy/otel-navigator -c otel-navigator --tail=80` | redeploy; then `kc -n panel-viz delete pod -l app=otel-navigator --force --grace-period=0` |
+| **1/2 containers** (panel vs pty-proxy) | ready counts on containerStatuses | recycle pods; if pty-proxy can't reach engine → deploy `navigator-engine` |
+| **Dead Helm release** | helm secrets `failed` only; error `has no deployed releases` | `zarf package remove "$PKG" --confirm --components=panel-viz` then redeploy |
+| **navigator-engine down** | `kc -n panel-viz get pods,ep -l app=navigator-engine` | `--components=cybersec-images,navigator-engine` (if shared CM blank, panel-viz first) |
+| **UI up, terminal WS dead** | ingress paths; NodePort 30765 | `--components=ingress`; optional `PTY_PROXY_WS=ws://<node>:30765` |
+| **vpc-flow-generator broken** | `kc -n panel-viz get deploy vpc-flow-generator` | best-effort only — does **not** block panel-viz component (wait removed) |
+
 ```bash
-kc -n panel-viz describe pod -l app=otel-navigator | sed -n '/Events:/,$p' | tail -8
-kc -n panel-viz get pods -l app=otel-navigator -o wide     # want 2/2 Running
+# Primary in-situ unblock (same as engine _rem_otel_navigator):
+set -a; . /dev/shm/s3-creds; set +a   # S3_* required
+# … SETV + ZARF_CONFIG as in T2–T6 preamble …
+zarf package deploy "$PKG" --confirm --components=cybersec-images,panel-viz --retries 10 "${SETV[@]}"
+# Full stack heal (navigator + terminal + routes):
+zarf package deploy "$PKG" --confirm \
+  --components=cybersec-images,panel-viz,navigator-engine,ingress --retries 10 "${SETV[@]}"
+# Capacity strand:
+#   see T4.workers-capacity, then:
+kc -n panel-viz delete pod -l app=otel-navigator --force --grace-period=0 --wait=false
+# Confirm:
+kc -n panel-viz get pods -o wide     # otel-navigator 2/2, engine 1/1
+kc -n panel-viz get cm otel-navigator-config \
+  -o jsonpath='S3_BUCKET={.data.S3_BUCKET}{"\n"}OTEL_DATA_PATH={.data.OTEL_DATA_PATH}{"\n"}'
+curl -sS -o /dev/null -w '%{http_code}\n' --connect-timeout 3 http://127.0.0.1:30506/otel-navigator
 ```
 
 ---
+
 
 ## Teardown — clean-slate the Layer-B app stack (registry/SC + images CONSERVED)
 The manual inverse of `reconcile()`; mirrors `engine.teardown`. A subsequent deploy redeploys fast

@@ -268,14 +268,9 @@ components:
                 condition: Ready
             maxTotalSeconds: 300
             description: Wait for Panel-Viz (otel-navigator) to be ready
-          - wait:
-              cluster:
-                kind: Pod
-                name: app=vpc-flow-generator
-                namespace: panel-viz
-                condition: Ready
-            maxTotalSeconds: 180
-            description: Wait for vpc-flow-generator to be ready
+          # vpc-flow-generator is best-effort data-gen — do NOT wait on it. A
+          # failed/Pending generator used to fail the whole panel-viz component
+          # deploy (and thus converge T5 rem) even when otel-navigator was fine.
 
   # ===========================================================================
   # Navigator Engine - gRPC engine for terminal-driven heatmap updates (M2)

@@ -120,13 +120,22 @@ _COMPONENT_DISCOVER = {
         "kc get secrets -A -l owner=helm | grep -E 'dask|cluster' || true",
     ],
     "panel-viz": [
-        "kc get ns panel-viz 2>/dev/null; kc -n panel-viz get pods,deploy,svc -o wide",
-        "kc -n panel-viz describe pod -l app=otel-navigator 2>/dev/null | tail -50",
-        "kc -n panel-viz get cm,secret 2>/dev/null | head -20",
+        "kc get ns panel-viz 2>/dev/null; kc -n panel-viz get pods,deploy,svc,ep -o wide",
+        "kc -n panel-viz get pods -l app=otel-navigator -o jsonpath='{range .items[*]}{.metadata.name} phase={.status.phase} ready={.status.containerStatuses[*].ready} restarts={.status.containerStatuses[*].restartCount}{\"\\n\"}{end}'",
+        "kc -n panel-viz describe pod -l app=otel-navigator 2>/dev/null | sed -n '/Events:/,$p' | tail -20",
+        "kc -n panel-viz logs deploy/otel-navigator -c otel-navigator --tail=40 2>/dev/null",
+        "kc -n panel-viz logs deploy/otel-navigator -c pty-proxy --tail=20 2>/dev/null",
+        # blank S3 bricks UI even when TCP Ready
+        "kc -n panel-viz get cm otel-navigator-config -o jsonpath='S3_BUCKET={.data.S3_BUCKET}{\"\\n\"}OTEL_DATA_PATH={.data.OTEL_DATA_PATH}{\"\\n\"}'",
+        "kc -n panel-viz get secret otel-navigator-credentials "
+        "-o jsonpath='cred keys present: {range .data.*}{\"·\"}{end}{\"\\n\"}' 2>/dev/null",
+        "kc -n panel-viz get deploy vpc-flow-generator -o wide 2>/dev/null || true",
     ],
     "navigator-engine": [
-        "kc -n panel-viz get pods,deploy -l app=navigator-engine -o wide 2>/dev/null",
+        "kc -n panel-viz get pods,deploy,ep -l app=navigator-engine -o wide 2>/dev/null",
+        "kc -n panel-viz describe pod -l app=navigator-engine 2>/dev/null | sed -n '/Events:/,$p' | tail -15",
         "kc -n panel-viz logs deploy/navigator-engine --tail=40 2>/dev/null",
+        "kc -n panel-viz get cm otel-navigator-config -o jsonpath='S3_BUCKET={.data.S3_BUCKET} path={.data.OTEL_DATA_PATH}{\"\\n\"}'",
     ],
     "jupyterhub": [
         "kc get ns jupyterhub -o yaml 2>/dev/null | head -30",
@@ -434,15 +443,58 @@ HINTS = {
         ],
         note="Workers Pending (oversubscribed) — strands panel memory",
     ),
-    "T5.otel-navigator": zarf_deploy_recipe(
-        "cybersec-images,panel-viz",
-        needs_s3=True,
-        note="otel-navigator not Ready — deploy panel-viz (in-situ path)",
+    "T5.otel-navigator": block(
+        _discover_for_components("cybersec-images,panel-viz") + [
+            "kc get pods -A --field-selector=status.phase=Pending -o wide | head -20",
+            "kc -n dask get pods -l dask.org/component=worker --field-selector=status.phase=Pending 2>/dev/null | head",
+            # NodePort smoke (from control plane)
+            "curl -sS -o /dev/null -w 'nodeport30506:%{http_code}\\n' --connect-timeout 3 "
+            "http://127.0.0.1:30506/otel-navigator || true",
+        ],
+        [
+            'export KUBECONFIG="${KUBECONFIG:-/etc/rancher/rke2/rke2.yaml}"',
+            'export PATH="$PATH:/var/lib/rancher/rke2/bin"',
+            'test -n "${S3_BUCKET:-}" || { echo "S3_BUCKET required"; exit 1; }',
+            'PKG="${PKG:-$PKG}"; test -f "$PKG" || { echo "set PKG to package tarball"; exit 1; }',
+            "# 1) capacity: if Pending, cap workers first (4Gi request needs a free node)",
+            "TARGET=$(( $(kc get nodes --no-headers 2>/dev/null | wc -l) - 1 )); "
+            "[ \"$TARGET\" -lt 1 ] && TARGET=1; echo TARGET=$TARGET",
+            "kc -n dask patch daskcluster cybersec-dask --type merge "
+            "-p \"{\\\"spec\\\":{\\\"worker\\\":{\\\"replicas\\\":$TARGET}}}\" 2>/dev/null || true",
+            "# 2) primary in-situ path — push image + redeploy panel (CM/Secret/S3)",
+            'zarf package deploy "$PKG" --confirm --components=cybersec-images,panel-viz '
+            '--retries 10 "${SETV[@]}"',
+            "# 3) if 'has no deployed releases': remove dead helm then re-deploy",
+            '#   zarf package remove "$PKG" --confirm --components=panel-viz',
+            "# 4) stuck CrashLoop / old RS: recycle pods",
+            "kc -n panel-viz delete pod -l app=otel-navigator --force --grace-period=0 --wait=false",
+            "# 5) optional full stack: engine (terminal gRPC) + ingress (/ws)",
+            'zarf package deploy "$PKG" --confirm --components=navigator-engine,ingress '
+            '--retries 10 "${SETV[@]}"',
+            "# 6) verify",
+            "kc -n panel-viz get pods -o wide; "
+            "kc -n panel-viz get cm otel-navigator-config "
+            "-o jsonpath='S3_BUCKET={.data.S3_BUCKET}{\"\\n\"}'",
+        ],
+        note="otel-navigator broken/missing — multi-path heal (capacity → zarf panel-viz → "
+             "recycle → engine/ingress). Blank S3_BUCKET is a FAIL even if pod Ready.",
     ),
-    "T5.navigator-engine": zarf_deploy_recipe(
-        "cybersec-images,navigator-engine",
-        needs_s3=True,
-        note="navigator-engine not Ready",
+    "T5.navigator-engine": block(
+        _discover_for_components("cybersec-images,navigator-engine"),
+        [
+            'export KUBECONFIG="${KUBECONFIG:-/etc/rancher/rke2/rke2.yaml}"',
+            'export PATH="$PATH:/var/lib/rancher/rke2/bin"',
+            'test -n "${S3_BUCKET:-}" || { echo "S3_BUCKET required (shared panel CM)"; exit 1; }',
+            "# If otel-navigator-config has empty S3_BUCKET, redeploy panel-viz FIRST "
+            "(engine envFrom that ConfigMap/Secret)",
+            'zarf package deploy "$PKG" --confirm --components=cybersec-images,panel-viz '
+            '--retries 10 "${SETV[@]}"',
+            'zarf package deploy "$PKG" --confirm --components=cybersec-images,navigator-engine '
+            '--retries 10 "${SETV[@]}"',
+            "kc -n panel-viz delete pod -l app=navigator-engine --force --grace-period=0 --wait=false",
+            "kc -n panel-viz get pods,ep -l app=navigator-engine -o wide",
+        ],
+        note="navigator-engine not Ready — redeploy; shared S3 config via panel-viz",
     ),
     "T5.jupyterhub": zarf_deploy_recipe(
         "jupyterhub,sample-notebooks",
