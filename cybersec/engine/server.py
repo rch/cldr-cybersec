@@ -33,6 +33,32 @@ async def serve(port: int = 50051) -> None:
     await server.start()
     logger.info("NavigatorEngine listening on %s", listen_addr)
 
+    # Best-effort: bind s3://$S3_BUCKET/_active_dataset.json into Dask so
+    # `chk` / status report ready without a manual `load`.
+    async def _warm_dataset():
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, servicer._dask.ensure_active_loaded
+            )
+            if result:
+                logger.info(
+                    "Warmed active dataset %s (%s partitions)",
+                    result.get("dataset"),
+                    result.get("partitions"),
+                )
+            else:
+                cat = await loop.run_in_executor(None, servicer._dask.discover_catalog)
+                logger.info(
+                    "No dataset warm-load (catalog=%s error=%s)",
+                    cat.get("dataset") or "none",
+                    cat.get("error") or "",
+                )
+        except Exception as e:
+            logger.warning("Dataset warm-load failed: %s", e)
+
+    asyncio.create_task(_warm_dataset())
+
     # Graceful shutdown on SIGTERM/SIGINT
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()

@@ -47,6 +47,9 @@ class DaskBackend:
         self._client = None
         self._current_dataset: str = ""
         self._current_df = None
+        self._catalog: dict | None = None  # last S3 _active_dataset.json
+        self._catalog_ts: float = 0.0
+        self._auto_load_attempted: bool = False
 
     def _get_client(self):
         if self._client is not None:
@@ -60,8 +63,114 @@ class DaskBackend:
         self._client = Client(DASK_SCHEDULER, timeout="30s")
         return self._client
 
+    def discover_catalog(self, *, force: bool = False) -> dict:
+        """Read s3://{bucket}/_active_dataset.json (cached ~15s).
+
+        This is the same marker the Panel UI uses — data on disk does not
+        imply the engine has loaded a Dask frame; chk previously only
+        reported the latter, so a seeded bucket looked like "no dataset".
+        """
+        import time
+
+        now = time.time()
+        if (
+            not force
+            and self._catalog is not None
+            and (now - self._catalog_ts) < 15.0
+        ):
+            return self._catalog
+
+        info: dict = {"dataset": "", "phase": "missing", "path": "", "error": ""}
+        if not S3_BUCKET:
+            info["error"] = "S3_BUCKET not set"
+            self._catalog, self._catalog_ts = info, now
+            return info
+
+        try:
+            import s3fs
+
+            fs = s3fs.S3FileSystem(**_get_storage_options())
+            marker = f"{S3_BUCKET}/_active_dataset.json"
+            if not fs.exists(marker):
+                info["error"] = f"no {marker}"
+                self._catalog, self._catalog_ts = info, now
+                return info
+            import json
+
+            raw = fs.cat(marker)
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            marker_obj = json.loads(raw)
+            name = (marker_obj.get("dataset") or "").strip()
+            if not name:
+                info["error"] = "marker has no dataset key"
+                self._catalog, self._catalog_ts = info, now
+                return info
+            # Confirm spans/ has at least one parquet (cheap prefix ls, not full tree).
+            spans = f"{S3_BUCKET}/{name}/spans"
+            n_parts = 0
+            try:
+                # find is recursive but otel-minimal is small; cap via detail walk
+                entries = fs.find(spans)
+                n_parts = sum(1 for e in entries if str(e).endswith(".parquet"))
+            except Exception as e:
+                logger.debug("spans ls %s: %s", spans, e)
+            info = {
+                "dataset": name,
+                "phase": marker_obj.get("phase") or "available",
+                "path": f"s3://{S3_BUCKET}/{name}/",
+                "partitions": n_parts,
+                "span_count": marker_obj.get("span_count"),
+                "error": "" if n_parts > 0 else "marker ok but no parquet under spans/",
+            }
+            if n_parts == 0 and not info["error"]:
+                info["error"] = "no parquet under spans/"
+        except Exception as e:
+            logger.warning("catalog discover failed: %s", e)
+            info["error"] = str(e)
+
+        self._catalog, self._catalog_ts = info, now
+        return info
+
+    def ensure_active_loaded(self) -> dict | None:
+        """If nothing is loaded, auto-bind the catalog dataset into Dask once.
+
+        Returns load result dict, or None if skipped / nothing to load.
+        """
+        if self._current_df is not None:
+            return None
+        if self._auto_load_attempted:
+            return None
+        self._auto_load_attempted = True
+        cat = self.discover_catalog(force=True)
+        name = (cat.get("dataset") or "").strip()
+        if not name or cat.get("error"):
+            logger.info(
+                "auto-load skipped (catalog=%s error=%s)",
+                name or "none",
+                cat.get("error") or "",
+            )
+            return None
+        try:
+            logger.info("auto-loading active dataset %s", name)
+            return self._load_dataset_sync(name)
+        except Exception as e:
+            logger.warning("auto-load %s failed: %s", name, e)
+            return None
+
     def get_status(self) -> dict:
         """Get Dask cluster status (sync, called from asyncio via executor)."""
+        # Bind catalog dataset into Dask on first status if idle — makes `chk`
+        # reflect reality without requiring a manual `load`.
+        try:
+            self.ensure_active_loaded()
+        except Exception as e:
+            logger.debug("ensure_active_loaded: %s", e)
+
+        catalog = self.discover_catalog()
+        catalog_name = (catalog.get("dataset") or "").strip()
+        catalog_ok = bool(catalog_name) and not catalog.get("error")
+
         try:
             client = self._get_client()
             info = client.scheduler_info()
@@ -70,23 +179,49 @@ class DaskBackend:
                 len(w.get("processing", {}))
                 for w in info.get("workers", {}).values()
             )
+            loaded = self._current_df is not None
+            if loaded:
+                phase = "ready"
+                ds = self._current_dataset or catalog_name or "none"
+                parts = self._current_df.npartitions
+            elif catalog_ok:
+                phase = "available"
+                ds = catalog_name
+                parts = int(catalog.get("partitions") or 0)
+            else:
+                phase = "idle"
+                ds = "none"
+                parts = 0
             return {
                 "workers": workers,
                 "processing": processing,
                 "dask_connected": True,
-                "current_dataset": self._current_dataset or "none",
-                "dataset_phase": "ready" if self._current_df is not None else "idle",
-                "partitions": self._current_df.npartitions if self._current_df is not None else 0,
+                "current_dataset": ds,
+                "dataset_phase": phase,
+                "partitions": parts,
+                "catalog_dataset": catalog_name or "",
+                "catalog_error": catalog.get("error") or "",
             }
         except Exception as e:
             logger.warning("Dask status check failed: %s", e)
+            # Still surface catalog so chk is not a blank "none" when S3 is fine.
+            if self._current_df is not None:
+                ds = self._current_dataset or catalog_name or "none"
+                parts = getattr(self._current_df, "npartitions", 0) or 0
+            elif catalog_ok:
+                ds = catalog_name
+                parts = int(catalog.get("partitions") or 0)
+            else:
+                ds, parts = (self._current_dataset or "none"), 0
             return {
                 "workers": 0,
                 "processing": 0,
                 "dask_connected": False,
-                "current_dataset": self._current_dataset or "none",
+                "current_dataset": ds,
                 "dataset_phase": "disconnected",
-                "partitions": 0,
+                "partitions": parts,
+                "catalog_dataset": catalog_name or "",
+                "catalog_error": catalog.get("error") or str(e),
             }
 
     async def status(self) -> dict:

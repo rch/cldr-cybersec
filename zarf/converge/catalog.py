@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from pathlib import Path
 from typing import List, Optional
@@ -551,14 +552,30 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
         # error), then a fresh deploy INSTALLS instead of upgrading. One retry.
         err = (r.stderr or "") + (r.stdout or "")
         if r.returncode != 0 and "no deployed releases" in err and ctx.package_path:
-            try:
-                dead_comp = err.split('unable to deploy component "')[1].split('"')[0]
-            except IndexError:
-                dead_comp = components.split(",")[0]
-            rm = ctx.zarf(["package", "remove", ctx.package_path, "--confirm",
-                           f"--components={dead_comp}"], timeout=600)
-            note = (f"removed dead-release component {dead_comp!r} "
-                    f"(helm 'has no deployed releases'): rc={rm.returncode}")
+            # Parse component name whether zarf quotes with " or '.
+            m = re.search(
+                r'unable to deploy component ["\']([^"\']+)["\']', err
+            )
+            dead_comp = m.group(1) if m else components.split(",")[0]
+            # Always also try removing the requested component list (field:
+            # jupyterhub/sample-notebooks blocked by a dead sibling rider).
+            remove_set = []
+            for c in [dead_comp] + components.split(","):
+                c = c.strip()
+                if c and c not in remove_set:
+                    remove_set.append(c)
+            notes = []
+            for dead in remove_set:
+                rm = ctx.zarf(
+                    ["package", "remove", ctx.package_path, "--confirm",
+                     f"--components={dead}"],
+                    timeout=600,
+                )
+                notes.append(f"{dead}:rc={rm.returncode}")
+            note = (
+                f"removed dead-release component(s) [{', '.join(notes)}] "
+                f"(helm 'has no deployed releases')"
+            )
             r2 = ctx.zarf(args, env=env)
             if r2.returncode == 0:
                 return Fix(True, f"zarf deploy {components}: rc=0 "
@@ -1261,8 +1278,17 @@ def _det_jupyterhub(ctx: Ctx) -> Probe:
 
 def _rem_jupyterhub(ctx: Ctx) -> Fix:
     """SC-less hub path: remove ALL jupyterhub PVCs + hub-db PVs (old sqlite-pvc /
-    local-path vestiges), then redeploy chart (sqlite-memory, storage none)."""
+    local-path vestiges), then redeploy chart (sqlite-memory, storage none).
+
+    Field: when the jupyterhub namespace is entirely absent (never installed, or
+    wiped), a plain ``zarf package deploy --components=jupyterhub`` is the
+    unblock — same as the successful manual remediation on-prem. PVC cleanup is
+    a no-op if the ns does not exist; deploy creates ns + hub + proxy.
+    """
     actions: List[str] = []
+    ns_obj = ctx.get("namespace", "jupyterhub")
+    if not ns_obj:
+        actions.append("jupyterhub namespace absent — deploy will create it")
     for pvc in list(ctx.items("pvc", ns="jupyterhub")):
         name = pvc.get("metadata", {}).get("name", "")
         phase = pvc.get("status", {}).get("phase")
@@ -1278,13 +1304,19 @@ def _rem_jupyterhub(ctx: Ctx) -> Fix:
             if ctx.k(["delete", "pv", pname, "--ignore-not-found"]).returncode == 0:
                 actions.append(f"deleted hub-related PV {pname} (phase={phase})")
     # Hub Deployment may still reference old volume — recycle hub pods after PVC gone
-    ctx.k(["delete", "pod", "-n", "jupyterhub", "-l", "component=hub",
-           "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
-    fix = _zarf_deploy_components(ctx, "jupyterhub")
+    if ns_obj:
+        ctx.k(["delete", "pod", "-n", "jupyterhub", "-l", "component=hub",
+               "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
+    # Deploy hub + notebooks together (ns created by jupyterhub chart; ConfigMap
+    # rides sample-notebooks). Field unblock was exactly:
+    #   zarf package deploy --components=jupyterhub
+    fix = _zarf_deploy_components(ctx, "jupyterhub,sample-notebooks")
     if actions:
         return Fix(fix.changed or bool(actions),
                    f"{fix.detail}  [unwound: {'; '.join(actions)}]")
     return fix
+
+
 def _det_sample_notebooks(ctx: Ctx) -> Probe:
     ok = ctx.exists("configmap", "sample-notebooks", ns="jupyterhub")
     return Probe(ok, "sample-notebooks ConfigMap present" if ok

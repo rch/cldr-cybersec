@@ -38,6 +38,23 @@ from holoviews.operation.datashader import rasterize, dynspread
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+# Air-gap: Panel Fast design hard-codes Open Sans via fonts.googleapis.com in
+# Fast._resources['font']. Template font_url="" alone does NOT remove that link.
+_AIRGAP_UI_FONT = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+try:
+    import panel.theme.fast as _fast_theme
+    _fast_theme.FONT_URL = ""
+    _res = getattr(_fast_theme.Fast, "_resources", None)
+    if isinstance(_res, dict):
+        _res = dict(_res)
+        _res["font"] = {}
+        _fast_theme.Fast._resources = _res
+    if hasattr(_fast_theme, "FastStyle"):
+        _fast_theme.FastStyle.param.font_url.default = ""
+        _fast_theme.FastStyle.param.font.default = _AIRGAP_UI_FONT
+except Exception as _e:  # pragma: no cover
+    logger.warning("airgap font patch failed: %s", _e)
+
 hv.extension('bokeh')
 pn.extension(loading_spinner='dots', loading_color='#0072B5',
              js_files={'ghostty-loader': '/ghostty/loader.js'})
@@ -1086,6 +1103,8 @@ class SpanExplorer(param.Parameterized):
             header_background="#0072B5",
             sidebar_width=280,
             theme="dark",
+            font=_AIRGAP_UI_FONT,
+            font_url="",
         )
 
         # Auto-load data when page loads

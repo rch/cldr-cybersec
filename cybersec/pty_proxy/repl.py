@@ -192,10 +192,18 @@ class NavigatorREPL:
         return {"type": "text", "data": f"  {color}{mark}{_RESET} {label:<11}: {value}\r\n"}
 
     async def _cmd_chk(self, line: str) -> AsyncIterator[dict]:
-        """Deterministic local health sitrep: engine reachability + Dask + dataset."""
+        """Deterministic local health sitrep: engine reachability + Dask + dataset.
+
+        Dataset phases from the engine:
+          ready      — parquet bound into Dask (queries work)
+          available  — S3 ``_active_dataset.json`` + spans exist (auto-load may bind)
+          idle       — no catalog marker / no load
+          disconnected — Dask unreachable
+        """
         yield {"type": "text", "data": f"{_BOLD}nav health check{_RESET}\r\n"}
         try:
-            st = await asyncio.wait_for(self._engine.status(), timeout=5.0)
+            # Auto-load on first Status can take a few seconds for cold parquet.
+            st = await asyncio.wait_for(self._engine.status(), timeout=45.0)
             snap = st.snapshot
             yield self._kv("engine", f"OK (v{st.engine_version})", True)
             yield self._kv(
@@ -204,10 +212,41 @@ class NavigatorREPL:
                 snap.dask_connected,
             )
             ds = snap.current_dataset or "none"
-            yield self._kv("dataset", f"{ds} ({snap.dataset_phase})", snap.dataset_phase == "ready")
+            phase = snap.dataset_phase or "idle"
+            parts = getattr(snap, "partitions", 0) or 0
+            if phase == "ready":
+                detail = f"{ds} (ready, {parts} partition{'s' if parts != 1 else ''})"
+                ok = True
+            elif phase == "available":
+                detail = f"{ds} (on S3, {parts} file{'s' if parts != 1 else ''} — not loaded)"
+                ok = True  # catalog present is success; hint how to bind
+            elif phase == "idle":
+                detail = "none (no _active_dataset.json / no load)"
+                ok = False
+            else:
+                detail = f"{ds} ({phase})"
+                ok = phase == "ready"
+            yield self._kv("dataset", detail, ok)
+            if phase == "available":
+                yield {
+                    "type": "text",
+                    "data": (
+                        f"{_DIM}  hint: run `load {ds}` if queries still fail "
+                        f"(engine auto-loads on first chk){_RESET}\r\n"
+                    ),
+                }
+            elif phase == "idle":
+                yield {
+                    "type": "text",
+                    "data": (
+                        f"{_DIM}  hint: seed OTEL parquet and write "
+                        f"s3://$S3_BUCKET/_active_dataset.json, then `load <name>`"
+                        f"{_RESET}\r\n"
+                    ),
+                }
             yield self._kv("processing", f"{snap.processing} task(s)", True)
         except asyncio.TimeoutError:
-            yield self._kv("engine", "TIMEOUT (no response in 5s)", False)
+            yield self._kv("engine", "TIMEOUT (no response in 45s)", False)
             yield {"type": "text", "data": f"{_DIM}  hint: navigator-engine gRPC :50051 is slow or unreachable{_RESET}\r\n"}
         except Exception as e:
             yield self._kv("engine", f"UNREACHABLE: {e}", False)

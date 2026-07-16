@@ -31,7 +31,14 @@ from .model import Fix, Probe
 
 RKE2_CONFIG = Path("/etc/rancher/rke2/config.yaml")
 REGISTRY_HOSTPATH = Path("/var/lib/zarf-registry")
-DEFAULT_PKG_DIRS = (Path("/var/tmp"), Path("/opt/zarf"), Path.cwd())
+# Field: package often staged beside the unpacked engine, not only /var/tmp.
+DEFAULT_PKG_DIRS = (
+    Path("/var/tmp"),
+    Path("/opt/zarf"),
+    Path.cwd(),
+    Path(__file__).resolve().parent.parent,  # …/zarf when in-repo
+    Path(__file__).resolve().parent,         # engine unpack root (converge/)
+)
 
 # Kubelet args for air-gap / large-disk workstations:
 #  - Absolute free-space thresholds (Gi) so a 900G disk at ~90% full still schedules

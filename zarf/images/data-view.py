@@ -43,6 +43,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("data-view")
 
+# Air-gap: neutralize Panel Fast hard-coded Google Fonts (Open Sans).
+_AIRGAP_UI_FONT = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+try:
+    import panel.theme.fast as _fast_theme
+    _fast_theme.FONT_URL = ""
+    _res = getattr(_fast_theme.Fast, "_resources", None)
+    if isinstance(_res, dict):
+        _res = dict(_res)
+        _res["font"] = {}
+        _fast_theme.Fast._resources = _res
+    if hasattr(_fast_theme, "FastStyle"):
+        _fast_theme.FastStyle.param.font_url.default = ""
+        _fast_theme.FastStyle.param.font.default = _AIRGAP_UI_FONT
+except Exception as _e:  # pragma: no cover
+    logger.warning("airgap font patch failed: %s", _e)
+
 pn.extension("tabulator", loading_spinner="dots", loading_color="#0072B5")
 
 # -------------------------------------------------------------------------
@@ -1220,6 +1236,8 @@ class DataView(param.Parameterized):
             header_background="#161b22",
             sidebar_width=300,
             theme="dark",
+            font=_AIRGAP_UI_FONT,
+            font_url="",
         )
 
 

@@ -96,8 +96,21 @@ if [ -z "$KUBECTL_CMD" ]; then
 fi
 
 # --- locate the transported deploy package (optional for verify / kubectl-only) -
+# Search order (newest mtime wins within each step):
+#   1) explicit argv package.tar.zst
+#   2) /var/tmp (runbook default staging)
+#   3) next to this script / engine unpack dir (field: package beside converge)
+#   4) current working directory
 if [ -z "$PKG_ARG" ]; then
-  PKG_ARG="$(ls -t /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst 2>/dev/null | head -1 || true)"
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  PKG_ARG="$(
+    ls -t \
+      /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst \
+      "$SCRIPT_DIR"/zarf-package-cybersec-dask-amd64-*.tar.zst \
+      "$SCRIPT_DIR"/../zarf-package-cybersec-dask-amd64-*.tar.zst \
+      ./zarf-package-cybersec-dask-amd64-*.tar.zst \
+      2>/dev/null | head -1 || true
+  )"
 fi
 [ -n "$PKG_ARG" ] && [ -f "$PKG_ARG" ] && PKG_ARG="$(cd "$(dirname "$PKG_ARG")" && pwd)/$(basename "$PKG_ARG")"
 
