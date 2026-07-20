@@ -53,20 +53,31 @@ s3://ro-datasets/**.h5     (object)             iceberg/warehouse/              
 
 ## 3. Catalog: stepping stone → Polaris
 
-| | **Stepping stone (day one)** | **Future state** |
-|---|---|---|
-| Catalog | **PyIceberg SQL catalog (SQLite)** on a hostPath/claimRef PV (the zarf-registry PV pattern) | **Apache Polaris** (REST), in the Zarf package |
-| Footprint | ~0 (a `.db` file; PyIceberg wheels ride the existing image) | JVM server image + persistence — the current disk blocker |
-| Writers | the registration pipeline (single writer — SQLite's constraint is our topology anyway) | any |
-| Readers | the Navigator engine resolves datasets at session start (low-frequency); Dask workers never touch the catalog — they read data via the index refs | REST for all engines |
-| Migration | — | `register_table()` every table into Polaris; flip one catalog URI in config. Warehouse untouched (law 3). |
+The local stack carries **Polaris and pglite today** — dev/laptop work uses them directly
+(no SQLite anywhere). The stepping stone exists only for the **air gap**, where Polaris's
+JVM+persistence footprint is the current disk blocker:
+
+| | **Local (today)** | **Air-gap stepping stone** | **Future state** |
+|---|---|---|---|
+| Catalog | **Polaris** (REST — already in devenv), or PyIceberg SQL catalog on the stack's **pglite/Postgres** | **PyIceberg SQL catalog on pglite** (embedded Postgres, MB-scale) on a hostPath/claimRef PV (the zarf-registry PV pattern) | **Apache Polaris** (REST), in the Zarf package |
+| Footprint | already running | MB-scale; PyIceberg wheels ride the existing image | JVM server image + persistence — the current disk blocker |
+| Writers | any | the registration pipeline (single writer — our topology anyway) | any |
+| Readers | REST / SQL | the Navigator engine resolves datasets at session start (low-frequency); Dask workers never touch the catalog — they read data via the index refs | REST for all engines |
+| Migration | — | — | `register_table()` every table into Polaris; flip one catalog URI in config. Warehouse untouched (law 3). |
+
+Because dev runs against real Polaris from day one, the **catalog-swap rehearsal (gate 5, §9)
+is exercised continuously**, not saved for graduation.
 
 Namespacing is chosen **now** to be Polaris-ready: `telemetry.*` tables under a single warehouse
 root, no catalog-specific naming anywhere in the schema.
 
 **Image delta for the stepping stone** (`requirements-airgap.txt`): `pyiceberg`, `h5py`,
-`kerchunk`, `zarr` — MB-scale additions; `pyarrow`/`fsspec`/`s3fs`/`dask`/`datashader` are
-already shipped.
+`kerchunk`, `zarr` (+ pglite runtime for the air-gap catalog) — MB-scale additions;
+`pyarrow`/`fsspec`/`s3fs`/`dask`/`datashader` are already shipped.
+
+**Object-store backend note.** Everything below touches storage through fsspec/S3 semantics
+only — the metadata plane binds to *an* S3-compatible endpoint, not to a specific server.
+Swapping the local backing store is a config change, deliberately deferred.
 
 ## 4. The tables (one schema, both phases)
 
@@ -187,13 +198,23 @@ viewport (RangeXY) ───► overviews_l1/_l2 → instant datashader raster  
 
 ## 11. Decisions
 
-**Resolved here:** SQLite PyIceberg catalog on a hostPath PV as the stepping stone (single-writer
-matches our topology; ~zero disk); kerchunk JSON refs keyed by fingerprint (revisit parquet-refs
-only if manifests exceed ~50 MB); overviews as Iceberg parquet tables (not loose arrays) for
-snapshot consistency; virtual series-block grid over contiguous sources with stats-based time
-pruning; `telemetry.*` namespace.
+**Resolved here:** local dev uses the stack's **Polaris + pglite** directly (no SQLite
+anywhere); air-gap stepping stone is a **PyIceberg SQL catalog on pglite** on a hostPath PV
+(single-writer matches our topology; MB-scale); kerchunk JSON refs keyed by fingerprint
+(revisit parquet-refs only if manifests exceed ~50 MB); overviews as Iceberg parquet tables
+(not loose arrays) for snapshot consistency; virtual series-block grid over contiguous sources
+with stats-based time pruning; `telemetry.*` namespace.
 
-**Open (to resolve during #43):** virtual block size default (start: rows ≈ 8 MB per block,
-coalesce to ~64 MB tasks; tune on the contiguous synthetic); overview level policy (L1 fixed
-~2000×1000 bins; L2 only for datasets over a size threshold); whether the engine caches the
-SQLite catalog file locally per session or reads via the PV mount.
+**Resolved by the layout-faithful profile** (the corpus is petabytes of fixed-duration file
+windows; the `--contiguous` synthetic mirrors the profile): datasets arrive as ~100 MB-scale
+contiguous values blocks (series-major, time fast-axis), so **file-level temporal pruning via
+the pointer table's `t_min_ns`/`t_max_ns` is the primary time cut at corpus scale** — in-file
+virtual blocks chiefly serve series-range pruning. Virtual block default: series-blocks of
+**≈8–16 MB** (byte-level series pruning stays fine-grained), **coalesced toward whole-file
+tasks** — a file window already sits in the Dask task sweet spot, so the common full-series
+viewport maps ≈1 file → 1 task.
+
+**Open (to resolve during #43):** exact block/coalesce numbers under measurement on the
+contiguous synthetic; overview level policy (L1 fixed ~2000×1000 bins; L2 only for datasets
+over a size threshold); whether the engine caches catalog state per session or reads through
+the PV-mounted pglite.
