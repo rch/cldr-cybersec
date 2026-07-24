@@ -1,3 +1,18 @@
 [submodule "flink-solr-log-indexer"]
 	path = flink-solr-log-indexer
 	url = https://github.com/simonellistonball/flink-solr-log-indexer.git
+[submodule "thirdparty/flink"]
+	path = thirdparty/flink
+	url = git@github.com:rch/asf-flink.git
+[submodule "thirdparty/iceberg"]
+	path = thirdparty/iceberg
+	url = git@github.com:rch/asf-iceberg.git
+[submodule "thirdparty/nifi"]
+	path = thirdparty/nifi
+	url = https://github.com/apache/nifi.git
+[submodule "thirdparty/polaris"]
+	path = thirdparty/polaris
+	url = https://github.com/apache/polaris.git
+[submodule "thirdparty/cdpcli"]
+	path = thirdparty/cdpcli
+	url = git@github.com:rch/cldr-cdpcli.git
