@@ -1176,41 +1176,94 @@ def _rem_scheduler(ctx: Ctx) -> Fix:
     return _zarf_deploy_components(ctx, "dask-cluster")
 
 
+# Worker sizing constants — mirror the requests in manifests/dask-cluster.yaml.
+# The cap is RESOURCE-based (not node-count): one big air-gap node legitimately
+# holds many workers, and Pending-detection remains the scheduling backstop.
+_WORKER_MEM_GIB = 4.0        # worker memory request (dask-cluster.yaml)
+_MEM_HEADROOM_FRAC = 0.25    # fraction reserved for system/kubelet
+_MEM_HEADROOM_GIB = 6.0      # fixed reserve: scheduler + panel-viz + engine + hub
+
+
+def _cap_workers(requested: int, total_mem_gib: float) -> int:
+    """Clamp a requested worker count to what allocatable memory can hold after
+    headroom. Pure so the matrix/unit checks can exercise it directly."""
+    usable = total_mem_gib * (1.0 - _MEM_HEADROOM_FRAC) - _MEM_HEADROOM_GIB
+    cap = max(1, int(usable / _WORKER_MEM_GIB))
+    return max(1, min(requested, cap))
+
+
+def _worker_target(ctx: Ctx) -> "tuple[int, str]":
+    """Desired worker count: DASK_WORKER_REPLICAS (default 1), memory-capped."""
+    try:
+        requested = int(str(ctx.s3.get("DASK_WORKER_REPLICAS") or "1"))
+    except ValueError:
+        requested = 1
+    cap = ctx.node_capacity()
+    target = _cap_workers(max(1, requested), cap.get("total_mem_gib", 0.0))
+    why = (f"requested={requested}, mem={cap.get('total_mem_gib', 0)}GiB"
+           + (f" → capped to {target}" if target < requested else ""))
+    return target, why
+
+
 def _det_workers_capacity(ctx: Ctx) -> Probe:
-    """No perpetually-Pending workers: requested replicas must fit schedulable
-    capacity. This is the oversubscription failure that strands otel-navigator."""
+    """Workers must MATCH the requested count (memory-capped) with none Pending.
+    Catches both directions: oversubscription (Pending workers strand
+    otel-navigator) AND under-provisioning (DASK_WORKER_REPLICAS raised — e.g. to
+    use a big air-gap node — but the cluster still runs the old count)."""
+    target, why = _worker_target(ctx)
     pods = ctx.items("pods", ns="dask", selector="dask.org/component=worker")
     pending = [p["metadata"]["name"] for p in pods
                if p.get("status", {}).get("phase") == "Pending"]
-    return Probe(not pending, f"{len(pending)} worker(s) Pending (oversubscribed)"
-                 if pending else f"{len(pods)} worker(s), none Pending")
+    if pending:
+        return Probe(False, f"{len(pending)} worker(s) Pending (oversubscribed; {why})")
+    deps = ctx.items("deployments", ns="dask", selector="dask.org/component=worker")
+    if len(deps) != target:
+        return Probe(False, f"{len(deps)} worker deployment(s), want {target} ({why})")
+    return Probe(True, f"{len(deps)} worker(s) = target {target}, none Pending")
 
 
 def _rem_workers_capacity(ctx: Ctx) -> Fix:
-    """Make the actual worker pods fit schedulable capacity so the viz pod gets a
-    node. Two parts — because the operator may leave ORPHANED worker Deployments it
-    never reaps (the "spec says 4 but 16 pods, 5 Pending" state we hit):
-      1. set DaskCluster spec.worker.replicas = target (the source of truth);
-      2. reap the EXCESS worker Deployments down to target, least-ready (Pending)
-         first — don't trust the spec, count the real Deployments.
-    target leaves one node's headroom for panel-viz/engine/jupyter. Layer-B; never
-    touches images."""
-    cap = ctx.node_capacity()
-    target = max(1, cap["schedulable_nodes"] - 1)
-    ctx.k(["patch", "daskcluster", "cybersec-dask", "-n", "dask", "--type", "merge",
-           "-p", json.dumps({"spec": {"worker": {"replicas": target}}})])
+    """Scale workers to target SURGICALLY — a CR patch against the EXISTING
+    registry; no `zarf package deploy`, no image re-push (Retain PV conserves the
+    pushed image; the live agent rewrites new pods' refs at admission — T1..T3
+    dependencies guarantee both before this runs).
+
+    Replica count is the ONE spec change the dask operator propagates on a live
+    CR (a kopf field handler scales the children) — unlike env/image changes,
+    which need the CR-recreate path (T4.scheduler). Scale-down additionally reaps
+    excess worker Deployments oldest-Pending-first, because the operator can
+    leave orphans it never reaps (the "spec says 4 but 16 pods" field state)."""
+    target, why = _worker_target(ctx)
+    patch = json.dumps({"spec": {"worker": {"replicas": target}}})
+    r = ctx.k(["patch", "daskcluster", "cybersec-dask", "-n", "dask",
+               "--type", "merge", "-p", patch])
+    if r.returncode != 0:
+        return Fix(False, f"CR patch failed: {(r.stderr or '')[:160]}")
+    # Belt-and-braces: the default DaskWorkerGroup carries its own replicas field
+    # (the DaskCluster→group propagation is another controller hop that can lag).
+    if ctx.exists("daskworkergroup", "cybersec-dask-default", ns="dask"):
+        ctx.k(["patch", "daskworkergroup", "cybersec-dask-default", "-n", "dask",
+               "--type", "merge", "-p", patch])
     deps = ctx.items("deployments", ns="dask", selector="dask.org/component=worker")
     excess = len(deps) - target
-    if excess <= 0:
-        return Fix(False, f"{len(deps)} worker deployment(s) ≤ target {target}; nothing to reap")
-    deps.sort(key=lambda d: d.get("status", {}).get("readyReplicas", 0))  # Pending first
-    reaped = 0
-    for d in deps[:excess]:
-        if ctx.k(["delete", "deployment", d["metadata"]["name"], "-n", "dask",
-                  "--wait=false"]).returncode == 0:
-            reaped += 1
-    return Fix(reaped > 0, f"capped to {target} (schedulable={cap['schedulable_nodes']}); "
-                           f"reaped {reaped} orphaned/excess worker deployment(s)")
+    if excess > 0:
+        deps.sort(key=lambda d: d.get("status", {}).get("readyReplicas", 0))  # Pending first
+        reaped = sum(1 for d in deps[:excess]
+                     if ctx.k(["delete", "deployment", d["metadata"]["name"], "-n", "dask",
+                               "--wait=false"]).returncode == 0)
+        return Fix(reaped > 0, f"scaled down to {target} ({why}); "
+                               f"reaped {reaped} excess worker deployment(s) [no zarf deploy]")
+    # Scale-up: give the operator a bounded window to build the new Deployments
+    # (pods pull from the internal registry; Ready is re-detect's concern).
+    import time as _time
+    deadline = _time.time() + 45
+    n = len(deps)
+    while n < target and _time.time() < deadline:
+        _time.sleep(3)
+        n = len(ctx.items("deployments", ns="dask", selector="dask.org/component=worker"))
+    return Fix(n >= target,
+               f"scaled up {len(deps)}→{n}/{target} worker deployment(s) ({why}) "
+               f"[CR patch only — existing registry, no zarf deploy]")
 
 
 # --- image-drift detection (so `apply` rolls a content/tag change) ----------

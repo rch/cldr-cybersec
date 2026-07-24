@@ -435,13 +435,17 @@ HINTS = {
             "kc -n dask get pods --field-selector=status.phase=Pending -o wide",
         ],
         [
-            "# Cap workers to schedulable_nodes-1 (min 1); engine: _rem_workers_capacity",
-            "kc -n dask get daskcluster cybersec-dask -o yaml | head -80",
-            "# set DASK_WORKER_REPLICAS then:",
-            'zarf package deploy "$PKG" --confirm --components=dask-cluster --retries 10 "${SETV[@]}"',
-            "# or scale/reap excess worker Deployments after CR update",
+            "# Scale workers SURGICALLY against the EXISTING registry — a CR patch;",
+            "# NO zarf deploy, NO image re-push (replica count is the one spec change",
+            "# the operator propagates live). Engine: _rem_workers_capacity.",
+            "N=<count>   # engine target = DASK_WORKER_REPLICAS memory-capped (~4GiB/worker + headroom)",
+            "kc -n dask patch daskcluster cybersec-dask --type merge -p '{\"spec\":{\"worker\":{\"replicas\":'$N'}}}'",
+            "kc -n dask patch daskworkergroup cybersec-dask-default --type merge -p '{\"spec\":{\"worker\":{\"replicas\":'$N'}}}' 2>/dev/null || true",
+            "kc -n dask get deploy -l dask.org/component=worker    # operator converges the count",
+            "# scale-DOWN leftovers: delete excess worker Deployments, Pending-first",
+            "# env/image changes still need the CR-recreate path (T4.scheduler) — NOT this",
         ],
-        note="Workers Pending (oversubscribed) — strands panel memory",
+        note="Workers ≠ target (Pending strands panel memory; under-count wastes the node)",
     ),
     "T5.otel-navigator": block(
         _discover_for_components("cybersec-images,panel-viz") + [

@@ -378,18 +378,31 @@ Clean up the exported secrets when done: `unset ZARF_VAR_S3_ACCESS_KEY ZARF_VAR_
 
 ---
 
-## T4.workers-capacity — workers oversubscribed (`Pending`)
-Strands `otel-navigator` (no node fits its memory). Set the DaskCluster source-of-truth replicas to
-fit, then **reap excess/orphaned worker Deployments** (the operator may leave them). Target =
-schedulable nodes − 1 (leaves headroom for panel-viz/engine/jupyter), min 1.
+## T4.workers-capacity — scale workers (up OR down) against the EXISTING registry
+Worker-count changes are **surgical: a CR patch — no `zarf package deploy`, no image re-push.**
+The pushed image is conserved on the registry's Retain PV, new pods pull it through the live
+agent, and replica count is the ONE spec change the dask operator propagates on a live CR
+(env/image changes still need the CR-recreate path — runbook §7 — NOT this).
+
+The engine's target = `DASK_WORKER_REPLICAS`, memory-capped (~4 GiB request per worker after
+~25% + 6 GiB headroom for system/scheduler/panel/hub) — so on a big single air-gap node, more
+workers is one env var + `converge apply`:
 ```bash
-TARGET=$(( $(kc get nodes -o json | python3 -c 'import sys,json;print(sum(1 for n in json.load(sys.stdin)["items"] if {c["type"]:c["status"] for c in n["status"]["conditions"]}.get("Ready")=="True"))') - 1 )); [ "$TARGET" -lt 1 ] && TARGET=1; echo "TARGET=$TARGET"
-kc patch daskcluster cybersec-dask -n dask --type merge -p "{\"spec\":{\"worker\":{\"replicas\":$TARGET}}}"   # engine: _rem_workers_capacity
-# reap excess worker Deployments, Pending/least-ready first:
-kc -n dask get deploy -l dask.org/component=worker
-kc -n dask get deploy -l dask.org/component=worker --sort-by=.status.readyReplicas -o name | head -n -$TARGET | xargs -r -n1 kc -n dask delete --wait=false
-kc -n dask get pods -l dask.org/component=worker -o wide
+sudo env DASK_WORKER_REPLICAS=8 CONVERGE_CREDS_FILE=/dev/shm/s3-creds \
+  bash ~/cybersec-converge/converge-node.sh apply     # engine: _rem_workers_capacity
 ```
+Manual equivalent (scale to N with the operator doing the work):
+```bash
+N=<count>
+kc patch daskcluster cybersec-dask -n dask --type merge -p "{\"spec\":{\"worker\":{\"replicas\":$N}}}"
+kc patch daskworkergroup cybersec-dask-default -n dask --type merge -p "{\"spec\":{\"worker\":{\"replicas\":$N}}}" 2>/dev/null || true
+kc -n dask get deploy -l dask.org/component=worker    # operator converges the count
+# scale-DOWN only — reap leftover excess Deployments, Pending/least-ready first:
+kc -n dask get deploy -l dask.org/component=worker --sort-by=.status.readyReplicas -o name | head -n -$N | xargs -r -n1 kc -n dask delete --wait=false
+kc -n dask get pods -l dask.org/component=worker -o wide   # none Pending = fits
+```
+**Oversubscribed (`Pending` workers)** is the same remediation with a smaller N — Pending
+workers strand `otel-navigator` (no node fits its memory).
 
 ## T5.otel-navigator / panel stack — full remediation matrix
 
