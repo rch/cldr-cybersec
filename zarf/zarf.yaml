@@ -26,6 +26,19 @@ variables:
   - name: DASK_WORKER_REPLICAS
     description: Number of Dask worker replicas (1 = resilient single-node baseline)
     default: "1"
+  # Worker sizing — defaults preserve the historical rendering. On a big
+  # single-node deploy raise these with replicas (e.g. 64c/1TiB → replicas=32,
+  # mem-limit 28Gi, request 24Gi, nthreads 2). The converge engine also applies
+  # sizing SURGICALLY to a live cluster (CR patch + worker bounce, no redeploy).
+  - name: DASK_WORKER_MEM_REQUEST
+    description: Worker container memory request (K8s quantity)
+    default: 4Gi
+  - name: DASK_WORKER_MEM_LIMIT
+    description: Worker container memory limit AND dask-worker --memory-limit
+    default: 6Gi
+  - name: DASK_WORKER_NTHREADS
+    description: dask-worker --nthreads; also the worker CPU limit
+    default: "2"
   - name: DASK_SPILL_DIR
     description: Host path for Dask worker spill-to-disk (set to NFS mount if available)
     default: /tmp/dask-spill

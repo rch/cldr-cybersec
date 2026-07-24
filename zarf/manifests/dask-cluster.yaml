@@ -99,9 +99,9 @@ spec:
           args:
             - dask-worker
             - --nthreads
-            - "2"
+            - "###ZARF_VAR_DASK_WORKER_NTHREADS###"
             - --memory-limit
-            - 6Gi
+            - "###ZARF_VAR_DASK_WORKER_MEM_LIMIT###"
             - --local-directory
             - /dask-spill
           # See scheduler comment above — S3 creds are templated from the Zarf
@@ -127,10 +127,10 @@ spec:
           resources:
             requests:
               cpu: "250m"
-              memory: 4Gi
+              memory: "###ZARF_VAR_DASK_WORKER_MEM_REQUEST###"
             limits:
-              cpu: "1"
-              memory: 6Gi
+              cpu: "###ZARF_VAR_DASK_WORKER_NTHREADS###"
+              memory: "###ZARF_VAR_DASK_WORKER_MEM_LIMIT###"
       volumes:
         - name: dask-spill
           hostPath:

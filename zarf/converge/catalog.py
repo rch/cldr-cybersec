@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .discovery import APP_NAMESPACES, DASK_CRD_KINDS
-from .kube import Ctx
+from .kube import Ctx, _mem_to_gib
 from .model import Cost, Fix, Invariant, Layer, Probe
 from . import manual as _manual
 from . import platform as _platform
@@ -1176,20 +1176,45 @@ def _rem_scheduler(ctx: Ctx) -> Fix:
     return _zarf_deploy_components(ctx, "dask-cluster")
 
 
-# Worker sizing constants — mirror the requests in manifests/dask-cluster.yaml.
-# The cap is RESOURCE-based (not node-count): one big air-gap node legitimately
-# holds many workers, and Pending-detection remains the scheduling backstop.
-_WORKER_MEM_GIB = 4.0        # worker memory request (dask-cluster.yaml)
-_MEM_HEADROOM_FRAC = 0.25    # fraction reserved for system/kubelet
-_MEM_HEADROOM_GIB = 6.0      # fixed reserve: scheduler + panel-viz + engine + hub
+# Worker sizing — default mirrors manifests/dask-cluster.yaml; overridable at
+# converge time via DASK_WORKER_MEM_REQUEST / _MEM_LIMIT / _NTHREADS (see
+# _rem_workers_capacity: sizing is applied SURGICALLY, no zarf deploy). The cap
+# is RESOURCE-based (not node-count): one big air-gap node legitimately holds
+# many workers, and Pending-detection remains the scheduling backstop.
+_WORKER_MEM_GIB = 4.0          # default worker memory request (dask-cluster.yaml)
+_MEM_HEADROOM_FRAC = 0.25      # fraction reserved for system/kubelet ...
+_MEM_HEADROOM_FRAC_CAP = 32.0  # ... but capped: a 1 TiB box shouldn't idle 256 GiB
+_MEM_HEADROOM_GIB = 6.0        # fixed reserve: scheduler + panel-viz + engine + hub
 
 
-def _cap_workers(requested: int, total_mem_gib: float) -> int:
+def _cap_workers(requested: int, total_mem_gib: float,
+                 per_worker_gib: float = _WORKER_MEM_GIB) -> int:
     """Clamp a requested worker count to what allocatable memory can hold after
     headroom. Pure so the matrix/unit checks can exercise it directly."""
-    usable = total_mem_gib * (1.0 - _MEM_HEADROOM_FRAC) - _MEM_HEADROOM_GIB
-    cap = max(1, int(usable / _WORKER_MEM_GIB))
+    headroom = min(total_mem_gib * _MEM_HEADROOM_FRAC, _MEM_HEADROOM_FRAC_CAP)
+    usable = total_mem_gib - headroom - _MEM_HEADROOM_GIB
+    cap = max(1, int(usable / max(per_worker_gib, 0.5)))
     return max(1, min(requested, cap))
+
+
+def _worker_mem_gib(ctx: Ctx) -> float:
+    """Per-worker memory (GiB) for the capacity cap: the converge-time request
+    override if given, else the LIVE worker deployment's request, else default."""
+    v = ctx.s3.get("DASK_WORKER_MEM_REQUEST") or ctx.s3.get("DASK_WORKER_MEM_LIMIT")
+    if v:
+        g = _mem_to_gib(str(v))
+        if g > 0:
+            return g
+    deps = ctx.items("deployments", ns="dask", selector="dask.org/component=worker")
+    for d in deps:
+        req = (((d.get("spec", {}).get("template", {}).get("spec", {})
+                 .get("containers") or [{}])[0].get("resources") or {})
+               .get("requests") or {}).get("memory")
+        if req:
+            g = _mem_to_gib(str(req))
+            if g > 0:
+                return g
+    return _WORKER_MEM_GIB
 
 
 def _worker_target(ctx: Ctx) -> "tuple[int, str]":
@@ -1198,11 +1223,73 @@ def _worker_target(ctx: Ctx) -> "tuple[int, str]":
         requested = int(str(ctx.s3.get("DASK_WORKER_REPLICAS") or "1"))
     except ValueError:
         requested = 1
+    per_worker = _worker_mem_gib(ctx)
     cap = ctx.node_capacity()
-    target = _cap_workers(max(1, requested), cap.get("total_mem_gib", 0.0))
-    why = (f"requested={requested}, mem={cap.get('total_mem_gib', 0)}GiB"
+    target = _cap_workers(max(1, requested), cap.get("total_mem_gib", 0.0), per_worker)
+    why = (f"requested={requested}, mem={cap.get('total_mem_gib', 0)}GiB, "
+           f"{per_worker:g}GiB/worker"
            + (f" → capped to {target}" if target < requested else ""))
     return target, why
+
+
+def _worker_size_drift(ctx: Ctx) -> "str | None":
+    """If a converge-time size override is given, compare it to the LIVE worker
+    Deployments. Returns a drift description or None. Sizing (unlike replicas)
+    does NOT propagate on a live CR — remediation must rebuild the children."""
+    want_limit = ctx.s3.get("DASK_WORKER_MEM_LIMIT")
+    if not want_limit:
+        return None
+    want_gib = _mem_to_gib(str(want_limit))
+    deps = ctx.items("deployments", ns="dask", selector="dask.org/component=worker")
+    for d in deps:
+        lim = (((d.get("spec", {}).get("template", {}).get("spec", {})
+                 .get("containers") or [{}])[0].get("resources") or {})
+               .get("limits") or {}).get("memory", "")
+        if lim and abs(_mem_to_gib(str(lim)) - want_gib) > 0.01:
+            return f"live worker mem limit {lim} ≠ requested {want_limit}"
+    return None
+
+
+def _patch_worker_sizing(ctx: Ctx, obj_kind: str, obj_name: str) -> "list[str]":
+    """JSON-patch worker resources + dask-worker args on a DaskCluster or
+    DaskWorkerGroup. Arrays need exact indices → read the object first."""
+    obj = ctx.get(obj_kind, obj_name, ns="dask")
+    if not obj:
+        return []
+    spec = obj.get("spec", {}).get("worker", {}).get("spec", {})
+    containers = spec.get("containers") or []
+    if not containers:
+        return []
+    base = f"/spec/worker/spec/containers/0"
+    ops, notes = [], []
+    limit = ctx.s3.get("DASK_WORKER_MEM_LIMIT")
+    request = ctx.s3.get("DASK_WORKER_MEM_REQUEST") or limit
+    nthreads = ctx.s3.get("DASK_WORKER_NTHREADS")
+    if request:
+        ops.append({"op": "replace", "path": f"{base}/resources/requests/memory",
+                    "value": str(request)})
+    if limit:
+        ops.append({"op": "replace", "path": f"{base}/resources/limits/memory",
+                    "value": str(limit)})
+    args = containers[0].get("args") or []
+    if limit and "--memory-limit" in args:
+        ops.append({"op": "replace",
+                    "path": f"{base}/args/{args.index('--memory-limit') + 1}",
+                    "value": str(limit)})
+    if nthreads:
+        if "--nthreads" in args:
+            ops.append({"op": "replace",
+                        "path": f"{base}/args/{args.index('--nthreads') + 1}",
+                        "value": str(nthreads)})
+        ops.append({"op": "replace", "path": f"{base}/resources/limits/cpu",
+                    "value": str(nthreads)})
+    if ops:
+        r = ctx.k(["patch", obj_kind, obj_name, "-n", "dask", "--type", "json",
+                   "-p", json.dumps(ops)])
+        if r.returncode == 0:
+            notes.append(f"{obj_kind} sized (mem {request or '-'}→req/{limit or '-'}→lim"
+                         + (f", nthreads={nthreads}" if nthreads else "") + ")")
+    return notes
 
 
 def _det_workers_capacity(ctx: Ctx) -> Probe:
@@ -1219,6 +1306,9 @@ def _det_workers_capacity(ctx: Ctx) -> Probe:
     deps = ctx.items("deployments", ns="dask", selector="dask.org/component=worker")
     if len(deps) != target:
         return Probe(False, f"{len(deps)} worker deployment(s), want {target} ({why})")
+    drift = _worker_size_drift(ctx)
+    if drift:
+        return Probe(False, f"{drift} (sizing does not propagate live — rebuild children)")
     return Probe(True, f"{len(deps)} worker(s) = target {target}, none Pending")
 
 
@@ -1234,6 +1324,36 @@ def _rem_workers_capacity(ctx: Ctx) -> Fix:
     excess worker Deployments oldest-Pending-first, because the operator can
     leave orphans it never reaps (the "spec says 4 but 16 pods" field state)."""
     target, why = _worker_target(ctx)
+    sized = []
+    bounce = _worker_size_drift(ctx) is not None
+    if ctx.s3.get("DASK_WORKER_MEM_LIMIT") or ctx.s3.get("DASK_WORKER_NTHREADS"):
+        # Apply the sizing to CR + workergroup FIRST — children built afterwards
+        # (scale-up or the bounce below) inherit it.
+        sized += _patch_worker_sizing(ctx, "daskcluster", "cybersec-dask")
+        sized += _patch_worker_sizing(ctx, "daskworkergroup", "cybersec-dask-default")
+    if bounce:
+        # Sizing does NOT propagate to live children (the CR-recreate lesson,
+        # scoped down): rebuild ONLY the workers by cycling replicas through 0 —
+        # the operator recreates Deployments from the freshly-sized spec.
+        # Workers are stateless (spill is hostPath); scheduler/panel untouched.
+        import time as _time
+        zero = json.dumps({"spec": {"worker": {"replicas": 0}}})
+        for kind, name in (("daskcluster", "cybersec-dask"),
+                           ("daskworkergroup", "cybersec-dask-default")):
+            if ctx.exists(kind, name, ns="dask"):
+                ctx.k(["patch", kind, name, "-n", "dask", "--type", "merge", "-p", zero])
+        deadline = _time.time() + 60
+        while _time.time() < deadline:
+            left = ctx.items("deployments", ns="dask", selector="dask.org/component=worker")
+            if not left:
+                break
+            _time.sleep(3)
+        else:
+            for d in ctx.items("deployments", ns="dask",
+                               selector="dask.org/component=worker"):
+                ctx.k(["delete", "deployment", d["metadata"]["name"], "-n", "dask",
+                       "--wait=false"])
+        sized.append("bounced workers 0→target (resize)")
     patch = json.dumps({"spec": {"worker": {"replicas": target}}})
     r = ctx.k(["patch", "daskcluster", "cybersec-dask", "-n", "dask",
                "--type", "merge", "-p", patch])
@@ -1251,8 +1371,10 @@ def _rem_workers_capacity(ctx: Ctx) -> Fix:
         reaped = sum(1 for d in deps[:excess]
                      if ctx.k(["delete", "deployment", d["metadata"]["name"], "-n", "dask",
                                "--wait=false"]).returncode == 0)
-        return Fix(reaped > 0, f"scaled down to {target} ({why}); "
-                               f"reaped {reaped} excess worker deployment(s) [no zarf deploy]")
+        extra = ("; " + "; ".join(sized)) if sized else ""
+        return Fix(reaped > 0 or bool(sized),
+                   f"scaled down to {target} ({why}); "
+                   f"reaped {reaped} excess worker deployment(s){extra} [no zarf deploy]")
     # Scale-up: give the operator a bounded window to build the new Deployments
     # (pods pull from the internal registry; Ready is re-detect's concern).
     import time as _time
@@ -1261,8 +1383,9 @@ def _rem_workers_capacity(ctx: Ctx) -> Fix:
     while n < target and _time.time() < deadline:
         _time.sleep(3)
         n = len(ctx.items("deployments", ns="dask", selector="dask.org/component=worker"))
+    extra = ("; " + "; ".join(sized)) if sized else ""
     return Fix(n >= target,
-               f"scaled up {len(deps)}→{n}/{target} worker deployment(s) ({why}) "
+               f"scaled up {len(deps)}→{n}/{target} worker deployment(s) ({why}){extra} "
                f"[CR patch only — existing registry, no zarf deploy]")
 
 

@@ -170,6 +170,12 @@ else
 fi
 [ -n "$CREDS_FILE" ] && ARGS+=(--creds-file "$CREDS_FILE")
 ARGS+=(--set "DASK_WORKER_REPLICAS=${DASK_WORKER_REPLICAS:-1}")
+# Optional worker sizing — unset keeps the package defaults (4Gi/6Gi/2 threads).
+# When set, the engine applies them SURGICALLY to a live cluster (CR patch +
+# worker bounce against the existing registry — no zarf deploy needed).
+[ -n "${DASK_WORKER_MEM_REQUEST:-}" ] && ARGS+=(--set "DASK_WORKER_MEM_REQUEST=${DASK_WORKER_MEM_REQUEST}")
+[ -n "${DASK_WORKER_MEM_LIMIT:-}" ]   && ARGS+=(--set "DASK_WORKER_MEM_LIMIT=${DASK_WORKER_MEM_LIMIT}")
+[ -n "${DASK_WORKER_NTHREADS:-}" ]    && ARGS+=(--set "DASK_WORKER_NTHREADS=${DASK_WORKER_NTHREADS}")
 # Optional terminal-WS override (NodePort/tunnel access; empty = auto-detect / ingress /ws)
 [ -n "${PTY_PROXY_WS:-}" ] && ARGS+=(--set "PTY_PROXY_WS=${PTY_PROXY_WS}")
 # Optional explicit ingress class; engine auto-detects nginx on RKE2 when unset

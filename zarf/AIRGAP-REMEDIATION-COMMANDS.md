@@ -384,12 +384,20 @@ The pushed image is conserved on the registry's Retain PV, new pods pull it thro
 agent, and replica count is the ONE spec change the dask operator propagates on a live CR
 (env/image changes still need the CR-recreate path — runbook §7 — NOT this).
 
-The engine's target = `DASK_WORKER_REPLICAS`, memory-capped (~4 GiB request per worker after
-~25% + 6 GiB headroom for system/scheduler/panel/hub) — so on a big single air-gap node, more
-workers is one env var + `converge apply`:
+The engine's target = `DASK_WORKER_REPLICAS`, memory-capped (per-worker request after
+`min(25%, 32 GiB)` + 6 GiB headroom for system/scheduler/panel/hub). **Worker SIZING is
+tunable the same way** (`DASK_WORKER_MEM_REQUEST` / `DASK_WORKER_MEM_LIMIT` /
+`DASK_WORKER_NTHREADS`) — sizing does not propagate on a live CR, so the engine patches the
+CR **and bounces only the workers** (replicas 0→N; scheduler/panel untouched; stateless spill).
+Example — 64-core / 1 TiB single node, 32 right-sized workers:
 ```bash
-sudo env DASK_WORKER_REPLICAS=8 CONVERGE_CREDS_FILE=/dev/shm/s3-creds \
+sudo env DASK_WORKER_REPLICAS=32 \
+         DASK_WORKER_MEM_REQUEST=24Gi DASK_WORKER_MEM_LIMIT=28Gi \
+         DASK_WORKER_NTHREADS=2 \
+         CONVERGE_CREDS_FILE=/dev/shm/s3-creds \
   bash ~/cybersec-converge/converge-node.sh apply     # engine: _rem_workers_capacity
+# 32×2 threads = 64 cores; 32×28Gi = 896Gi ceiling; dask --memory-limit tracks the
+# container limit (workers self-restart at 95% before the kubelet OOM-kills at 100%).
 ```
 Manual equivalent (scale to N with the operator doing the work):
 ```bash
