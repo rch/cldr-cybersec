@@ -1,51 +1,161 @@
-# Cybersec Toolkit
+# Cyberphy
 
-[![Build and Test](https://github.com/cloudera/cybersec/actions/workflows/build_and_test.yml/badge.svg)](https://github.com/cloudera/cybersec/actions/workflows/build_and_test.yml)
+**Cyber-physical systems observability and analytics** — OpenTelemetry from the plant floor and robot cell, through stream processing, into a lakehouse you can query and explore.
 
-## Overview
-Enterprises deploy many point solutions to defend their networks.  These point solutions provide a wealth of data about the enterprise assets and networks but it is difficult to provide analytics on this data because there is no common repository and the events are in different formats.  The Cybersec Toolkit is a pipeline that ingests, correlates and prepares cybersecurity data for analytics.  The Cyber Toolkit leverages the Cloudera Data Platform to build a Security Data Lakehouse.
+This repository ships:
 
-The Cyber Toolkit ingests raw log events from a variety of sources, parses and normalizes the log events using a common schema, enriches the events with reference data, scores the log events, profiles the events, and streams the events to a Kafka and a data lakehouse.   Integrate with orchestration or investigation and ticketing platforms using Flink SQL (SQL Stream Builder) on the triaged event topic.  Query the data lakehouse using SQL for visualizations and ad hoc queries or Spark for notebooks, investigations and machine learning model training.
+1. **Air-gap Kubernetes releases** ([`zarf/`](zarf/)) — primary product delivery  
+2. **AWS / on-prem infrastructure** ([`infra/`](infra/)) — OpenTofu + Ansible for RKE2 and the same stack  
+3. The **processing and UI stack** (Flink, NiFi, Polaris, Iceberg, Dask, Panel) that turns CPS and system OTel into durable, queryable data  
 
-The Cyber Toolkit is flexible and configurable so the ingestion can be changed with low or no code.
- 
-## Ingestion Stages
-1. [Parse](flink-cyber/parser-chains-flink/README.md)
-2. [Triage](flink-cyber/flink-enrichment/flink-enrichment-combined/README.md)
-3. [Index](flink-cyber/flink-indexing/flink-indexing-hive/README.md)
-4. [Profile](flink-cyber/flink-profiler-java/README.md)
+Legacy Cloudera Manager packaging (parcel / CSD) is **not** part of this project. Upstream cybersecurity history remains on the `upstream` / `rch` remotes if needed; **this** tree targets [weathership/cyberphy](https://github.com/weathership/cyberphy).
 
-## Tools
-1. [Batch Enrichment Load](flink-cyber/flink-enrichment/flink-enrichment-load/README.md)
-2. [Upsert Scoring Command](flink-cyber/flink-commands/scoring-commands/README.md)
-3. [Event Generation](flink-cyber/caracal-generator/README.md)
+---
 
-## Packaging
-The Cybersec Toolkit includes a Cloudera Manager parcel and service for easier installation.
+## Vision
 
-Artifacts are available for download on the [releases page](https://github.com/cloudera/cybersec/releases).
-You can also find less stable, but more up to date artifacts by selecting one of successful runs on [this page](https://github.com/cloudera/cybersec/actions/workflows/publish_release.yml) and scrolling to the bottom of the selected run page.
+Cyber-physical systems (manufacturing lines, robotics cells, industrial controllers) and the software that runs them all emit telemetry. We treat that telemetry as first-class **OpenTelemetry** data:
 
-Or you can find artifacts after the build in the following directories:
-1. [Parcel](flink-cyber/cyber-parcel)
-2. [Cloudera Service](flink-cyber/cyber-csd)
+| Source | Examples | Path |
+|--------|----------|------|
+| **CPS / edge** | robot joint streams, PLC/SCADA events, cell controllers, machine vision jobs | ingest → normalize → stream → lakehouse |
+| **The platform itself** | Flink jobs, NiFi flows, Dask workers, Panel/engine, K8s | OTel metrics/traces/logs back into the same lake |
 
-## Building from Source
-### Clone repo
+Downstream:
+
+- **Flink** (and friends) process event streams that look like manufacturing and robotics messages—not only classical security logs.  
+- **Those processors emit OTel** about their own work (lag, enrichment, failures).  
+- **Iceberg** (via Polaris / MinIO or S3) holds long-lived span and event tables.  
+- **Dask + Panel** explore multi-partition OTel at interactive scale (air-gap capable).
+
+```text
+  CPS devices / robots / PLCs          Platform (Flink, NiFi, Dask, UI)
+           │                                        │
+           │  OTel / domain events                  │  OTel self-telemetry
+           ▼                                        ▼
+     ┌─────────────────────────────────────────────────────┐
+     │  Ingest (NiFi / connectors) → Flink pipelines       │
+     │  Catalog: Polaris  ·  Tables: Iceberg  ·  Obj: S3   │
+     └───────────────────────┬─────────────────────────────┘
+                             │
+              ┌──────────────┴──────────────┐
+              ▼                             ▼
+     Interactive (Panel / Jupyter)    Batch / SQL analytics
+              │
+              └── Air-gap K8s via Zarf release (see zarf/)
 ```
-git clone https://github.com/cloudera/cybersec.git
+
+---
+
+## Primary delivery: `zarf/`
+
+**Zarf packages** are the supported way to put the interactive stack on **air-gapped RKE2** (and related K8s):
+
+| Piece | Role |
+|-------|------|
+| `zarf/zarf.yaml` | Package definition (Dask, JupyterHub, Panel-Viz, images) |
+| `zarf/converge/` | Idempotent deploy/verify engine (detect → rem → fixpoint) |
+| `zarf/scripts/converge-node.sh` | Node entrypoint (no package required for config-only rem) |
+| `zarf/scripts/verify-s3-datapath.sh` | Prove configured S3 + marker + span parquet |
+| `zarf/AIRGAP-*.md` | Discovery, remediations, runbooks |
+
+**Start here:**
+
+```bash
+# On an RKE2 control plane (package already staged, or config-only with S3 creds):
+sudo bash zarf/scripts/converge-node.sh verify
+sudo env CONVERGE_CREDS_FILE=/dev/shm/s3-creds bash zarf/scripts/converge-node.sh apply
+sudo bash zarf/scripts/verify-s3-datapath.sh
 ```
 
-### Build with tests
+Full package docs, variables, and ports: **[`zarf/README.md`](zarf/README.md)** · **[`zarf/RUNBOOK.md`](zarf/RUNBOOK.md)** · **[`zarf/AIRGAP-CONVERGE-RUNBOOK.md`](zarf/AIRGAP-CONVERGE-RUNBOOK.md)**
 
-```
-cd cybersec/flink-cyber
-mvn clean install
+---
+
+## Infrastructure: `infra/`
+
+**AWS and lab K8s** for the same platform—not Cloudera Manager.
+
+| Path | Role |
+|------|------|
+| [`infra/aws/tofu/`](infra/aws/tofu/) | OpenTofu: VPC, RKE2 nodes, S3, security groups |
+| [`infra/aws/ansible/`](infra/aws/ansible/) | RKE2, Zarf stage/deploy, Dask/Jupyter/Panel playbooks |
+| [`infra/aws/tofu-sandbox/`](infra/aws/tofu-sandbox/) | Smaller / FSM test sandbox |
+| [`infra/LOCAL.md`](infra/LOCAL.md) | Local k3d / existing RKE2 paths |
+
+**Typical AWS path:**
+
+```bash
+# From a developer machine with devenv / tofu / ansible configured:
+devenv tasks run aws:provision    # or tofu apply under infra/aws/tofu
+devenv tasks run aws:deploy       # Ansible → RKE2 + Zarf stack
+# Then air-gap-style verify on the node via zarf/scripts/converge-*.sh
 ```
 
-### Build without running tests
-```
-cd cybersec/flink-cyber
+Overview and mode matrix: **[`infra/README.md`](infra/README.md)** · AWS detail: **[`infra/aws/README.md`](infra/aws/README.md)**
+
+---
+
+## Platform stack (stays)
+
+Everything below remains first-class. Domain payloads shift toward **CPS + platform OTel**; the engines stay.
+
+| Layer | Components |
+|-------|------------|
+| **Stream / flow** | Apache Flink (`flink-cyber/` pipeline toolkit, `thirdparty/flink`), Apache NiFi (`thirdparty/nifi`) |
+| **Table / catalog** | Apache Iceberg (`thirdparty/iceberg`), Apache Polaris (`thirdparty/polaris`), MinIO/S3 |
+| **Interactive** | Dask, JupyterHub, Panel OTEL Navigator / Data-View, Navigator engine + PTY |
+| **Local lab** | `devenv` (Postgres, Polaris bootstrap, MinIO, Flink UI, observability ports) |
+| **Python ops** | `cybersec/` package name is transitional (CLI/bootstrap/health/engine); rebrand to cyberphy is incremental |
+
+Build Flink toolkit (no CM packaging):
+
+```bash
+cd flink-cyber
 mvn clean install -DskipTests
+# cyber-parcel / cyber-csd removed from the reactor — not built
 ```
 
+Local core services:
+
+```bash
+devenv up
+# Flink :8081 · Iceberg browser :5050 · MinIO :9011 · Polaris :8181 · …
+```
+
+---
+
+## Repository map
+
+```text
+zarf/           # ★ Zarf releases, converge, air-gap runbooks  (primary deliverable)
+infra/          # ★ OpenTofu AWS + Ansible RKE2 / stack deploy
+flink-cyber/    # Flink pipelines (parse, enrich, index, profile) — no CM parcel/CSD
+thirdparty/     # flink, iceberg, nifi, polaris submodules (source builds)
+cybersec/       # Python ops + engine (name to be aligned with cyberphy over time)
+docs/           # Deeper ops / architecture notes
+```
+
+---
+
+## What we are not doing
+
+- **Cloudera Manager** parcels, CSDs, or CDP-centric install paths  
+- Positioning this tree as a pure “security SIEM” product — telemetry is **OTel from CPS and from the platform**  
+- Requiring a full monorepo rebuild to ship a **Zarf** release — zarf image + package is the release unit for the interactive stack  
+
+---
+
+## Remotes
+
+| Remote | URL | Role |
+|--------|-----|------|
+| `origin` | `git@github.com:weathership/cyberphy.git` | This project |
+| `upstream` | `git@github.com:cloudera/cybersec.git` | Historical cybersecurity upstream |
+| `rch` | `git@github.com:rch/cldr-cybersec.git` | Personal fork / prior work |
+
+---
+
+## License
+
+See [LICENSE](LICENSE) and [NOTICE](NOTICE).

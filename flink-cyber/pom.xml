@@ -47,8 +47,8 @@
         <module>metron-hbase-common</module>
         <module>flink-commands</module>
         <module>cyber-jobs</module>
-        <module>cyber-csd</module>
-        <module>cyber-parcel</module>
+        <!-- cyber-csd / cyber-parcel: Cloudera Manager packaging — retired for cyberphy
+             (air-gap delivery is zarf/; AWS is infra/ tofu+ansible). -->
         <module>cyber-services</module>
     </modules>
 
@@ -720,8 +720,6 @@
             </activation>
             <modules>
                 <module>cyber-jobs</module>
-                <module>cyber-csd</module>
-                <module>cyber-parcel</module>
                 <module>metron-parser-chain/parser-chains-config-service/frontend/parser-chains-client</module>
             </modules>
         </profile>
