@@ -1,54 +1,60 @@
 # Summary
 
-# Platform Overview
+# Cyberphy
 
 - [Introduction](./introduction.md)
 - [Quick Start](./quickstart.md)
 
-# Workloads
+# Delivery (primary)
 
-- [Workload Overview](./workloads/overview.md)
-- [Laptop Development](./workloads/laptop-dev.md)
-    - [Local Flink Environment](./workloads/laptop-dev/flink-local.md)
-    - [K3d for Testing](./workloads/laptop-dev/k3d.md)
-    - [Scenarios](./workloads/laptop-dev/scenarios.md)
-- [Workstation with GPUs](./workloads/workstation.md)
-    - [Flink + Cyber Toolkit](./workloads/workstation/flink-cyber.md)
-    - [RKE2 System Deployment](./workloads/workstation/rke2.md)
-    - [GPU-Accelerated Workflows](./workloads/workstation/gpu.md)
-    - [Scenarios](./workloads/workstation/scenarios.md)
-- [Benchmarking & Multi-Cluster](./workloads/benchmarking.md)
-    - [Local Telemetry Collection](./workloads/benchmarking/telemetry.md)
-    - [Remote RKE2 on AWS](./workloads/benchmarking/aws-rke2.md)
-    - [Dask + JupyterHub](./workloads/benchmarking/dask-jupyter.md)
-    - [Scenarios](./workloads/benchmarking/scenarios.md)
+- [Zarf air-gap releases](./delivery/zarf.md)
+- [AWS & infrastructure](./delivery/infra.md)
+- [Converge & verification](./delivery/converge.md)
 
-# Architecture
+# Platform
 
-- [System Architecture](./architecture/overview.md)
-    - [Data Flow](./architecture/data-flow.md)
-    - [Storage Strategy](./architecture/storage.md)
-    - [HDF5 ↔ Iceberg Metadata Plane](./architecture/hdf5-iceberg-metadata-plane.md)
-- [AWS Integration](./architecture/aws.md)
-    - [CloudTrail Ingestion](./architecture/aws/cloudtrail.md)
-    - [S3 Table Buckets](./architecture/aws/s3-tables.md)
-    - [Glacier Archival](./architecture/aws/glacier.md)
-- [On-Prem Cluster](./architecture/onprem.md)
-    - [Replication Strategy](./architecture/onprem/replication.md)
-    - [Table Optimization](./architecture/onprem/optimization.md)
-- [Complex Systems Integration](./architecture/integration.md)
+- [System architecture](./architecture/overview.md)
+    - [Data flow](./architecture/data-flow.md)
+    - [Storage strategy](./architecture/storage.md)
+    - [HDF5 ↔ Iceberg metadata](./architecture/hdf5-iceberg-metadata-plane.md)
+- [Workloads overview](./workloads/overview.md)
+    - [Laptop development](./workloads/laptop-dev.md)
+        - [Local Flink](./workloads/laptop-dev/flink-local.md)
+        - [K3d](./workloads/laptop-dev/k3d.md)
+        - [Scenarios](./workloads/laptop-dev/scenarios.md)
+    - [Workstation](./workloads/workstation.md)
+        - [Flink toolkit](./workloads/workstation/flink-cyber.md)
+        - [RKE2](./workloads/workstation/rke2.md)
+        - [GPU workflows](./workloads/workstation/gpu.md)
+        - [Scenarios](./workloads/workstation/scenarios.md)
+    - [Benchmarking](./workloads/benchmarking.md)
+        - [Telemetry](./workloads/benchmarking/telemetry.md)
+        - [AWS RKE2](./workloads/benchmarking/aws-rke2.md)
+        - [Dask + JupyterHub](./workloads/benchmarking/dask-jupyter.md)
+        - [Scenarios](./workloads/benchmarking/scenarios.md)
+
+# Architecture (depth)
+
+- [AWS integration](./architecture/aws.md)
+    - [CloudTrail (legacy reference)](./architecture/aws/cloudtrail.md)
+    - [S3 table buckets](./architecture/aws/s3-tables.md)
+    - [Glacier archival](./architecture/aws/glacier.md)
+- [On-prem cluster](./architecture/onprem.md)
+    - [Replication](./architecture/onprem/replication.md)
+    - [Table optimization](./architecture/onprem/optimization.md)
+- [Complex systems integration](./architecture/integration.md)
 
 # Operations
 
-- [Operations Guide](./operations/overview.md)
-    - [Health Diagnostics](./operations/health.md)
-    - [Bootstrap System](./operations/bootstrap.md)
-    - [Air-Gap Deployment](./operations/airgap-deployment.md)
-    - [Runbook: Air-Gap Update (MOP)](./operations/runbook-airgap-update.md)
-    - [Multi-RKE2 Isolation](./operations/multi-rke2-isolation.md)
-    - [Testing & Verification](./operations/testing.md)
-    - [Historical Retrieval](./operations/historical.md)
-    - [Data Verification](./operations/verification.md)
+- [Operations guide](./operations/overview.md)
+    - [Health diagnostics](./operations/health.md)
+    - [Bootstrap](./operations/bootstrap.md)
+    - [Air-gap deployment](./operations/airgap-deployment.md)
+    - [Runbook: air-gap update](./operations/runbook-airgap-update.md)
+    - [Multi-RKE2 isolation](./operations/multi-rke2-isolation.md)
+    - [Testing](./operations/testing.md)
+    - [Historical retrieval](./operations/historical.md)
+    - [Data verification](./operations/verification.md)
 
 # Roadmap
 
@@ -57,5 +63,5 @@
 # Reference
 
 - [Configuration](./reference/configuration.md)
-- [Polaris Setup](./reference/polaris.md)
+- [Polaris setup](./reference/polaris.md)
 - [Troubleshooting](./reference/troubleshooting.md)

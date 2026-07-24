@@ -156,6 +156,16 @@ docs/           # Deeper ops / architecture notes
 
 ---
 
+## Documentation
+
+mdBook sources live under [`docs/current/`](docs/current/) (same layout as Ægir: curated book + `docs/scratch/` notes).
+
+- **Local build:** `cd docs/current && mdbook build` (optional: D2 + `mdbook-d2` for diagrams)  
+- **CI:** [`.github/workflows/docs.yml`](.github/workflows/docs.yml) builds and deploys **GitHub Pages** on push to **`trunk`** when `docs/**` changes  
+- **Published site:** enable Pages for the `weathership/cyberphy` repo (source: GitHub Actions)
+
+---
+
 ## License
 
 See [LICENSE](LICENSE) and [NOTICE](NOTICE).

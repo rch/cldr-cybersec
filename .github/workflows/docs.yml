@@ -1,22 +1,28 @@
 name: Deploy Documentation
 
+# Match Ægir docs pipeline: mdBook → GitHub Pages on trunk.
+# Opt in to the Node 24 runtime for JavaScript actions. GitHub will
+# force this default on 2026-06-02 and remove Node 20 on 2026-09-16;
+# enabling it now clears the deprecation annotation for the
+# actions/checkout, actions/configure-pages, actions/upload-artifact,
+# and peaceiris/actions-mdbook steps used below.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 on:
   push:
     branches:
-      - rch/devenv
-      - rch/devenv-cybersec
+      - trunk
     paths:
-      - 'docs/current/**'
+      - 'docs/**'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Allow only one concurrent deployment
 concurrency:
   group: "pages"
   cancel-in-progress: false
@@ -38,13 +44,15 @@ jobs:
           curl -fsSL https://d2lang.com/install.sh | sh -s --
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Install mdbook-d2
+      - name: Install mdbook preprocessors
         run: |
-          # Download pre-built binary from GitHub releases
+          # mdbook-d2 (diagrams in src/ via ```d2 fences)
           MDBOOK_D2_VERSION="v0.3.8"
           curl -sSL "https://github.com/danieleades/mdbook-d2/releases/download/${MDBOOK_D2_VERSION}/mdbook-d2-x86_64-unknown-linux-gnu.tar.gz" | tar xz
           chmod +x mdbook-d2
           sudo mv mdbook-d2 /usr/local/bin/
+
+          # mdbook-katex / mdbook-mermaid: disabled (mdbook 0.5.x compatibility)
 
       - name: Build documentation
         run: |

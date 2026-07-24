@@ -1,55 +1,52 @@
 # Introduction
 
-The Cybersec Toolkit provides a unified pipeline for ingesting, processing, and analyzing cybersecurity data across hybrid cloud environments. It enables security teams to work with CloudTrail logs, network telemetry, and security events using modern data lakehouse architecture.
+**Cyberphy** is a platform for **cyber-physical systems observability and analytics**: OpenTelemetry from the plant floor and robot cell, through stream processing, into a lakehouse you can query and explore—plus OTel from the platform itself.
 
-## What Is Cybersec Toolkit?
+This book documents how we **deploy** (Zarf air-gap releases, AWS OpenTofu + Ansible) and how the **stack** works (Flink, NiFi, Polaris, Iceberg, Dask, Panel).
 
-A data platform that brings together:
+## What we optimize for
 
-- **Apache Flink** for real-time stream processing
-- **Apache Iceberg** for unified table format across environments
-- **Cloudera's Cyber Toolkit** for security-specific enrichment and analysis
-- **Kubernetes (RKE2/K3d)** for scalable deployment
-- **Dask + JupyterHub** for interactive analytics and ML workloads
+| Priority | Path | Audience |
+|----------|------|----------|
+| **1 — Air-gap K8s** | [`zarf/`](https://github.com/weathership/cyberphy/tree/trunk/zarf) packages + converge | Operators on RKE2 without outbound pull |
+| **2 — AWS / lab infra** | [`infra/`](https://github.com/weathership/cyberphy/tree/trunk/infra) tofu + ansible | Provision RKE2, stage Zarf, verify |
+| **3 — Processing + UI** | Flink toolkit, Iceberg, Panel OTEL Navigator | Developers extending CPS event shapes |
 
-## Who Is This For?
+## Domain shift (from security SIEM to CPS)
 
-This documentation serves three primary workload patterns:
+| Was (legacy cybersecurity framing) | Is (cyberphy) |
+|------------------------------------|---------------|
+| CloudTrail / network security logs as primary | **Manufacturing, robotics, industrial** messages as first-class events |
+| Point-product security lakehouse | **OTel lakehouse** for CPS *and* platform self-telemetry |
+| Cloudera Manager parcel / CSD install | **Zarf** + **infra/** only (CM packaging retired) |
 
-| Workload | Environment | Use Case |
-|----------|-------------|----------|
-| **Laptop Development** | Local Flink, optional K3d | Developing and testing pipelines |
-| **Workstation + GPUs** | Flink, Cyber Toolkit, RKE2 | Security analysis with ML acceleration |
-| **Benchmarking** | Local Flink → Remote RKE2/AWS | Performance testing with Dask/Jupyter |
+Flink pipelines, NiFi flows, Iceberg tables, and the interactive Dask/Panel UI **remain**. Payloads and schemas evolve toward CPS; the engines stay.
 
-## Core Principles
+## Data path (conceptual)
 
-- **Iceberg everywhere**: Consistent table format whether data lives in S3, MinIO, or HDFS
-- **Workload-first design**: Documentation organized around what you're trying to accomplish
-- **Scenario-driven validation**: Features grounded in BDD scenarios that match real workflows
-- **Hybrid by default**: Seamless operation across laptop, workstation, and cloud environments
+```text
+  CPS devices / robots / PLCs          Platform (Flink, NiFi, Dask, UI)
+           │                                        │
+           │  OTel / domain events                  │  OTel self-telemetry
+           ▼                                        ▼
+     Ingest → Flink (normalize, enrich, score) → Iceberg (Polaris + S3/MinIO)
+                         │
+              Interactive: Panel / Jupyter / Dask
+```
 
-## Technology Stack
+## Who this book is for
 
-| Component | Local (Dev) | Workstation | Cloud |
-|-----------|-------------|-------------|-------|
-| Streaming | Flink (devenv) | Flink + Cyber Toolkit | Cloudera Data Flow |
-| Storage | MinIO | MinIO / Ozone | S3 / S3 Tables |
-| Catalog | Polaris REST | Polaris REST | Iceberg REST |
-| Compute | K3d (optional) | RKE2 | EKS / RKE2 |
-| Analytics | Local Dask | Dask + GPU | Dask + JupyterHub |
+| Role | Start here |
+|------|------------|
+| Air-gap operator | [Zarf air-gap releases](./delivery/zarf.md), [Converge](./delivery/converge.md) |
+| AWS / cluster provisioner | [AWS & infrastructure](./delivery/infra.md) |
+| Pipeline / Flink developer | [Workloads](./workloads/overview.md), [Architecture](./architecture/overview.md) |
+| Local laptop | [Quick Start](./quickstart.md), [Laptop development](./workloads/laptop-dev.md) |
 
-## Getting Started
+## Repository
 
-1. **[Quick Start](./quickstart.md)**: Get the environment running in 5 minutes
-2. **[Workloads](./workloads/overview.md)**: Find your workload pattern and dive in
-3. **[Architecture](./architecture/overview.md)**: Understand how the pieces fit together
+- **GitHub:** [weathership/cyberphy](https://github.com/weathership/cyberphy)  
+- **Default branch:** `trunk`  
+- **Published docs:** GitHub Pages (built from `docs/current` on push to `trunk`)
 
-## Document Structure
-
-- **Platform Overview**: Introduction and quick start
-- **Workloads**: Task-oriented guides for each deployment pattern
-- **Architecture**: System design, data flow, and integration patterns
-- **Operations**: Health checks, bootstrap, monitoring
-- **Roadmap**: Future development timeline
-- **Reference**: Configuration, setup guides, troubleshooting
+Historical cybersecurity packaging and CDP-centric install paths live on upstream remotes only; they are not delivery targets for this project.

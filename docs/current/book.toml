@@ -1,32 +1,20 @@
 [book]
-authors = ["Ryan Hill"]
+authors = ["Weathership"]
 language = "en"
 src = "src"
-title = "Cybersec Toolkit"
+title = "Cyberphy"
+
+# Layout mirrors Ægir (docs/current): sources in src/, theme next to book.toml,
+# generated HTML in book/ (gitignored). Scratch notes live under docs/scratch/
+# and are not part of the published book.
 
 [preprocessor.d2]
-
-# path to d2 binary.
-# optional. default is "d2" (ie. on the path).
 path = "d2"
-
-# layout engine for diagrams. See https://github.com/terrastruct/d2#plugins.
-# optional. default is "dagre".
-# Using "elk" for better horizontal layouts
 layout = "elk"
-
-# whether to use inline svg when rendering.
-# if 'false', separate files will be generated in src/<output-dir> and referenced.
-# optional. default is 'true'
 inline = false
-
-# output directory relative to `src/` for generated diagrams.
-# This is ignored if 'inline' is 'true'.
-# optional. default is "d2".
 output-dir = "d2"
 
-# Disabled: mdbook-mermaid 0.17.0 fails with "Unable to parse the input"
-# Re-enable when adding mermaid diagrams and debug the issue
+# Disabled: mdbook-mermaid has parsing issues with mdbook 0.5.x in CI
 # [preprocessor.mermaid]
 # command = "mdbook-mermaid"
 
@@ -34,7 +22,9 @@ output-dir = "d2"
 default-theme = "light"
 additional-css = ["theme/custom.css"]
 additional-js = ["theme/diagrams.js"]
-# Mermaid JS (re-enable with preprocessor): "mermaid.min.js", "mermaid-init.js"
+git-repository-url = "https://github.com/weathership/cyberphy"
+edit-url-template = "https://github.com/weathership/cyberphy/edit/trunk/docs/current/{path}"
+# site-url: set to "/cyberphy/" if using project Pages at weathership.github.io/cyberphy/
 
 [output.html.print]
 enable = true
