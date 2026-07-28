@@ -27,15 +27,31 @@ uv run python <script.py>      # Run Python scripts
 The project uses [devenv](https://devenv.sh/) for local development:
 
 ```bash
-devenv up                              # Start core services (Flink, Iceberg, Prometheus)
+devenv up                              # Start ALL services (core + K8s stack)
 devenv tasks run polaris:check         # Verify Polaris configuration
 devenv tasks run restart:clean         # Clean restart all services
 devenv tasks run docs:build            # Build mdbook documentation
 ```
 
-### K8s Stack (on-demand)
+### K8s Stack (autostarts with `devenv up`)
 
-K8s services are provisioned via tasks, not started automatically.
+`devenv up` brings up the full stack, including the K8s group (Dask operator +
+cluster, JupyterHub, port-forwards). The target is auto-detected by
+`scripts/k8s_target_helper.sh` (single source of truth, also used by the
+processes themselves):
+
+1. `CYBERSEC_K8S_TARGET` env override (`k3d` | `rke2` | `none`)
+2. RKE2 on this host (`/etc/rancher/rke2/rke2.yaml`, `~/.kube/rke2.yaml`, or
+   `KUBECONFIG` pointing at an RKE2 config) → **rke2**: attach to the existing
+   cluster and ADOPT its workloads — never install (zarf/converge owns them)
+3. otherwise → **k3d**: provision a local `cybersec` k3d cluster (podman) and
+   install Dask operator + JupyterHub from the bundled charts in `zarf/charts/`
+   (no helm-repo downloads)
+
+Set `CYBERSEC_K8S_TARGET=none` to run the core stack only. The kubeconfig for
+whichever target is published at `.devenv/state/kubeconfig`.
+
+The `k8s:*` tasks below remain for manual/CI control of the same components.
 
 **Target Preparation** (validates requirements before deployment):
 ```bash

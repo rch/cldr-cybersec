@@ -209,18 +209,14 @@ if needs_init:
       echo ""
     fi
 
-    # Kubernetes target detection (from KUBECONFIG only, no ENABLE_K8S fallback)
-    # Priority: 1) Explicit CYBERSEC_K8S_TARGET, 2) KUBECONFIG contents
+    # Kubernetes target detection — single source of truth in
+    # scripts/k8s_target_helper.sh (also used by the K8s process group):
+    # explicit CYBERSEC_K8S_TARGET wins; RKE2 configs on this host -> rke2;
+    # otherwise k3d (the laptop default). Set CYBERSEC_K8S_TARGET=none to
+    # keep `devenv up` core-stack-only.
     if [ -z "''${CYBERSEC_K8S_TARGET:-}" ]; then
-      DETECTED_K8S_TARGET="none"
-      if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
-        if grep -qE "rancher|rke2" "$KUBECONFIG" 2>/dev/null; then
-          DETECTED_K8S_TARGET="rke2"
-        elif grep -qE "k3d|k3s" "$KUBECONFIG" 2>/dev/null; then
-          DETECTED_K8S_TARGET="k3d"
-        fi
-      fi
-      export CYBERSEC_K8S_TARGET="$DETECTED_K8S_TARGET"
+      source "''${DEVENV_ROOT:-$PWD}/scripts/k8s_target_helper.sh"
+      export CYBERSEC_K8S_TARGET="$(k8s_detect_target)"
     fi
   '';
   
@@ -3913,11 +3909,12 @@ asyncio.run(run())
     podman-runtime = {
       exec = ''
         set -euo pipefail
+        source "$PWD/scripts/k8s_target_helper.sh"
 
         # Podman is only needed for k3d provisioning (not for RKE2)
-        if [ "''${CYBERSEC_K8S_TARGET:-none}" != "k3d" ]; then
-          echo "K8s target is ''${CYBERSEC_K8S_TARGET:-none}, not k3d - skipping podman"
-          exit 0
+        TARGET=$(k8s_detect_target)
+        if [ "$TARGET" != "k3d" ]; then
+          k8s_idle "K8s target is $TARGET, not k3d - podman runtime not needed"
         fi
 
         if ! command -v podman >/dev/null 2>&1; then
@@ -3951,25 +3948,58 @@ asyncio.run(run())
         done
       '';
       process-compose = {
-        disabled = true;  # Started via k8s:provision task
+        disabled = false;  # Autostarts with `devenv up`; idles unless target=k3d
         availability = {
           restart = "always";
         };
       };
     };
 
-    k3d-cluster = {
+    # Cluster attach/provision for the auto-detected K8s target:
+    #   k3d  -> provision (or start) the local k3d cluster and publish its
+    #           kubeconfig at .devenv/state/kubeconfig
+    #   rke2 -> attach to the EXISTING RKE2 cluster (no provisioning; the
+    #           zarf/converge engine owns the workloads there) and publish a
+    #           kubeconfig symlink at the same path for downstream processes
+    #   none -> idle (core stack only)
+    k8s-cluster = {
       exec = ''
         set -euo pipefail
+        source "$PWD/scripts/k8s_target_helper.sh"
 
-        # k3d cluster provisioning - only for local k3d target (not RKE2)
-        if [ "''${CYBERSEC_K8S_TARGET:-none}" != "k3d" ]; then
-          echo "K8s target is ''${CYBERSEC_K8S_TARGET:-none}, not k3d - skipping k3d cluster provisioning"
-          exit 0
+        TARGET=$(k8s_detect_target)
+        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+
+        if [ "$TARGET" = "none" ]; then
+          k8s_idle "K8s target is none - skipping cluster attach/provision"
+        fi
+
+        if [ "$TARGET" = "rke2" ]; then
+          if ! RKE2_KUBECONFIG=$(k8s_resolve_kubeconfig rke2); then
+            echo "RKE2 target detected but no readable kubeconfig (tried \$KUBECONFIG, ~/.kube/rke2.yaml, /etc/rancher/rke2/rke2.yaml)"
+            exit 1
+          fi
+          mkdir -p "$(dirname "$KUBECONFIG_PATH")"
+          if [ "$RKE2_KUBECONFIG" != "$KUBECONFIG_PATH" ]; then
+            ln -sfn "$RKE2_KUBECONFIG" "$KUBECONFIG_PATH"
+          fi
+          export KUBECONFIG="$KUBECONFIG_PATH"
+          echo "Attaching to existing RKE2 cluster via $RKE2_KUBECONFIG ..."
+          if ! k8s_wait_api 60 5; then
+            echo "RKE2 API not reachable via $RKE2_KUBECONFIG"
+            exit 1
+          fi
+          echo "RKE2 cluster attached"
+          while true; do
+            if ! kubectl get --raw /readyz >/dev/null 2>&1; then
+              echo "Lost connection to RKE2 cluster; exiting for restart"
+              exit 1
+            fi
+            sleep 30
+          done
         fi
 
         CLUSTER_NAME=''${K3D_CLUSTER_NAME:-cybersec}
-        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
 
         export K3D_FIX_DNS=0
 
@@ -4096,6 +4126,25 @@ asyncio.run(run())
         fi
 
         if [ "$CLUSTER_EXISTS" -eq 0 ]; then
+          # k3d adds `host.k3d.internal:host-gateway` to its nodes; podman can't
+          # resolve the `host-gateway` literal without knowing the host-internal
+          # IP, so cluster create fails with "host containers internal IP address
+          # is empty". Write the drop-in once (mirrors scripts/dev-k3d.sh).
+          if [ "$(uname -s)" = "Darwin" ] && command -v podman >/dev/null 2>&1; then
+            PODMAN_MACHINE=''${DEV_PODMAN_MACHINE:-podman-machine-default}
+            if ! podman machine ssh "$PODMAN_MACHINE" 'test -f /etc/containers/containers.conf.d/99-k3d-hostgw.conf' 2>/dev/null; then
+              HOSTGW_IP="$(podman run --rm alpine getent hosts host.containers.internal 2>/dev/null | awk '{print $1}' | head -1)"
+              if [ -n "$HOSTGW_IP" ]; then
+                echo "Configuring podman host-gateway IP ($HOSTGW_IP) for k3d (one-time)"
+                podman machine ssh "$PODMAN_MACHINE" \
+                  "sudo mkdir -p /etc/containers/containers.conf.d && printf '[containers]\nhost_containers_internal_ip=\"$HOSTGW_IP\"\n' | sudo tee /etc/containers/containers.conf.d/99-k3d-hostgw.conf >/dev/null" \
+                  || echo "WARN: failed to write podman host-gateway drop-in; cluster create may fail"
+              else
+                echo "WARN: could not derive podman host-gateway IP; cluster create may fail"
+              fi
+            fi
+          fi
+
           echo "Creating k3d cluster '$CLUSTER_NAME'..."
 
           CONFIG_FILE=$(mktemp)
@@ -4167,7 +4216,10 @@ EOF
         done
       '';
       process-compose = {
-        disabled = true;  # Started via k8s:provision task
+        disabled = false;  # Autostarts with `devenv up`; target-aware (k3d/rke2/none)
+        availability = {
+          restart = "on_failure";
+        };
         depends_on = {
           podman-runtime = {
             condition = "process_started";
@@ -4179,66 +4231,74 @@ EOF
     dask-operator = {
       exec = ''
         set -euo pipefail
+        source "$PWD/scripts/k8s_target_helper.sh"
 
-        # Dask operator runs on any K8s target (k3d or RKE2)
-        # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
-        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
-          KUBECONFIG_PATH="$KUBECONFIG"
-        else
-          KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        TARGET=$(k8s_detect_target)
+        if [ "$TARGET" = "none" ]; then
+          k8s_idle "K8s target is none - skipping Dask operator"
         fi
+
+        # k8s-cluster publishes the kubeconfig here for every target
+        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
         export KUBECONFIG="$KUBECONFIG_PATH"
 
-        if [ ! -f "$KUBECONFIG_PATH" ]; then
+        if [ ! -e "$KUBECONFIG_PATH" ]; then
           echo "Waiting for kubeconfig at $KUBECONFIG_PATH..."
-          for _ in $(seq 1 60); do
-            if [ -f "$KUBECONFIG_PATH" ]; then
+          for _ in $(seq 1 120); do
+            if [ -e "$KUBECONFIG_PATH" ]; then
               break
             fi
             sleep 2
           done
         fi
 
-        if [ ! -f "$KUBECONFIG_PATH" ]; then
+        if [ ! -e "$KUBECONFIG_PATH" ]; then
           echo "kubeconfig not found at $KUBECONFIG_PATH"
           exit 1
         fi
 
-        echo "Waiting for Kubernetes control plane before installing Dask operator..."
-        for _ in $(seq 1 60); do
-          if kubectl get namespace kube-system >/dev/null 2>&1; then
-            break
-          fi
-          sleep 2
-        done
+        echo "Waiting for Kubernetes control plane..."
+        k8s_wait_api 60 2 || true
 
-        helm repo add dask https://helm.dask.org >/dev/null 2>&1 || true
-        helm repo update dask >/dev/null 2>&1 || true
+        # Adopt an operator that is already installed (on RKE2 the zarf/converge
+        # engine owns the workloads; installing from here would fight it)
+        if kubectl get crd daskclusters.kubernetes.dask.org >/dev/null 2>&1 && \
+           kubectl get crd daskworkergroups.kubernetes.dask.org >/dev/null 2>&1; then
+          echo "Dask operator CRDs already present - adopting existing operator"
+        elif [ "$TARGET" = "rke2" ]; then
+          echo "RKE2 target but Dask operator CRDs are missing."
+          echo "The converge engine owns installs on RKE2 - run: python3 -m converge --apply"
+          exit 1
+        else
+          echo "Installing/Updating Dask operator from the bundled chart..."
+          helm upgrade --install dask-operator \
+            "$PWD/zarf/charts/dask-kubernetes-operator-2024.1.0.tgz" \
+            --values "$PWD/zarf/manifests/dask-operator-values.yaml" \
+            --namespace dask-operator \
+            --create-namespace \
+            --wait \
+            --timeout 5m
 
-        echo "Installing/Updating Dask Kubernetes operator via Helm..."
-        helm upgrade --install dask-operator dask/dask-kubernetes-operator \
-          --namespace dask-operator \
-          --create-namespace \
-          --wait \
-          --timeout 5m
-
-        kubectl wait --for=condition=Established crd/daskclusters.kubernetes.dask.org --timeout=120s
-        kubectl wait --for=condition=Established crd/daskworkergroups.kubernetes.dask.org --timeout=120s
-
-        echo "Dask operator installed"
+          kubectl wait --for=condition=Established crd/daskclusters.kubernetes.dask.org --timeout=120s
+          kubectl wait --for=condition=Established crd/daskworkergroups.kubernetes.dask.org --timeout=120s
+          echo "Dask operator installed"
+        fi
 
         while true; do
-          if ! kubectl get pods -n dask-operator >/dev/null 2>&1; then
-            echo "Unable to query Dask operator pods; exiting for restart"
+          if ! kubectl get crd daskclusters.kubernetes.dask.org >/dev/null 2>&1; then
+            echo "Dask operator CRDs no longer visible; exiting for restart"
             exit 1
           fi
           sleep 30
         done
       '';
       process-compose = {
-        disabled = true;  # Started via k8s:deploy-dask task
+        disabled = false;  # Autostarts with `devenv up`; adopts existing operator on RKE2
+        availability = {
+          restart = "on_failure";
+        };
         depends_on = {
-          k3d-cluster = {
+          k8s-cluster = {
             condition = "process_started";
           };
         };
@@ -4321,8 +4381,13 @@ EOF
     dask-cluster = {
       exec = ''
         set -euo pipefail
+        source "$PWD/scripts/k8s_target_helper.sh"
 
-        # Dask cluster runs on any K8s target (k3d or RKE2)
+        TARGET=$(k8s_detect_target)
+        if [ "$TARGET" = "none" ]; then
+          k8s_idle "K8s target is none - skipping Dask cluster"
+        fi
+
         if [ "''${ENABLE_YUNIKORN:-false}" = "true" ]; then
           MANIFEST="$PWD/infra/dask/dask-cluster-yunikorn.yaml"
         else
@@ -4333,16 +4398,12 @@ EOF
           exit 1
         fi
 
-        # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
-        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
-          KUBECONFIG_PATH="$KUBECONFIG"
-        else
-          KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
-        fi
+        # k8s-cluster publishes the kubeconfig here for every target
+        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
         export KUBECONFIG="$KUBECONFIG_PATH"
 
         echo "Waiting for Dask operator CRDs..."
-        for _ in $(seq 1 60); do
+        for _ in $(seq 1 120); do
           if kubectl get crd daskclusters.kubernetes.dask.org >/dev/null 2>&1 && \
              kubectl get crd daskworkergroups.kubernetes.dask.org >/dev/null 2>&1; then
             break
@@ -4350,7 +4411,20 @@ EOF
           sleep 2
         done
 
-        kubectl apply -f "$MANIFEST"
+        if [ "$TARGET" = "rke2" ]; then
+          # The zarf/converge engine owns the DaskCluster on RKE2 (registry
+          # image refs, S3 env, worker sizing) - adopt it, never apply the
+          # local dev manifest over it.
+          if kubectl get daskcluster cybersec-dask -n dask >/dev/null 2>&1; then
+            echo "Adopting existing zarf/converge-managed Dask cluster"
+          else
+            echo "RKE2 target but no DaskCluster found in namespace dask."
+            echo "The converge engine owns installs on RKE2 - run: python3 -m converge --apply"
+            exit 1
+          fi
+        else
+          kubectl apply -f "$MANIFEST"
+        fi
 
         echo "Waiting for Dask cluster to reach Running phase..."
         STATUS=""
@@ -4381,7 +4455,10 @@ EOF
         done
       '';
       process-compose = {
-        disabled = true;  # Started via k8s:deploy-dask task
+        disabled = false;  # Autostarts with `devenv up`; adopts converge-managed cluster on RKE2
+        availability = {
+          restart = "on_failure";
+        };
         depends_on = {
           dask-operator = {
             condition = "process_started";
@@ -4451,71 +4528,80 @@ EOF
     jupyterhub = {
       exec = ''
         set -euo pipefail
+        source "$PWD/scripts/k8s_target_helper.sh"
 
-        # JupyterHub runs on any K8s target (k3d or RKE2)
-        # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
-        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
-          KUBECONFIG_PATH="$KUBECONFIG"
-        else
-          KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        TARGET=$(k8s_detect_target)
+        if [ "$TARGET" = "none" ]; then
+          k8s_idle "K8s target is none - skipping JupyterHub"
         fi
+
+        # k8s-cluster publishes the kubeconfig here for every target
+        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
         export KUBECONFIG="$KUBECONFIG_PATH"
 
-        if [ ! -f "$KUBECONFIG_PATH" ]; then
+        if [ ! -e "$KUBECONFIG_PATH" ]; then
           echo "Waiting for kubeconfig at $KUBECONFIG_PATH..."
-          for _ in $(seq 1 60); do
-            if [ -f "$KUBECONFIG_PATH" ]; then
+          for _ in $(seq 1 120); do
+            if [ -e "$KUBECONFIG_PATH" ]; then
               break
             fi
             sleep 2
           done
         fi
 
-        if [ ! -f "$KUBECONFIG_PATH" ]; then
+        if [ ! -e "$KUBECONFIG_PATH" ]; then
           echo "kubeconfig not found at $KUBECONFIG_PATH"
           exit 1
         fi
 
         echo "Waiting for Kubernetes API..."
-        for _ in $(seq 1 60); do
-          if kubectl get namespace kube-system >/dev/null 2>&1; then
-            break
+        k8s_wait_api 60 2 || true
+
+        if [ "$TARGET" = "rke2" ]; then
+          # The zarf/converge engine owns JupyterHub on RKE2 - adopt, never install
+          if helm status jupyterhub -n jupyterhub >/dev/null 2>&1 || \
+             kubectl -n jupyterhub get svc proxy-public >/dev/null 2>&1; then
+            echo "Adopting existing zarf/converge-managed JupyterHub"
+          else
+            echo "RKE2 target but no JupyterHub release found."
+            echo "The converge engine owns installs on RKE2 - run: python3 -m converge --apply"
+            exit 1
           fi
-          sleep 2
-        done
+        else
+          echo "Installing/Updating JupyterHub from the bundled chart..."
+          NOTEBOOK_PATH="$PWD/build/Dask_Kub_Viz_Sample_Problem.ipynb"
+          EXTRA_ARGS=()
+          if [ -f "$NOTEBOOK_PATH" ]; then
+            EXTRA_ARGS+=(--set-file "singleuser.extraFiles.dask_notebook.stringData=$NOTEBOOK_PATH")
+            EXTRA_ARGS+=(--set "singleuser.extraFiles.dask_notebook.mountPath=/home/jovyan/Dask_Kub_Viz_Sample_Problem.ipynb")
+            EXTRA_ARGS+=(--set "singleuser.extraFiles.dask_notebook.mode=420")
+          fi
+          EXTRA_ARGS+=(--set-json "singleuser.lifecycleHooks.postStart.exec.command=[\"/bin/sh\",\"-c\",\"pip install --quiet holoviews datashader bokeh dask[distributed] pyarrow\"]")
+          helm upgrade --install jupyterhub \
+            "$PWD/zarf/charts/jupyterhub-4.0.0.tgz" \
+            --namespace jupyterhub \
+            --create-namespace \
+            --set-json singleuser.cpu.guarantee=0.1 \
+            --set-json singleuser.cpu.limit=0.5 \
+            --set-string singleuser.memory.guarantee=256M \
+            --set-string singleuser.memory.limit=512M \
+            --set singleuser.networkPolicy.enabled=false \
+            "''${EXTRA_ARGS[@]}"
 
-        echo "Installing/Updating JupyterHub via Helm..."
-        helm repo add jupyterhub https://jupyterhub.github.io/helm-chart/ >/dev/null 2>&1 || true
-        helm repo update jupyterhub >/dev/null 2>&1 || true
-        NOTEBOOK_PATH="$PWD/build/Dask_Kub_Viz_Sample_Problem.ipynb"
-        EXTRA_ARGS=()
-        if [ -f "$NOTEBOOK_PATH" ]; then
-          EXTRA_ARGS+=(--set-file "singleuser.extraFiles.dask_notebook.stringData=$NOTEBOOK_PATH")
-          EXTRA_ARGS+=(--set "singleuser.extraFiles.dask_notebook.mountPath=/home/jovyan/Dask_Kub_Viz_Sample_Problem.ipynb")
-          EXTRA_ARGS+=(--set "singleuser.extraFiles.dask_notebook.mode=420")
+          kubectl -n jupyterhub rollout status deploy/hub --timeout=300s || true
+          kubectl -n jupyterhub rollout status deploy/proxy --timeout=300s || true
         fi
-        EXTRA_ARGS+=(--set-json "singleuser.lifecycleHooks.postStart.exec.command=[\"/bin/sh\",\"-c\",\"pip install --quiet holoviews datashader bokeh dask[distributed] pyarrow\"]")
-        helm upgrade --install jupyterhub jupyterhub/jupyterhub \
-          --version 2.0.0 \
-          --namespace jupyterhub \
-          --create-namespace \
-          --set-json singleuser.cpu.guarantee=0.1 \
-          --set-json singleuser.cpu.limit=0.5 \
-          --set-string singleuser.memory.guarantee=256M \
-          --set-string singleuser.memory.limit=512M \
-          --set singleuser.networkPolicy.enabled=false \
-          "''${EXTRA_ARGS[@]}"
-
-        kubectl -n jupyterhub rollout status deploy/hub --timeout=300s || true
-        kubectl -n jupyterhub rollout status deploy/proxy --timeout=300s || true
 
         echo "Starting JupyterHub on http://localhost:8000 ..."
         kubectl -n jupyterhub port-forward svc/proxy-public 8000:80 --address 127.0.0.1,::1
       '';
       process-compose = {
-        disabled = true;  # Started via k8s:deploy-jupyter task
+        disabled = false;  # Autostarts with `devenv up`; adopts converge-managed hub on RKE2
+        availability = {
+          restart = "on_failure";
+        };
         depends_on = {
-          k3d-cluster = {
+          k8s-cluster = {
             condition = "process_started";
           };
         };
@@ -4525,14 +4611,15 @@ EOF
     dask-ui = {
       exec = ''
         set -euo pipefail
+        source "$PWD/scripts/k8s_target_helper.sh"
 
-        # Dask UI runs on any K8s target (k3d or RKE2)
-        # Use existing KUBECONFIG if set, otherwise fall back to k3d-generated config
-        if [ -n "''${KUBECONFIG:-}" ] && [ -f "$KUBECONFIG" ]; then
-          KUBECONFIG_PATH="$KUBECONFIG"
-        else
-          KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
+        TARGET=$(k8s_detect_target)
+        if [ "$TARGET" = "none" ]; then
+          k8s_idle "K8s target is none - skipping Dask UI port-forward"
         fi
+
+        # k8s-cluster publishes the kubeconfig here for every target
+        KUBECONFIG_PATH="$PWD/.devenv/state/kubeconfig"
         export KUBECONFIG="$KUBECONFIG_PATH"
 
         echo "Waiting for Dask scheduler pod..."
@@ -4556,7 +4643,10 @@ EOF
         kubectl -n dask port-forward pod/$SCHEDULER_POD 8787:8787 --address 127.0.0.1,::1
       '';
       process-compose = {
-        disabled = true;  # Started via k8s:forward task
+        disabled = false;  # Autostarts with `devenv up`; re-resolves the pod on restart
+        availability = {
+          restart = "on_failure";
+        };
         depends_on = {
           dask-cluster = {
             condition = "process_started";
