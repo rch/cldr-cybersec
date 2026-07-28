@@ -67,18 +67,18 @@ proxy:
 
 # Single-user server configuration
 singleuser:
-  # Use custom cybersec-dask image with pre-installed dependencies
-  # Note: Image will be rewritten by Zarf
+  # Air-gap notebook image: holoviews + h5py + generate_hdf5 (requirements-airgap.txt).
+  # MUST match zarf.yaml cybersec-images / dask-cluster (2025.2.0-notebook).
+  # Zarf rewrites registry and may append -zarf-<hash>; do not strip the -notebook suffix.
   image:
     name: localhost:5555/cybersec-dask
-    tag: "2025.2.0"
+    tag: "2025.2.0-notebook"
     pullPolicy: IfNotPresent
-  # Network tools init container - uses our bundled image
-  # (avoids needing a separate k8s-network-tools image in air-gap)
+  # Network tools init container - same bundled image (air-gap, no extra pulls)
   networkTools:
     image:
       name: localhost:5555/cybersec-dask
-      tag: "2025.2.0"
+      tag: "2025.2.0-notebook"
       pullPolicy: IfNotPresent
   # Disable block-cloud-metadata init container (requires iptables,
   # which is not present in the cybersec-dask image)
@@ -122,11 +122,43 @@ singleuser:
           mountPath: /srv/jupyterhub-pkg
   # Use 'python -m jupyterhub.singleuser' instead of the 'jupyterhub-singleuser'
   # entry-point script, since the binary is not on PATH in the cybersec-dask image.
+  # Writable home is /root. ConfigMap samples are RO at /root/sample-notebooks/
+  # only — never mount over /app (breaks Lab). At start we *copy* samples into
+  # /root/*.ipynb so the File browser shows editable notebooks at home root;
+  # "Duplicate" must not target the RO sample-notebooks/ folder.
   cmd:
-    - python
-    - -m
-    - jupyterhub.singleuser
-    - --allow-root
+    - bash
+    - -lc
+    - |
+      set -e
+      HOME_DIR=/root
+      SAMPLES="${HOME_DIR}/sample-notebooks"
+      # Strip stale image-baked notebooks under WORKDIR /app (not used for Lab root)
+      if [ -d /app/sample-notebooks ]; then
+        rm -f /app/sample-notebooks/*.ipynb 2>/dev/null || true
+        rm -rf /app/sample-notebooks/.ipynb_checkpoints 2>/dev/null || true
+        printf '%s\n' \
+          'Jupyter home is /root (writable).' \
+          'Samples are copied there at server start; RO originals: /root/sample-notebooks/' \
+          > /app/sample-notebooks/README.md 2>/dev/null || true
+      fi
+      # Seed writable working copies in HOME (ConfigMap mount is read-only)
+      if [ -d "$SAMPLES" ]; then
+        for f in "$SAMPLES"/*.ipynb "$SAMPLES"/generate_hdf5.py; do
+          [ -f "$f" ] || continue
+          base=$(basename "$f")
+          # Always refresh from ConfigMap so users get latest samples after redeploy
+          cp -f "$f" "${HOME_DIR}/${base}"
+        done
+        printf '%s\n' \
+          'sample-notebooks/ is READ-ONLY (ConfigMap).' \
+          'Editable copies are in this folder (/root/*.ipynb) — open those.' \
+          'Do not Duplicate inside sample-notebooks/ (Errno 30).' \
+          > "${HOME_DIR}/README.txt"
+      fi
+      exec python -m jupyterhub.singleuser --allow-root \
+        --ServerApp.root_dir=/root \
+        --ServerApp.preferred_dir=/root
   # Run as root (UID 0) because the Dask base image has no 'jovyan' user.
   # Z2JH defaults runAsUser=1000 but the cybersec-dask image only has root.
   uid: 0
@@ -145,8 +177,7 @@ singleuser:
   # change type to 'dynamic'.
   storage:
     type: none
-    # Mount sample notebooks from ConfigMap (read-only)
-    # Users copy to ~/work to edit
+    # RO samples under $HOME/sample-notebooks; startup copies to $HOME/*.ipynb
     extraVolumes:
       - name: sample-notebooks
         configMap:
@@ -156,7 +187,7 @@ singleuser:
           sizeLimit: 256Mi
     extraVolumeMounts:
       - name: sample-notebooks
-        mountPath: /app/sample-notebooks
+        mountPath: /root/sample-notebooks
         readOnly: true
       - name: jupyterhub-pkg
         mountPath: /srv/jupyterhub-pkg
@@ -176,12 +207,16 @@ singleuser:
     PYTHONPATH: "/srv/jupyterhub-pkg:/app"
     # Ensure HOME is writable (Dask base image runs as root)
     HOME: "/root"
+    # Prefer HOME as Jupyter contents root even if image WORKDIR is /app
+    JUPYTER_SERVER_ROOT: "/root"
     S3_ENDPOINT: "###ZARF_VAR_S3_ENDPOINT###"
     AWS_ACCESS_KEY_ID: "###ZARF_VAR_S3_ACCESS_KEY###"
     AWS_SECRET_ACCESS_KEY: "###ZARF_VAR_S3_SECRET_KEY###"
     S3_BUCKET: "###ZARF_VAR_S3_BUCKET###"
     # Dask scheduler address in same cluster
     DASK_SCHEDULER_ADDRESS: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
+    # Air-gap: do not load Bokeh/HoloViews JS from cdn.bokeh.org (blank plots otherwise)
+    BOKEH_RESOURCES: "inline"
 
 # Scheduling - allow users on any node
 scheduling:

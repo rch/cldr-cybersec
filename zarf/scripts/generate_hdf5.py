@@ -25,10 +25,15 @@ Profiles
   airgap_2tb — ~2 TiB of Values payload across many 1 s fidelity parts
 
 Usage:
-    python generate_hdf5.py --profile lab --out s3://cyberphy/datasets/hdf5/otelcphy/
+    python generate_hdf5.py --profile lab --out s3://cyberphy/
     python generate_hdf5.py --profile lab --out ./local_hdf5 --contiguous
-    python generate_hdf5.py --profile airgap_2tb --out s3://cyberphy/datasets/hdf5/otelcphy/ \\
+    python generate_hdf5.py --profile lab --out s3://cyberphy/ --force   # always write
+    python generate_hdf5.py --profile airgap_2tb --out s3://cyberphy/ \\
         --dry-run   # print plan only
+
+By default the CLI is **idempotent**: if enough full-size parts already exist under
+the hive prefix, they are reused (same as the sample notebook). Pass ``--force``
+to write a new run.
 
 Dependencies: h5py, numpy; boto3 for S3.
     uv run --with h5py,numpy,boto3 python zarf/scripts/generate_hdf5.py ...
@@ -517,14 +522,11 @@ def emit_kerchunk(local_path: str, out_json: str, url: str | None = None):
     return out_json
 
 
-def upload_s3(
-    local_path: str,
-    bucket: str,
-    key: str,
-    endpoint: str | None,
+def _boto3_s3_client(
+    endpoint: str | None = None,
     access_key: str | None = None,
     secret_key: str | None = None,
-) -> str:
+):
     import boto3
     from botocore.client import Config
 
@@ -538,8 +540,218 @@ def upload_s3(
     if ak and sk:
         kwargs["aws_access_key_id"] = ak
         kwargs["aws_secret_access_key"] = sk
-    boto3.client("s3", **kwargs).upload_file(local_path, bucket, key)
+    return boto3.client("s3", **kwargs)
+
+
+def upload_s3(
+    local_path: str,
+    bucket: str,
+    key: str,
+    endpoint: str | None,
+    access_key: str | None = None,
+    secret_key: str | None = None,
+) -> str:
+    _boto3_s3_client(endpoint, access_key, secret_key).upload_file(local_path, bucket, key)
     return f"s3://{bucket}/{key}"
+
+
+def expected_part_min_bytes(cfg: GenConfig, fraction: float = 0.5) -> int:
+    """Minimum object size to count as a 'full' part (Values payload + HDF5 overhead)."""
+    item = np.dtype(cfg.dtype).itemsize
+    values = int(cfg.n_series) * int(cfg.n_time) * item
+    return max(1, int(values * fraction))
+
+
+def list_existing_parts(
+    out: str,
+    cfg: GenConfig,
+    *,
+    s3_endpoint: str | None = None,
+    min_size_bytes: int | None = None,
+) -> list[dict[str, Any]]:
+    """List existing acquisition .h5 objects under the product hive prefix.
+
+    Idempotent explore path: discovers prior runs without rewriting data.
+    Filters by minimum size so tiny smoke leftovers are ignored when cfg is lab-sized.
+    """
+    min_sz = expected_part_min_bytes(cfg) if min_size_bytes is None else min_size_bytes
+    inventory: list[dict[str, Any]] = []
+
+    if out.startswith("s3://"):
+        u = urlparse(out)
+        bucket = u.netloc
+        prefix = f"datasets/hdf5/{cfg.product}/"
+        if cfg.service_name:
+            # Prefer this collector's tree; still accept any service= under product.
+            pass
+        client = _boto3_s3_client(s3_endpoint)
+        token = None
+        keys: list[tuple[str, int]] = []
+        while True:
+            kw: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
+            if token:
+                kw["ContinuationToken"] = token
+            resp = client.list_objects_v2(**kw)
+            for obj in resp.get("Contents") or []:
+                key = obj["Key"]
+                if not key.rstrip("/").endswith("Z.h5") and not key.endswith(".h5"):
+                    # RustFS may list leaf objects; accept keys that look like part files
+                    if ".h5" not in key:
+                        continue
+                # Prefer the object key that ends with .h5 (directory layout stores children)
+                if not (key.endswith(".h5") or key.endswith("Z.h5")):
+                    continue
+                size = int(obj.get("Size") or 0)
+                if size < min_sz:
+                    continue
+                keys.append((key, size))
+            if not resp.get("IsTruncated"):
+                break
+            token = resp.get("NextContinuationToken")
+
+        # Deduplicate and sort
+        seen: set[str] = set()
+        ordered: list[tuple[str, int]] = []
+        for key, size in sorted(keys):
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append((key, size))
+
+        for i, (key, size) in enumerate(ordered):
+            fname = key.rsplit("/", 1)[-1]
+            inventory.append(
+                {
+                    "dataset_uuid": None,
+                    "fingerprint": hashlib.sha256(key.encode()).hexdigest()[:16],
+                    "part_idx": i,
+                    "filename": fname,
+                    "key": key,
+                    "uri": f"s3://{bucket}/{key}",
+                    "size_bytes": size,
+                    "layout": "contiguous" if cfg.contiguous else "chunked",
+                    "n_series": cfg.n_series,
+                    "n_time": cfg.n_time,
+                    "dtype": cfg.dtype,
+                    "t_min_ns": None,
+                    "t_max_ns": None,
+                    "time_unit": cfg.time_unit,
+                    "service_name": cfg.service_name,
+                    "reused": True,
+                }
+            )
+        return inventory
+
+    # Local filesystem
+    root = Path(out)
+    if cfg.hive_layout:
+        search_root = root / "datasets" / "hdf5" / cfg.product
+    else:
+        search_root = root
+    if not search_root.exists():
+        return []
+    for i, path in enumerate(sorted(search_root.rglob("*Z.h5"))):
+        size = path.stat().st_size
+        if size < min_sz:
+            continue
+        rel = str(path.relative_to(root)) if cfg.hive_layout else path.name
+        inventory.append(
+            {
+                "dataset_uuid": None,
+                "fingerprint": hashlib.sha256(str(path).encode()).hexdigest()[:16],
+                "part_idx": i,
+                "filename": path.name,
+                "key": rel,
+                "local_path": str(path),
+                "uri": f"file://{path}",
+                "size_bytes": size,
+                "layout": "contiguous" if cfg.contiguous else "chunked",
+                "n_series": cfg.n_series,
+                "n_time": cfg.n_time,
+                "dtype": cfg.dtype,
+                "t_min_ns": None,
+                "t_max_ns": None,
+                "time_unit": cfg.time_unit,
+                "service_name": cfg.service_name,
+                "reused": True,
+            }
+        )
+    return inventory
+
+
+def ensure_parts(
+    cfg: GenConfig,
+    out: str,
+    *,
+    s3_endpoint: str | None = None,
+    emit_kerchunk_refs: bool = False,
+    dry_run: bool = False,
+    progress_every: int = 1,
+    reuse_existing: bool = True,
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    """Idempotent ensure: reuse existing full-size parts when present.
+
+    Default ``reuse_existing=True``: if at least ``cfg.n_parts`` objects already
+    exist at the expected size, return them and write nothing. Set ``force=True``
+    to always generate a new run (new timestamps / keys).
+
+    Reuse is a cheap S3/list (typically well under a second for a few hundred
+    objects). If this function takes minutes, it is *generating*, not reusing —
+    check the log line after the list step.
+    """
+    import time as _time
+
+    t0 = _time.time()
+    print(
+        f"Profile geometry: {cfg.n_parts} parts × {cfg.n_series}×{cfg.n_time} "
+        f"{cfg.dtype} ≈ {cfg.estimated_values_bytes() / 1e6:.1f} MB Values "
+        f"({cfg.estimated_values_tib():.3f} TiB)  layout="
+        f"{'contiguous' if cfg.contiguous else 'chunked'}  time_unit={cfg.time_unit}"
+    )
+    print(
+        f"Idempotency: reuse_existing={reuse_existing} force={force}  "
+        f"(FORCE_REGENERATE / --force bypasses reuse)"
+    )
+
+    if reuse_existing and not force and not dry_run:
+        print("Listing existing full-size parts under hive prefix (no rewrite)…")
+        t_list = _time.time()
+        existing = list_existing_parts(out, cfg, s3_endpoint=s3_endpoint)
+        print(f"  list done in {_time.time() - t_list:.2f}s → {len(existing)} candidate(s)")
+        if len(existing) >= cfg.n_parts:
+            chosen = existing[: cfg.n_parts]
+            total = sum(m["size_bytes"] for m in chosen)
+            print(
+                f"Idempotent reuse: found {len(existing)} full-size part(s); "
+                f"using {len(chosen)} ({total / 1e9:.2f} GB) in {_time.time() - t0:.2f}s total. "
+                f"Set force=True / FORCE_REGENERATE to write new data."
+            )
+            for m in chosen[:3]:
+                print(f"  reuse {m['uri']}")
+            if len(chosen) > 3:
+                print(f"  … and {len(chosen) - 3} more")
+            return chosen
+        if existing:
+            print(
+                f"Found {len(existing)} existing full-size part(s) "
+                f"(need {cfg.n_parts}); generating a full new set."
+            )
+        else:
+            print("No existing full-size parts found; generating.")
+
+    if force:
+        print("force=True → writing a new run (this is the slow path).")
+    inv = generate_parts(
+        cfg,
+        out,
+        s3_endpoint=s3_endpoint,
+        emit_kerchunk_refs=emit_kerchunk_refs,
+        dry_run=dry_run,
+        progress_every=progress_every,
+    )
+    print(f"generate_parts finished in {_time.time() - t0:.1f}s ({len(inv)} file(s))")
+    return inv
 
 
 def generate_parts(
@@ -551,13 +763,10 @@ def generate_parts(
     dry_run: bool = False,
     progress_every: int = 1,
 ) -> list[dict[str, Any]]:
-    """Generate all parts to local dir or s3://bucket[/prefix].
+    """Generate all parts to local dir or s3://bucket[/prefix] (always writes).
 
-    For s3:// URLs the hive key is absolute under the bucket (cfg.hive_layout).
-    If out is s3://bucket/some/prefix and hive_layout is True, keys still use
-    the standard datasets/hdf5/... tree (prefix in URL is ignored for key root
-    to keep Iceberg layout consistent). Pass hive_layout=False to place files
-    directly under the URL path.
+    Prefer :func:`ensure_parts` for notebook/CI idempotency. For s3:// URLs the
+    hive key is absolute under the bucket when ``cfg.hive_layout`` is True.
     """
     is_s3 = out.startswith("s3://")
     if is_s3:
@@ -571,12 +780,6 @@ def generate_parts(
         workdir = out
         os.makedirs(workdir, exist_ok=True)
 
-    print(
-        f"Profile geometry: {cfg.n_parts} parts × {cfg.n_series}×{cfg.n_time} "
-        f"{cfg.dtype} ≈ {cfg.estimated_values_bytes() / 1e6:.1f} MB Values "
-        f"({cfg.estimated_values_tib():.3f} TiB)  layout="
-        f"{'contiguous' if cfg.contiguous else 'chunked'}  time_unit={cfg.time_unit}"
-    )
     if dry_run:
         start_ns, _, _ = part_time_bounds(cfg, 0)
         fname = part_filename(cfg, 0, start_ns)
@@ -591,6 +794,7 @@ def generate_parts(
         fname = part_filename(cfg, i, start_ns)
         local = os.path.join(workdir, fname)
         meta = write_part(local, i, cfg, rng)
+        meta["reused"] = False
 
         if is_s3:
             key = meta["key"] if cfg.hive_layout else f"{url_prefix}{fname}"
@@ -687,6 +891,11 @@ def main():
     p.add_argument("--emit-kerchunk", action="store_true")
     p.add_argument("--no-hive", action="store_true", help="Flat keys under --out prefix")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Always generate new parts (skip idempotent reuse of existing objects)",
+    )
     p.add_argument("--s3-endpoint", default=os.environ.get("S3_ENDPOINT") or None)
     p.add_argument("--progress-every", type=int, default=1)
     args = p.parse_args()
@@ -738,13 +947,15 @@ def main():
     if args.profile in PROFILES:
         print(f"Profile {args.profile}: {PROFILES[args.profile]['description']}")
 
-    inv = generate_parts(
+    inv = ensure_parts(
         cfg,
         args.out,
         s3_endpoint=args.s3_endpoint,
         emit_kerchunk_refs=args.emit_kerchunk,
         dry_run=args.dry_run,
         progress_every=args.progress_every,
+        reuse_existing=not args.force,
+        force=args.force,
     )
     if inv:
         rows = inventory_to_pointer_rows(inv)

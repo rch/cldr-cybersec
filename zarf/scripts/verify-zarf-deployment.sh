@@ -985,7 +985,8 @@ build_custom_image() {
     fi
 
     local DOCKERFILE="$ZARF_DIR/images/Dockerfile.cybersec-dask"
-    local IMAGE_TAG="localhost:5555/cybersec-dask:2025.2.0"
+    # Must match zarf.yaml / manifests (h5py + holoviews baked — no runtime pip)
+    local IMAGE_TAG="localhost:5555/cybersec-dask:2025.2.0-notebook"
 
     if [[ ! -f "$DOCKERFILE" ]]; then
         log_error "Dockerfile not found: $DOCKERFILE"

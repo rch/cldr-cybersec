@@ -8,8 +8,12 @@
 # - Numba JIT cache pre-compiled for fast startup
 #
 # Build (from project root):
-#   podman build -t cybersec-dask:2025.2.0 -f zarf/images/Dockerfile.cybersec-dask .
-#   docker build -t cybersec-dask:2025.2.0 -f zarf/images/Dockerfile.cybersec-dask .
+# Air-gap package image tag (must include h5py/hv — see requirements-airgap.txt):
+#   podman build -t localhost:5555/cybersec-dask:2025.2.0-notebook \
+#     -f zarf/images/Dockerfile.cybersec-dask .
+#   docker build -t localhost:5555/cybersec-dask:2025.2.0-notebook \
+#     -f zarf/images/Dockerfile.cybersec-dask .
+# Zarf package create expects: localhost:5555/cybersec-dask:2025.2.0-notebook
 #
 # Usage as Dask worker:
 #   docker run cybersec-dask:2025.2.0 dask-worker tcp://scheduler:8786
@@ -66,15 +70,19 @@ COPY zarf/images/data_view_lib.py /app/data_view_lib.py
 COPY zarf/images/data-view.py /app/data-view.py
 # Streaming VPC flow generator (also used as a K8s workload entrypoint)
 COPY zarf/scripts/generate-vpc-flow.py /app/generate-vpc-flow.py
-# CPHY HDF5 generator — lives at /app so Jupyter ConfigMap mount of
-# /app/sample-notebooks does NOT hide it (air-gap: no pip, no host mount).
+# CPHY HDF5 generator at /app (and /app/lib) for PYTHONPATH imports.
+# Jupyter sample notebooks are NOT baked here as runnable .ipynb — they come from
+# the sample-notebooks ConfigMap at /root/sample-notebooks (writable home).
+# Baking .ipynb under WORKDIR /app caused users to open stale generate_parts cells.
 COPY zarf/scripts/generate_hdf5.py /app/generate_hdf5.py
 COPY zarf/scripts/generate_hdf5.py /app/lib/generate_hdf5.py
 
-# Copy sample notebooks for JupyterHub users (also in Zarf ConfigMap)
-COPY zarf/images/sample-notebooks/ /app/sample-notebooks/
-# Ensure generator is present next to notebooks in the image layer too
-COPY zarf/scripts/generate_hdf5.py /app/sample-notebooks/generate_hdf5.py
+# Pointer only under /app/sample-notebooks (avoids stale notebooks in File browser)
+RUN mkdir -p /app/sample-notebooks && printf '%s\n' \
+  'Sample notebooks are served from the ConfigMap at /root/sample-notebooks.' \
+  'Copy into home before editing:' \
+  '  cp /root/sample-notebooks/HDF5_CPHY_Acquisition_Generator.ipynb /root/' \
+  > /app/sample-notebooks/README.md
 
 # Copy NavigatorEngine + PTY proxy packages (M2)
 COPY cybersec/__init__.py /app/cybersec/__init__.py

@@ -86,15 +86,20 @@ def main():
         |----------|-------------|-----------|
         | `OTEL_Data_Generator.ipynb` | Generate synthetic OTEL spans (same methodology as 1TB dataset) | Configurable |
         | `Dask_S3_Validation.ipynb` | Out-of-core Dask stress test with 30GB dataset | 30 GB |
-        | `HDF5_CPHY_Acquisition_Generator.ipynb` | CPHY/OTel HDF5 acquisition windows + Dask/datashader | lab ~6 MiB / airgap ~2 TiB |
+        | `HDF5_CPHY_Acquisition_Generator.ipynb` | CPHY/OTel HDF5 + Dask/datashader (idempotent Run All) | lab ~10 GiB / lab_tiny ~6 MiB / airgap ~2 TiB |
 
         ## Getting Started
 
-        These notebooks are **read-only** (mounted from ConfigMap). To edit and run:
+        JupyterLab home is ``/root`` (**writable**). On server start, sample notebooks
+        are copied to ``/root/*.ipynb`` for editing. The ``sample-notebooks/`` folder is
+        a **read-only** ConfigMap — do not Duplicate/Save there (Errno 30).
 
-        ```bash
-        cp ~/sample-notebooks/OTEL_Data_Generator.ipynb ~/
-        ```
+        Open e.g. ``/root/HDF5_CPHY_Acquisition_Generator.ipynb`` (top-level home),
+        not the file inside ``sample-notebooks/``.
+
+        The CPHY HDF5 notebook is **idempotent by default**: Run All reuses existing
+        full-size parts under ``s3://…/datasets/hdf5/…``. Set ``FORCE_REGENERATE = True``
+        (or ``HDF5_FORCE_REGENERATE=1``) only when you want a fresh write.
 
         ## Environment Variables
 
@@ -103,14 +108,17 @@ def main():
         - `S3_ENDPOINT`: S3 endpoint (RustFS on lab nodes; empty for AWS)
         - `S3_BUCKET`: data bucket (default cyberphy in notebooks)
         - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`: S3 credentials
+        - `HDF5_PROFILE` / `HDF5_FORCE_REGENERATE`: optional CPHY generator overrides
 
         ## Cluster Resources
 
-        Default Dask cluster: 32 workers x 6 GiB = 192 GiB
+        Default package: ``DASK_WORKER_REPLICAS=4`` × 2 threads × 6 GiB (multi-core baseline).
+        Lab fat node / air-gap 2 TiB: raise to 8–32. Prefer the DaskCluster CR:
 
-        To scale workers:
         ```bash
-        kubectl scale deployment cybersec-dask-default-worker -n dask --replicas=64
+        kubectl -n dask patch daskcluster cybersec-dask --type merge \
+          -p '{"spec":{"worker":{"replicas":8}}}'
+        # deploy-time: --set DASK_WORKER_REPLICAS=8 --set DASK_WORKER_NTHREADS=2 --set DASK_WORKER_CPU=2
         ```
     """)
 
@@ -120,7 +128,7 @@ def main():
         "# DO NOT EDIT — regenerate with: python zarf/scripts/embed-notebooks.py",
         "#",
         "# Notebooks embedded from zarf/notebooks/",
-        "# Mounted read-only at /home/jovyan/sample-notebooks/ in JupyterHub",
+        "# Mounted read-only at ~/sample-notebooks/ ($HOME/sample-notebooks) in JupyterHub",
         "---",
         "apiVersion: v1",
         "kind: ConfigMap",

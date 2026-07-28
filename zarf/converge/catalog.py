@@ -517,7 +517,8 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
     _platform.ensure_ingress_class_in_ctx(ctx)
     # Default resilient worker count if unset (package default may be multi-node).
     if not ctx.s3.get("DASK_WORKER_REPLICAS"):
-        ctx.s3["DASK_WORKER_REPLICAS"] = "1"
+        # Multi-core lab / air-gap baseline; capacity cap (T4) still trims Pending
+        ctx.s3["DASK_WORKER_REPLICAS"] = "4"
     unwound = (_unwedge_pending_helm(ctx) + _unwedge_terminating_app_ns(ctx)
                + _strip_agent_ignore(ctx) + _unwedge_unmutated_pods(ctx)
                + _unwedge_broken_dask_cluster(ctx))

@@ -169,7 +169,12 @@ else
   echo "   package: <none> — component-deploy fixes report MANUAL (verify/teardown still work)"
 fi
 [ -n "$CREDS_FILE" ] && ARGS+=(--creds-file "$CREDS_FILE")
-ARGS+=(--set "DASK_WORKER_REPLICAS=${DASK_WORKER_REPLICAS:-1}")
+# Multi-core / air-gap baseline 4; set DASK_WORKER_REPLICAS=1 for tiny smoke hosts
+ARGS+=(--set "DASK_WORKER_REPLICAS=${DASK_WORKER_REPLICAS:-4}")
+# Optional sizing (must keep CPU limit >= nthreads)
+[[ -n "${DASK_WORKER_NTHREADS:-}" ]] && ARGS+=(--set "DASK_WORKER_NTHREADS=${DASK_WORKER_NTHREADS}")
+[[ -n "${DASK_WORKER_CPU:-}" ]] && ARGS+=(--set "DASK_WORKER_CPU=${DASK_WORKER_CPU}")
+[[ -n "${DASK_WORKER_MEMORY:-}" ]] && ARGS+=(--set "DASK_WORKER_MEMORY=${DASK_WORKER_MEMORY}")
 # Optional terminal-WS override (NodePort/tunnel access; empty = auto-detect / ingress /ws)
 [ -n "${PTY_PROXY_WS:-}" ] && ARGS+=(--set "PTY_PROXY_WS=${PTY_PROXY_WS}")
 # Optional explicit ingress class; engine auto-detects nginx on RKE2 when unset

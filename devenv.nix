@@ -3148,7 +3148,8 @@ print('Config written to build/environment.json')
       # zarf CLI wants CWD-relative or absolute path
       PKG=$(readlink -f "$PKG")
 
-      WORKERS="''${DASK_WORKER_REPLICAS:-1}"
+      # Multi-core lab default 4; override DASK_WORKER_REPLICAS=1 for tiny hosts
+      WORKERS="''${DASK_WORKER_REPLICAS:-4}"
       SPILL_DIR="''${DASK_SPILL_DIR:-}"
       S3_PORT="''${LOCAL_S3_PORT:-9010}"
 
