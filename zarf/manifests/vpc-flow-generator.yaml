@@ -1,6 +1,6 @@
 # Continuous VPC flow log generator with fixed disk envelope.
 # Writes Hive-partitioned parquet to s3://$S3_BUCKET/vpc-flow/ and expires
-# old partitions so MinIO does not fill the node.
+# old partitions so local S3 (RustFS) does not fill the node.
 ---
 apiVersion: v1
 kind: ConfigMap

@@ -1,4 +1,4 @@
-"""cybersec-dask Zarf deployment convergence engine.
+"""Cyberphy Zarf (package cybersec-dask) deployment convergence engine.
 
 A deterministic, idempotent reconciler that drives the air-gap deployment to its
 target state from ANY intermediate or partial-failure state: discover -> diff

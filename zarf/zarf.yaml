@@ -4,7 +4,7 @@ metadata:
   description: Air-gap deployment package for Dask, JupyterHub, and Panel-Viz on RKE2
   version: "1.6.4"
   architecture: amd64
-  authors: Cybersec Toolkit Team
+  authors: Cyberphy Toolkit Team
   url: https://github.com/cloudera/cybersec
   documentation: https://cloudera.github.io/cybersec/airgap-deployment.html
 
@@ -20,7 +20,7 @@ variables:
     default: nginx
   - name: INGRESS_DOMAIN
     description: Base domain for ingress hostnames
-    default: cybersec.local
+    default: cyberphy.local
 
   # Dask configuration
   - name: DASK_WORKER_REPLICAS
@@ -119,7 +119,7 @@ components:
   # ===========================================================================
   - name: cybersec-images
     required: true
-    description: Container images for Cybersec Dask deployment
+    description: Container images for Cyberphy Dask deployment
     images:
       # Custom Dask image with pre-baked Python dependencies (Panel, HoloViews, etc.)
       # Note: Use localhost:5555 for local builds, will be rewritten by Zarf during deploy

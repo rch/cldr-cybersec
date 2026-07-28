@@ -615,7 +615,7 @@ detect_package_file() {
 # Step 6: Deploy Zarf Package (with S3/Dask env vars)
 # =============================================================================
 deploy_package() {
-    log_step "Step 6: Deploying Cybersec Dask Package"
+    log_step "Step 6: Deploying Cyberphy Dask Package"
 
     log_info "Workers: $DASK_WORKER_REPLICAS"
     log_info "Spill dir: ${DASK_SPILL_DIR:-<emptyDir post-patch>}"

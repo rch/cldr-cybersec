@@ -34,7 +34,7 @@ def _default_zarf() -> str | None:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        prog="converge", description="cybersec-dask deployment convergence engine")
+        prog="converge", description="cyberphy (cybersec-dask package) deployment convergence engine")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true", help="remediate to a fixpoint")
     mode.add_argument("--verify", action="store_true", help="assert target state (oracle); no changes")

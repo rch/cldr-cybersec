@@ -19,9 +19,10 @@ cp /app/sample-notebooks/OTEL_Data_Generator.ipynb ~/
 
 ## Environment Variables
 
-The following are pre-configured:
+The following are pre-configured (local lab: RustFS `admin`/`admin`, bucket `cyberphy`):
 - `DASK_SCHEDULER_ADDRESS`: Dask cluster endpoint
-- `S3_ENDPOINT`: S3 endpoint (if applicable)
+- `S3_ENDPOINT`: S3 endpoint (RustFS on lab nodes; empty for AWS)
+- `S3_BUCKET`: data bucket (default `cyberphy` in notebooks)
 - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`: S3 credentials
 
 ## Cluster Resources

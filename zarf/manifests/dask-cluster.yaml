@@ -1,4 +1,4 @@
-# DaskCluster for Cybersec air-gap deployment
+# DaskCluster for Cyberphy air-gap deployment
 # Uses the custom cybersec-dask image with pre-baked Python dependencies
 #
 # Zarf template variables:
@@ -58,6 +58,8 @@ spec:
           # Injected into BOTH scheduler and worker pods because dask-cluster is
           # a RAW-MANIFEST component (zarf.yaml) — no Helm chart renders these.
           env:
+            - name: PYTHONPATH
+              value: "/app"
             - name: S3_ENDPOINT
               value: "###ZARF_VAR_S3_ENDPOINT###"
             - name: AWS_REGION
@@ -111,6 +113,8 @@ spec:
           env:
             - name: DASK_DASHBOARD_ADDRESS
               value: ":8787"
+            - name: PYTHONPATH
+              value: "/app"
             - name: S3_ENDPOINT
               value: "###ZARF_VAR_S3_ENDPOINT###"
             - name: AWS_REGION

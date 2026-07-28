@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Cybersec Toolkit is a data pipeline for ingesting, correlating, and preparing cybersecurity data for analytics. It builds a Security Data Lakehouse using Apache Flink, Apache Iceberg, and PostgreSQL with a focus on CloudTrail event processing.
+**Cyberphy** (product) is a CPS observability and analytics platform: OpenTelemetry from the plant floor and the platform itself, through Flink/NiFi, into an Iceberg lakehouse (Polaris + S3/RustFS), with air-gap delivery via Zarf.
+
+The Python import path and many wire identifiers remain `cybersec*` for compatibility (CLI aliases: `cyberphy` preferred, `cybersec` still works). Repo remote: [weathership/cyberphy](https://github.com/weathership/cyberphy).
 
 ## Build Commands
 
@@ -74,16 +76,16 @@ The `k8s:prepare-*` tasks use Conftest policies to validate requirements:
 
 CLI/MCP commands:
 ```bash
-cybersec "/k8s"                    # Show status and detected target
-cybersec "/k8s validate aws"       # Validate AWS target
-cybersec "/k8s prepare k3d"        # Prepare k3d target
-cybersec "/k8s prepare aws --dry-run"  # Validate without writing config
+cyberphy "/k8s"                    # Show status and detected target
+cyberphy "/k8s validate aws"       # Validate AWS target
+cyberphy "/k8s prepare k3d"        # Prepare k3d target
+cyberphy "/k8s prepare aws --dry-run"  # Validate without writing config
 ```
 
 ### Service Ports (Core Stack - always started)
 - Flink Web UI: http://localhost:8081
 - Iceberg Browser: http://localhost:5050
-- MinIO Console: http://localhost:9011 (minioadmin/minioadmin)
+- RustFS (local S3) API: http://localhost:9010 · Console: http://localhost:9011/rustfs/console/ (admin/admin)
 - Apache Polaris REST: http://localhost:8181
 - PostgreSQL: port 5438
 - OpenTelemetry Collector: ports 4317 (gRPC), 4318 (HTTP), 8889 (Prometheus)
@@ -210,7 +212,7 @@ When implementing new health checks, fixes, or automation:
 - `JAVA_DATAGEN_RPS`: Rows per second for Java datagen (default: `100`)
 - `ICEBERG_CATALOG_URI`: PostgreSQL connection (default: `postgresql://postgres@localhost:5438/cybersec`)
 - `ICEBERG_WAREHOUSE`: S3 path (default: `s3://cybersec/iceberg/warehouse`)
-- `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`: MinIO credentials (minioadmin/minioadmin)
+- `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`: local RustFS credentials (admin/admin)
 - `S3_ENDPOINT`: MinIO endpoint (http://localhost:9010)
 
 ## Testing
@@ -247,7 +249,7 @@ The bootstrap system provides unified configuration and setup across CLI, Web UI
 On `devenv up`, the bootstrap-check process runs automatically and displays environment status. If bootstrap is needed:
 
 1. **Web UI**: Visit http://localhost:5050/settings and click "Run Bootstrap"
-2. **CLI**: Run `cybersec bootstrap run` or `uv run python -m cybersec.cli.main bootstrap run`
+2. **CLI**: Run `cyberphy bootstrap run` or `uv run python -m cybersec.cli.main bootstrap run`
 3. **MCP**: Use the `bootstrap_run` tool from Claude Code or other MCP clients
 
 ### Bootstrap CLI Commands
@@ -257,27 +259,27 @@ On `devenv up`, the bootstrap-check process runs automatically and displays envi
 uv pip install -e .
 
 # Check current configuration
-cybersec bootstrap info
+cyberphy bootstrap info
 
 # Check service health
-cybersec bootstrap status
+cyberphy bootstrap status
 
 # View/modify settings
-cybersec bootstrap settings --show
-cybersec bootstrap settings --edit
-cybersec bootstrap settings --set flink_home=/path/to/flink
+cyberphy bootstrap settings --show
+cyberphy bootstrap settings --edit
+cyberphy bootstrap settings --set flink_home=/path/to/flink
 
 # Run verification checks
-cybersec bootstrap verify
+cyberphy bootstrap verify
 
 # Run bootstrap process
-cybersec bootstrap run
-cybersec bootstrap run --flink-path ~/local/flink-1.20.1
-cybersec bootstrap run --skip-flink
-cybersec bootstrap run --dry-run
+cyberphy bootstrap run
+cyberphy bootstrap run --flink-path ~/local/flink-1.20.1
+cyberphy bootstrap run --skip-flink
+cyberphy bootstrap run --dry-run
 
 # Quick assessment (for automation)
-cybersec bootstrap assess
+cyberphy bootstrap assess
 ```
 
 ### Bootstrap Configuration
@@ -311,7 +313,7 @@ warehouse = "s3://cybersec/iceberg/warehouse"
 Start the MCP server for Claude Code integration:
 
 ```bash
-cybersec-mcp
+cyberphy-mcp
 # Or: uv run python -m cybersec.mcp.server
 ```
 
@@ -361,7 +363,7 @@ The health system provides FMEA-based diagnostics and automated remediation.
 ### Commands (CLI and MCP use identical syntax)
 
 ```bash
-# CLI usage: cybersec "<command>"
+# CLI usage: cyberphy "<command>"   (alias: cybersec "<command>")
 # MCP usage: cmd("<command>")
 
 # Run health checks
@@ -455,7 +457,7 @@ git submodule update --init --recursive
 mvn clean install -DskipTests -Dfast
 
 # Option B: Use existing installation
-cybersec bootstrap settings --set flink_home=/path/to/flink-1.20.1
+cyberphy bootstrap settings --set flink_home=/path/to/flink-1.20.1
 ```
 
 ### E2E Validation Checklist
@@ -480,7 +482,7 @@ NiFi provides data flow visualization and receives OTEL traces:
 ./scripts/setup_nifi_bin.sh 2.0.0
 
 # Or use existing installation
-cybersec bootstrap settings --set nifi_home=/path/to/nifi-2.0.0
+cyberphy bootstrap settings --set nifi_home=/path/to/nifi-2.0.0
 
 # Verify NiFi
 curl http://localhost:8450/nifi-api/system-diagnostics | jq '.systemDiagnostics.aggregateSnapshot.usedHeap'

@@ -163,17 +163,17 @@ singleuser:
         readOnly: true
   # Network policy - allow singleuser pods full egress to reach:
   #   - Dask scheduler (10.43.x.x ClusterIP or dask.svc.cluster.local)
-  #   - MinIO/S3 on host network (192.168.x.x)
+  #   - RustFS/S3 on host network (192.168.x.x)
   #   - Any other cluster services
   # Default JupyterHub NetworkPolicy blocks private IPs in egress,
   # which prevents notebook access to Dask and S3.
   networkPolicy:
     egressAllowRules:
       privateIPs: true
-  # Environment variables for S3 access
+  # Environment variables for S3 access (RustFS lab: admin/admin, bucket cyberphy)
   extraEnv:
-    # Make the injected jupyterhub package importable
-    PYTHONPATH: "/srv/jupyterhub-pkg"
+    # jupyterhub pkg (init inject) + /app for generate_hdf5.py (image-baked, not under ConfigMap)
+    PYTHONPATH: "/srv/jupyterhub-pkg:/app"
     # Ensure HOME is writable (Dask base image runs as root)
     HOME: "/root"
     S3_ENDPOINT: "###ZARF_VAR_S3_ENDPOINT###"

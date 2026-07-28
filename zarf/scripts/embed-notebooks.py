@@ -20,12 +20,14 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 NOTEBOOKS_DIR = PROJECT_ROOT / "zarf" / "notebooks"
+GENERATOR_SCRIPT = PROJECT_ROOT / "zarf" / "scripts" / "generate_hdf5.py"
 OUTPUT_FILE = PROJECT_ROOT / "zarf" / "manifests" / "sample-notebooks-configmap.yaml"
 
 # Notebooks to include (order matters for README table)
 INCLUDE_NOTEBOOKS = [
     "OTEL_Data_Generator.ipynb",
     "Dask_S3_Validation.ipynb",
+    "HDF5_CPHY_Acquisition_Generator.ipynb",
 ]
 
 # ConfigMap limit is 1 MiB; warn if we get close
@@ -84,6 +86,7 @@ def main():
         |----------|-------------|-----------|
         | `OTEL_Data_Generator.ipynb` | Generate synthetic OTEL spans (same methodology as 1TB dataset) | Configurable |
         | `Dask_S3_Validation.ipynb` | Out-of-core Dask stress test with 30GB dataset | 30 GB |
+        | `HDF5_CPHY_Acquisition_Generator.ipynb` | CPHY/OTel HDF5 acquisition windows + Dask/datashader | lab ~6 MiB / airgap ~2 TiB |
 
         ## Getting Started
 
@@ -95,9 +98,10 @@ def main():
 
         ## Environment Variables
 
-        The following are pre-configured:
+        The following are pre-configured (local lab: RustFS admin/admin, bucket cyberphy):
         - `DASK_SCHEDULER_ADDRESS`: Dask cluster endpoint
-        - `S3_ENDPOINT`: S3 endpoint (if applicable)
+        - `S3_ENDPOINT`: S3 endpoint (RustFS on lab nodes; empty for AWS)
+        - `S3_BUCKET`: data bucket (default cyberphy in notebooks)
         - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`: S3 credentials
 
         ## Cluster Resources
@@ -135,6 +139,15 @@ def main():
         yaml_parts.append(f"  {nb_name}: |")
         yaml_parts.append(yaml_block_scalar(nb_json))
 
+    # Ship generate_hdf5.py alongside notebooks (ConfigMap mount replaces image dir)
+    if GENERATOR_SCRIPT.is_file():
+        gen_text = GENERATOR_SCRIPT.read_text()
+        yaml_parts.append("  generate_hdf5.py: |")
+        yaml_parts.append(yaml_block_scalar(gen_text))
+        print(f"  generate_hdf5.py: {len(gen_text):,} bytes")
+    else:
+        print(f"Warning: {GENERATOR_SCRIPT} not found — CPHY notebook import may fail", file=sys.stderr)
+
     yaml_content = "\n".join(yaml_parts) + "\n"
 
     # Size check
@@ -153,7 +166,8 @@ def main():
         f.write(yaml_content)
 
     print(f"Wrote {OUTPUT_FILE}")
-    print(f"  README.md + {len(notebook_entries)} notebooks embedded")
+    extra = " + generate_hdf5.py" if GENERATOR_SCRIPT.is_file() else ""
+    print(f"  README.md + {len(notebook_entries)} notebooks{extra} embedded")
 
 
 if __name__ == "__main__":
