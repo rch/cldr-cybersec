@@ -315,7 +315,9 @@ HINTS = {
             "#   kc uncordon $NODE 2>/dev/null || true",
             "# Also ensure T0.kubelet-gc absolute free-space thresholds on large disks",
         ],
-        note="Layer-A: free disk SAFELY — gate long zarf deploys until DiskPressure=False",
+        note="DiskPressure: MANUAL only if df < configured hard GiB (default 5Gi from "
+             "kubelet eviction-hard). If df >= hard, FSM clears taint and waits soft-grace+lag "
+             "for condition False, then continues.",
     ),
     "T0.layer-a-zarf-tools": block(
         [

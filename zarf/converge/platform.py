@@ -19,8 +19,9 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .kube import Ctx
 from . import manual as _manual
@@ -53,6 +54,14 @@ _KUBELET_GC_ARGS = (
     'image-gc-high-threshold=100',
     'image-gc-low-threshold=99',
 )
+
+# Canonical absolute free-space floors (GiB) — match _KUBELET_GC_ARGS hard/soft.
+# Hard = DiskPressure / NoSchedule; soft = grace before hard.
+DEFAULT_EVICTION_HARD_GIB = 5.0
+DEFAULT_EVICTION_SOFT_GIB = 10.0
+# Soft grace is 5m in config; wait hard+buffer for condition to clear after free OK.
+DISK_PRESSURE_CLEAR_WAIT_S = 420   # 5m soft grace + 2m kubelet lag
+DISK_PRESSURE_POLL_S = 15
 
 # System namespaces we observe but never mutate (except never).
 SYSTEM_NS_OBSERVE = (
@@ -123,6 +132,212 @@ def det_kubelet_gc_policy(_ctx: Ctx) -> Probe:
     return Probe(False,
                  f"{RKE2_CONFIG} needs absolute free-space eviction (<5Gi hard) and "
                  "image-gc-high-threshold=100 — percent thresholds fire too early on large disks")
+
+
+# --------------------------------------------------------------------------- #
+# Disk free vs configured eviction thresholds + DiskPressure resolution
+# --------------------------------------------------------------------------- #
+
+def _parse_gib_threshold(text: str, key: str) -> Optional[float]:
+    """Parse e.g. nodefs.available<5Gi from eviction-hard/soft string → 5.0."""
+    m = re.search(rf"{re.escape(key)}<(\d+(?:\.\d+)?)\s*Gi", text, re.I)
+    if m:
+        return float(m.group(1))
+    m = re.search(rf"{re.escape(key)}<(\d+(?:\.\d+)?)\s*G\b", text, re.I)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def configured_eviction_thresholds_gib(text: Optional[str] = None) -> Dict[str, float]:
+    """Knowable min free space from on-disk kubelet config (or canonical defaults).
+
+    Returns hard_gib / soft_gib — the floors under which DiskPressure is expected
+    (hard) vs soft eviction grace (soft). Soft grace period seconds also returned.
+    """
+    raw = text if text is not None else _read_rke2_config()
+    hard = DEFAULT_EVICTION_HARD_GIB
+    soft = DEFAULT_EVICTION_SOFT_GIB
+    grace_s = 300  # 5m default from _KUBELET_GC_ARGS
+    if raw:
+        for label, store in (("eviction-hard", "hard"), ("eviction-soft", "soft")):
+            m = re.search(rf"{label}=([^\s\"']+)", raw)
+            if not m:
+                # YAML list form: - "eviction-hard=..."
+                m = re.search(rf'{label}=([^"\']+)', raw)
+            if m:
+                blob = m.group(1)
+                vals = []
+                for key in ("nodefs.available", "imagefs.available"):
+                    g = _parse_gib_threshold(blob, key)
+                    if g is not None:
+                        vals.append(g)
+                if vals:
+                    if store == "hard":
+                        hard = min(vals)
+                    else:
+                        soft = min(vals)
+        gm = re.search(r"eviction-soft-grace-period=[^\n]*nodefs\.available=(\d+)m", raw)
+        if gm:
+            grace_s = int(gm.group(1)) * 60
+    return {
+        "hard_gib": hard,
+        "soft_gib": soft,
+        "soft_grace_s": grace_s,
+        "clear_wait_s": grace_s + 120,  # grace + kubelet lag
+    }
+
+
+def df_available_gib(path: str) -> Optional[float]:
+    """Free space on the filesystem containing path (GiB), or None if unreadable."""
+    try:
+        st = os.statvfs(path)
+        return (st.f_bavail * st.f_frsize) / (1024 ** 3)
+    except OSError:
+        return None
+
+
+def disk_free_census() -> Dict[str, object]:
+    """df-equivalent free space on paths that drive nodefs/imagefs pressure."""
+    paths = ["/", "/var/lib/rancher", "/var/tmp"]
+    if REGISTRY_HOSTPATH.exists() or REGISTRY_HOSTPATH.parent.exists():
+        paths.append(str(REGISTRY_HOSTPATH))
+    per: Dict[str, float] = {}
+    for p in paths:
+        if Path(p).exists() or p in ("/", "/var/tmp"):
+            g = df_available_gib(p if Path(p).exists() else "/")
+            if g is not None:
+                # dedupe same device
+                per[p] = round(g, 2)
+    # Minimum free across measured mounts (worst imagefs/nodefs proxy)
+    min_free = min(per.values()) if per else None
+    thr = configured_eviction_thresholds_gib()
+    below_hard = (
+        min_free is not None and min_free < thr["hard_gib"]
+    )
+    return {
+        "mounts_gib": per,
+        "min_free_gib": min_free,
+        "hard_gib": thr["hard_gib"],
+        "soft_gib": thr["soft_gib"],
+        "clear_wait_s": thr["clear_wait_s"],
+        "below_hard": below_hard,
+        "summary": (
+            f"df_min={min_free}Gi hard={thr['hard_gib']}Gi soft={thr['soft_gib']}Gi "
+            f"mounts={per}"
+        ),
+    }
+
+
+def _node_disk_pressure_true(ctx: Ctx) -> List[str]:
+    """Nodes with DiskPressure condition True and/or disk-pressure taint."""
+    out: List[str] = []
+    for n in ctx.items("nodes"):
+        name = (n.get("metadata") or {}).get("name") or "?"
+        conds = {c.get("type"): c for c in (n.get("status") or {}).get("conditions") or []}
+        dp = conds.get("DiskPressure") or {}
+        if str(dp.get("status", "")).lower() == "true":
+            out.append(name)
+        for t in n.get("spec", {}).get("taints", []) or []:
+            if t.get("key") == "node.kubernetes.io/disk-pressure":
+                if name not in out:
+                    out.append(name)
+    return out
+
+
+def rem_resolve_disk_pressure(ctx: Ctx) -> Fix:
+    """FSM resolution for DiskPressure when free space is knowable.
+
+    Policy (single-node air-gap, operator-owned):
+      * df min free < configured hard eviction GiB → MANUAL free disk (early return)
+      * df min free >= hard GiB → clear taint, uncordon, poll until DiskPressure=False
+        for configured clear_wait_s (soft grace + lag); then OK for FSM to continue
+      * if wait expires with condition still True but df still >= hard → MANUAL
+        (kubelet lag / sticky condition) with census for operator
+
+    Never prunes images. Does not delete Layer-A packages.
+    """
+    free = disk_free_census()
+    pressured = _node_disk_pressure_true(ctx)
+    if not pressured and not free.get("below_hard"):
+        # No pressure signal — nothing to do (detect may have raced)
+        return Fix(False, f"no DiskPressure to resolve ({free['summary']})")
+
+    if free.get("below_hard"):
+        return Fix(False, _manual.join_detail(
+            f"MANUAL: free disk below configured hard eviction "
+            f"(min_free={free.get('min_free_gib')}Gi < hard={free.get('hard_gib')}Gi) "
+            f"— {free['summary']}. Free space safely (journal vacuum, Failed pods); "
+            f"NEVER crictl rmi --prune.",
+            _manual.hint_for("T0.no-disk-pressure"),
+        ))
+
+    # Free space is above hard floor — expect kubelet to clear condition; help it.
+    actions: List[str] = []
+    if os.geteuid() != 0:
+        return Fix(False, _manual.join_detail(
+            f"MANUAL: free space OK ({free['summary']}) but need root to clear taint / "
+            f"wait for DiskPressure=False on {pressured}",
+            _manual.hint_for("T0.no-disk-pressure"),
+        ))
+
+    for name in pressured or [
+        (n.get("metadata") or {}).get("name")
+        for n in ctx.items("nodes")
+        if (n.get("metadata") or {}).get("name")
+    ]:
+        if not name:
+            continue
+        # Clear sticky taint so scheduling can resume once condition flips
+        r = ctx.k([
+            "taint", "nodes", name,
+            "node.kubernetes.io/disk-pressure:NoSchedule-",
+        ])
+        if r.returncode == 0:
+            actions.append(f"cleared disk-pressure taint on {name}")
+        r2 = ctx.k(["uncordon", name])
+        if r2.returncode == 0:
+            actions.append(f"uncordoned {name}")
+
+    wait_s = int(free.get("clear_wait_s") or DISK_PRESSURE_CLEAR_WAIT_S)
+    poll = DISK_PRESSURE_POLL_S
+    deadline = time.time() + wait_s
+    print(
+        f"    waiting up to {wait_s}s for DiskPressure=False "
+        f"(df min={free.get('min_free_gib')}Gi >= hard={free.get('hard_gib')}Gi)",
+        flush=True,
+    )
+    while time.time() < deadline:
+        still = _node_disk_pressure_true(ctx)
+        if not still:
+            # re-clear taint if kubelet re-added during clear
+            for name in pressured:
+                ctx.k([
+                    "taint", "nodes", name,
+                    "node.kubernetes.io/disk-pressure:NoSchedule-",
+                ])
+            return Fix(
+                True,
+                f"DiskPressure cleared after wait "
+                f"({free['summary']}; actions={actions or ['none']})",
+            )
+        time.sleep(poll)
+        # re-check free — if it dropped below hard mid-wait, escalate to MANUAL
+        free = disk_free_census()
+        if free.get("below_hard"):
+            return Fix(False, _manual.join_detail(
+                f"MANUAL: free space fell below hard during wait "
+                f"({free['summary']})",
+                _manual.hint_for("T0.no-disk-pressure"),
+            ))
+
+    still = _node_disk_pressure_true(ctx)
+    return Fix(False, _manual.join_detail(
+        f"MANUAL: waited {wait_s}s for DiskPressure=False with df above hard "
+        f"({free['summary']}); still pressured={still}. "
+        f"Check kubelet logs / restart rke2-server if sticky.",
+        _manual.hint_for("T0.no-disk-pressure"),
+    ))
 
 
 def rem_kubelet_gc_policy(_ctx: Ctx) -> Fix:

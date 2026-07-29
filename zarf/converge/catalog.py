@@ -525,15 +525,19 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
     if missing:
         reason = "; ".join(missing)
         return Fix(False, _manual.zarf_deploy_manual_line(components, reason=reason))
-    # Refuse long zarf deploys under disk pressure (condition OR taint). Manual
-    # taint removal while DiskPressure=True is not enough — wait for condition False.
+    # Refuse long zarf deploys under disk pressure unless FSM can resolve it:
+    # df >= hard → clear taint + wait for condition; df < hard → MANUAL free disk.
     dp = _disk_pressure_issues(ctx)
     if dp:
-        return Fix(False, _manual.join_detail(
-            f"MANUAL: refusing zarf deploy --components={components} until disk pressure "
-            f"clears — {'; '.join(dp)}",
-            _manual.hint_for("T0.no-disk-pressure"),
-        ))
+        resolved = _platform.rem_resolve_disk_pressure(ctx)
+        if not resolved.changed and _disk_pressure_issues(ctx):
+            return Fix(False, _manual.join_detail(
+                f"refusing zarf deploy --components={components} — "
+                f"{resolved.detail}",
+                _manual.hint_for("T0.no-disk-pressure"),
+            ))
+        # Pressure cleared — fall through to deploy
+        print(f"    disk pressure resolved: {resolved.detail}", flush=True)
     # Fail LOUD rather than render an empty S3_BUCKET. An S3-dependent component
     # deployed with a blank bucket renders OTEL_DATA_PATH=s3:/// and bricks the app
     # ("Invalid bucket name 's3:'"), so refuse instead of silently breaking it.
@@ -773,11 +777,32 @@ def _disk_pressure_issues(ctx: Ctx) -> List[str]:
 
 
 def _det_no_disk_pressure(ctx: Ctx) -> Probe:
+    """DiskPressure condition/taint + df vs configured hard eviction floor."""
     issues = _disk_pressure_issues(ctx)
-    return Probe(
-        not issues,
-        "; ".join(issues) if issues else "no DiskPressure condition or disk-pressure taint",
-    )
+    free = _platform.disk_free_census()
+    if not issues and not free.get("below_hard"):
+        return Probe(
+            True,
+            f"no DiskPressure; {free['summary']}",
+        )
+    # Still report free census so rem can choose MANUAL free-disk vs wait/clear
+    detail_parts = list(issues) if issues else []
+    if free.get("below_hard"):
+        detail_parts.append(
+            f"df below hard eviction floor (min_free={free.get('min_free_gib')}Gi "
+            f"< hard={free.get('hard_gib')}Gi)"
+        )
+    elif issues:
+        detail_parts.append(
+            f"df above hard floor — expect clear within "
+            f"~{free.get('clear_wait_s')}s ({free['summary']})"
+        )
+    return Probe(False, "; ".join(detail_parts) if detail_parts else free["summary"])
+
+
+def _rem_no_disk_pressure(ctx: Ctx) -> Fix:
+    """See platform.rem_resolve_disk_pressure — MANUAL only when df < hard GiB."""
+    return _platform.rem_resolve_disk_pressure(ctx)
 
 
 def _node_schedulability_census(ctx: Ctx) -> dict:
@@ -1447,13 +1472,21 @@ def _rem_scheduler(ctx: Ctx) -> Fix:
     reg = _registry_census(ctx)
     orient = _cluster_orient_summary(ctx, pods)
 
-    # 1) Node pressure / taint
+    # 1) Node pressure / taint — FSM resolve when df >= hard; MANUAL only if df short
     if not node["schedulable"] and (pods["pending"] or pods["total"] == 0 or pods["ready"] < 1):
-        return Fix(False, _manual.join_detail(
-            f"MANUAL: scheduler blocked by node pressure/taint — {orient}. "
-            f"Clear DiskPressure (condition False) before zarf redeploy.",
-            _manual.hint_for("T0.no-disk-pressure"),
-        ))
+        if node.get("disk_pressure") or _disk_pressure_issues(ctx):
+            cleared = _platform.rem_resolve_disk_pressure(ctx)
+            actions.append(cleared.detail)
+            if cleared.changed:
+                node = _node_schedulability_census(ctx)
+            elif not node["schedulable"] and _disk_pressure_issues(ctx):
+                return Fix(False, cleared.detail)
+        if not _node_schedulability_census(ctx)["schedulable"]:
+            return Fix(bool(actions), _manual.join_detail(
+                f"scheduler blocked by node pressure/taint — {orient}. "
+                f"actions={actions}",
+                _manual.hint_for("T0.no-disk-pressure"),
+            ))
 
     # 2) Image pull → ensure images in registry
     if pods["image_pull"] or reg.get("catalog_has_app") is False:
@@ -2434,17 +2467,28 @@ def _rem_jupyterhub(ctx: Ctx) -> Fix:
 
     census = _jupyterhub_workload_census(ctx)
 
-    # --- 3 Pending + node blocked → MANUAL (no zarf) -----------------------
+    # --- 3 Pending + node blocked → resolve DiskPressure via FSM when df OK
     if census["pending"] and not census["node_schedulable"]:
-        detail = (
-            f"MANUAL: hub/proxy Pending while node not schedulable — "
-            f"{census['summary']}. Free disk / clear DiskPressure / uncordon; "
-            f"then re-apply (engine will recycle pods). Refusing zarf redeploy."
-        )
-        if actions:
-            detail += f"  [unwound: {'; '.join(actions)}]"
-        return Fix(bool(actions), _manual.join_detail(
-            detail, _manual.hint_for("T5.jupyterhub")))
+        if census.get("disk_pressure") or _disk_pressure_issues(ctx):
+            cleared = _platform.rem_resolve_disk_pressure(ctx)
+            actions.append(cleared.detail)
+            if cleared.changed:
+                census = _jupyterhub_workload_census(ctx)
+            elif _disk_pressure_issues(ctx):
+                detail = cleared.detail
+                if actions:
+                    detail += f"  [unwound: {'; '.join(actions)}]"
+                return Fix(False, detail)
+        if not census["node_schedulable"] and not _node_schedulability_census(ctx)["schedulable"]:
+            detail = (
+                f"hub/proxy Pending while node not schedulable — "
+                f"{census['summary']}. Refusing zarf redeploy."
+            )
+            if actions:
+                detail += f"  [unwound: {'; '.join(actions)}]"
+            return Fix(bool(actions), _manual.join_detail(
+                detail, _manual.hint_for("T5.jupyterhub")))
+        # Pressure cleared — fall through to recycle path
 
     # --- 4 Pending + schedulable → recycle only ----------------------------
     if census["pending"] and census["node_schedulable"] and (
@@ -2604,8 +2648,9 @@ def build_catalog(dynamic_provisioning: bool = False,
                   Layer.B, _platform.det_kubelet_gc_policy, _platform.rem_kubelet_gc_policy,
                   depends_on=("T0.api",), manual_hint=H("T0.kubelet-gc")),
         Invariant("T0.no-disk-pressure", "T0",
-                  "No DiskPressure condition or disk-pressure taint (gate for long zarf deploys)",
-                  Layer.A, _det_no_disk_pressure, depends_on=("T0.api",),
+                  "No DiskPressure (df vs configured hard GiB; clear taint + wait when free OK)",
+                  Layer.B, _det_no_disk_pressure, _rem_no_disk_pressure,
+                  depends_on=("T0.api", "T0.kubelet-gc"),
                   manual_hint=H("T0.no-disk-pressure")),
         # Layer-A tools: binary + init package must be on the node (rc=127 / air-gap init).
         Invariant("T0.layer-a-zarf-tools", "T0",
