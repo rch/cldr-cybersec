@@ -47,6 +47,15 @@ class Ctx:
     _zarf_path: Optional[str] = None        # cached PATH guaranteeing kubectl (see zarf())
 
     # ------------------------------------------------------------------ process
+    @staticmethod
+    def out_text(val) -> str:
+        """Normalize subprocess stdout/stderr to str (TimeoutExpired may leave bytes)."""
+        if val is None:
+            return ""
+        if isinstance(val, bytes):
+            return val.decode("utf-8", errors="replace")
+        return str(val)
+
     def run(self, argv: List[str], timeout: Optional[int] = None,
             input_: Optional[str] = None,
             env: Optional[dict] = None) -> subprocess.CompletedProcess:
@@ -63,7 +72,10 @@ class Ctx:
         except FileNotFoundError as e:
             return subprocess.CompletedProcess(argv, 127, "", str(e))
         except subprocess.TimeoutExpired as e:
-            return subprocess.CompletedProcess(argv, 124, e.stdout or "", "timeout")
+            # e.stdout/stderr can be bytes even when text=True was requested
+            return subprocess.CompletedProcess(
+                argv, 124, self.out_text(e.stdout),
+                self.out_text(e.stderr) or "timeout")
 
     def k(self, args: List[str], timeout: Optional[int] = None) -> subprocess.CompletedProcess:
         return self.run(self.kubectl + args, timeout=timeout)

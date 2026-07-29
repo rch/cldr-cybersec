@@ -559,7 +559,8 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
         # this state (status `failed`, not pending-*). Remedy is zarf's own
         # recommendation: `zarf package remove` the failing COMPONENT (named in the
         # error), then a fresh deploy INSTALLS instead of upgrading. One retry.
-        err = (r.stderr or "") + (r.stdout or "")
+        # Normalize streams: TimeoutExpired / some zarf builds can leave bytes.
+        err = Ctx.out_text(r.stderr) + Ctx.out_text(r.stdout)
         if r.returncode != 0 and "no deployed releases" in err and ctx.package_path:
             # Parse component name whether zarf quotes with " or '.
             m = re.search(
@@ -605,7 +606,7 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
     # carry the cause (chart timeout, image pull, CRD hook); S3 secrets ride env, not
     # stdout, so this stays clean. Always attach in-situ DISCOVER/FIX so operators can
     # re-run the same ``zarf package deploy --components=…`` that unblocks installs.
-    tail = (r.stderr or r.stdout or "").strip().splitlines()[-3:]
+    tail = (Ctx.out_text(r.stderr) or Ctx.out_text(r.stdout)).strip().splitlines()[-3:]
     suffix = f" — {' / '.join(s.strip() for s in tail)}" if tail else ""
     head = f"zarf deploy {components}: rc={r.returncode}{suffix}{pre}"
     return Fix(False, _manual.join_detail(
@@ -1093,7 +1094,9 @@ def _rem_registry_running(ctx: Ctx) -> Fix:
             except FileNotFoundError as e:
                 return _sp.CompletedProcess(argv, 127, "", str(e))
             except _sp.TimeoutExpired as e:
-                return _sp.CompletedProcess(argv, 124, e.stdout or "", "timeout")
+                return _sp.CompletedProcess(
+                    argv, 124, Ctx.out_text(e.stdout),
+                    Ctx.out_text(e.stderr) or "timeout")
         return ctx.zarf(args)
 
     r = _run_init()
@@ -1104,7 +1107,7 @@ def _rem_registry_running(ctx: Ctx) -> Fix:
         return Fix(True, f"zarf init: rc=0{tail}")
 
     # Second pass: seed-registry deadline / partial install often leaves recoverable state
-    if r.returncode in (1, 124) or "deadline" in (r.stderr or "").lower():
+    if r.returncode in (1, 124) or "deadline" in Ctx.out_text(r.stderr).lower():
         more = _unwedge_failed_seed_registry(ctx)
         more += _pre_init_cleanup(ctx)
         if more:
