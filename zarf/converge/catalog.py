@@ -525,6 +525,15 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
     if missing:
         reason = "; ".join(missing)
         return Fix(False, _manual.zarf_deploy_manual_line(components, reason=reason))
+    # Refuse long zarf deploys under disk pressure (condition OR taint). Manual
+    # taint removal while DiskPressure=True is not enough — wait for condition False.
+    dp = _disk_pressure_issues(ctx)
+    if dp:
+        return Fix(False, _manual.join_detail(
+            f"MANUAL: refusing zarf deploy --components={components} until disk pressure "
+            f"clears — {'; '.join(dp)}",
+            _manual.hint_for("T0.no-disk-pressure"),
+        ))
     # Fail LOUD rather than render an empty S3_BUCKET. An S3-dependent component
     # deployed with a blank bucket renders OTEL_DATA_PATH=s3:/// and bricks the app
     # ("Invalid bucket name 's3:'"), so refuse instead of silently breaking it.
@@ -741,14 +750,34 @@ def _rem_node_ready(ctx: Ctx) -> Fix:
     return Fix(changed, "uncordoned cordoned node(s)" if changed else "nothing to uncordon")
 
 
-def _det_no_disk_pressure(ctx: Ctx) -> Probe:
-    tainted = []
+def _disk_pressure_issues(ctx: Ctx) -> List[str]:
+    """Node DiskPressure *condition* and/or disk-pressure *taint*.
+
+    Field: operators may ``kubectl taint … disk-pressure-`` while the condition is
+    still True — kubelet re-taints and pods stay unschedulable. Long zarf deploys
+    under DiskPressure=True fill imagefs further and wedge hub/proxy Pending.
+    """
+    issues: List[str] = []
     for n in ctx.items("nodes"):
+        name = (n.get("metadata") or {}).get("name") or "?"
+        conds = {c.get("type"): c for c in (n.get("status") or {}).get("conditions") or []}
+        dp = conds.get("DiskPressure") or {}
+        if str(dp.get("status", "")).lower() == "true":
+            msg = (dp.get("message") or dp.get("reason") or "DiskPressure=True").strip()
+            issues.append(f"{name}: condition DiskPressure=True ({msg})")
         for t in n.get("spec", {}).get("taints", []) or []:
             if t.get("key") == "node.kubernetes.io/disk-pressure":
-                tainted.append(n["metadata"]["name"])
-    return Probe(not tainted, f"disk-pressure on {tainted}" if tainted
-                 else "no disk-pressure taint")
+                effect = t.get("effect") or "NoSchedule"
+                issues.append(f"{name}: taint node.kubernetes.io/disk-pressure:{effect}")
+    return issues
+
+
+def _det_no_disk_pressure(ctx: Ctx) -> Probe:
+    issues = _disk_pressure_issues(ctx)
+    return Probe(
+        not issues,
+        "; ".join(issues) if issues else "no DiskPressure condition or disk-pressure taint",
+    )
 
 
 def _det_layer_a_images(ctx: Ctx) -> Probe:
@@ -2040,7 +2069,8 @@ def build_catalog(dynamic_provisioning: bool = False,
                   "Kubelet image-GC policy raised (protects Layer-A images on disk pressure)",
                   Layer.B, _platform.det_kubelet_gc_policy, _platform.rem_kubelet_gc_policy,
                   depends_on=("T0.api",), manual_hint=H("T0.kubelet-gc")),
-        Invariant("T0.no-disk-pressure", "T0", "No disk-pressure taint (lenient eviction persisted)",
+        Invariant("T0.no-disk-pressure", "T0",
+                  "No DiskPressure condition or disk-pressure taint (gate for long zarf deploys)",
                   Layer.A, _det_no_disk_pressure, depends_on=("T0.api",),
                   manual_hint=H("T0.no-disk-pressure")),
         # Layer-A tools: binary + init package must be on the node (rc=127 / air-gap init).
@@ -2057,6 +2087,10 @@ def build_catalog(dynamic_provisioning: bool = False,
     # T0.5 — storage. Resilient (default): the registry binds a claimRef hostPath PV,
     # no StorageClass. Dynamic (opt-in): the node-preloaded local-path-provisioner
     # supplies a default StorageClass and the registry PVC binds through it.
+    # Disk pressure gates long zarf deploys (T1+). T0.kubelet-gc stays independent so
+    # it can still raise GC thresholds while the operator frees space.
+    _disk = ("T0.no-disk-pressure",)
+
     if dynamic_provisioning:
         inv += [
             Invariant("T0.layer-a-images", "T0", "Bootstrap images present (CLOSURE)", Layer.A,
@@ -2064,24 +2098,25 @@ def build_catalog(dynamic_provisioning: bool = False,
                       manual_hint=H("T0.layer-a-images")),
             Invariant("T0.5.sc-default", "T0.5", "Default StorageClass exists", Layer.B,
                       _det_sc_default, _rem_sc_default,
-                      depends_on=("T0.node-ready", "T0.layer-a-images"),
+                      depends_on=("T0.node-ready", "T0.layer-a-images") + _disk,
                       manual_hint=H("T0.5.sc-default")),
             Invariant("T0.5.provisioner", "T0.5", "local-path-provisioner Running", Layer.B,
                       _det_provisioner, _rem_provisioner, depends_on=("T0.5.sc-default",),
                       manual_hint=H("T0.5.provisioner")),
         ]
-        registry_dep = ("T0.5.sc-default",)
+        registry_dep = ("T0.5.sc-default",) + _disk
     elif registry_pvc_enabled:
         inv += [
             Invariant("T0.5.registry-pv", "T0.5",
                       "Registry storage prebound (claimRef hostPath PV — no default SC needed)",
-                      Layer.B, _det_registry_pv, _rem_registry_pv, depends_on=("T0.node-ready",),
+                      Layer.B, _det_registry_pv, _rem_registry_pv,
+                      depends_on=("T0.node-ready",) + _disk,
                       manual_hint=H("T0.5.registry-pv")),
         ]
-        registry_dep = ("T0.5.registry-pv",)
+        registry_dep = ("T0.5.registry-pv",) + _disk
     else:
         # --no-registry-pvc: the registry runs on emptyDir — nothing to prebind.
-        registry_dep = ("T0.node-ready",)
+        registry_dep = ("T0.node-ready",) + _disk
 
     inv += [
         Invariant("T1.registry-running", "T1", "Zarf internal registry initialized + Running",
@@ -2090,16 +2125,17 @@ def build_catalog(dynamic_provisioning: bool = False,
 
         Invariant("T2.images-pushed", "T2", "App images pushed to internal registry",
                   Layer.B, _det_images_pushed, _rem_images_pushed, cost=Cost.EXPENSIVE,
-                  depends_on=("T1.registry-running",), manual_hint=H("T2.images-pushed")),
+                  depends_on=("T1.registry-running",) + _disk,
+                  manual_hint=H("T2.images-pushed")),
 
         Invariant("T3.dask-operator", "T3", "Dask operator + CRDs", Layer.B,
                   _det_operator, _rem_operator, cost=Cost.EXPENSIVE,
-                  depends_on=("T2.images-pushed",),
+                  depends_on=("T2.images-pushed",) + _disk,
                   manual_hint=H("T3.dask-operator")),
 
         Invariant("T4.scheduler", "T4", "Dask scheduler Ready", Layer.B,
                   _det_scheduler, _rem_scheduler, cost=Cost.EXPENSIVE,
-                  depends_on=("T3.dask-operator",),
+                  depends_on=("T3.dask-operator",) + _disk,
                   manual_hint=H("T4.scheduler")),
         Invariant("T4.workers-capacity", "T4", "Workers fit schedulable capacity (no oversubscription)",
                   Layer.B, _det_workers_capacity, _rem_workers_capacity,
@@ -2107,18 +2143,18 @@ def build_catalog(dynamic_provisioning: bool = False,
 
         Invariant("T5.otel-navigator", "T5", "otel-navigator Ready (2/2, fits memory)", Layer.B,
                   _det_otel_navigator, _rem_otel_navigator,
-                  depends_on=("T4.scheduler", "T4.workers-capacity"),
+                  depends_on=("T4.scheduler", "T4.workers-capacity") + _disk,
                   manual_hint=H("T5.otel-navigator")),
         Invariant("T5.navigator-engine", "T5", "navigator-engine Ready", Layer.B,
-                  _det_engine, _rem_engine, depends_on=("T4.scheduler",),
+                  _det_engine, _rem_engine, depends_on=("T4.scheduler",) + _disk,
                   manual_hint=H("T5.navigator-engine")),
         Invariant("T5.jupyterhub", "T5", "JupyterHub hub Ready", Layer.B,
                   _det_jupyterhub, _rem_jupyterhub, cost=Cost.EXPENSIVE,
-                  depends_on=("T2.images-pushed",),
+                  depends_on=("T2.images-pushed",) + _disk,
                   manual_hint=H("T5.jupyterhub")),
         Invariant("T5.sample-notebooks", "T5", "Sample-notebooks ConfigMap present", Layer.B,
                   _det_sample_notebooks, _rem_sample_notebooks, cost=Cost.EXPENSIVE,
-                  depends_on=("T2.images-pushed",),
+                  depends_on=("T2.images-pushed",) + _disk,
                   manual_hint=H("T5.sample-notebooks")),
         # Data path: Ready pods ≠ app can load spans. Layer-B detect-only — seed data
         # / fix creds is operator action (script: zarf/scripts/verify-s3-datapath.sh).

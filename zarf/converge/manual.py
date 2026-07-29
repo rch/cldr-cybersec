@@ -300,6 +300,8 @@ HINTS = {
     "T0.no-disk-pressure": block(
         [
             "kc get nodes -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints",
+            "kc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\" DiskPressure=\"}"
+            "{range .status.conditions[?(@.type==\"DiskPressure\")]}{.status}{\" \"}{.message}{end}{\"\\n\"}{end}'",
             "df -h / /var/lib/rancher /var/tmp; du -sh /var/log /var/tmp/* 2>/dev/null | sort -h | tail",
         ],
         [
@@ -307,9 +309,13 @@ HINTS = {
             "journalctl --vacuum-size=200M",
             "kc get pods -A --field-selector=status.phase=Failed -o name | xargs -r -n1 kc delete",
             "# optional: remove a *redundant* package tarball copy only",
-            "# taint clears once free space is above eviction threshold; also apply T0.kubelet-gc",
+            "# Wait until condition DiskPressure=False (not only taint removed); then:",
+            "#   NODE=$(kc get nodes -o jsonpath='{.items[0].metadata.name}')",
+            "#   kc taint nodes $NODE node.kubernetes.io/disk-pressure:NoSchedule- 2>/dev/null || true",
+            "#   kc uncordon $NODE 2>/dev/null || true",
+            "# Also ensure T0.kubelet-gc absolute free-space thresholds on large disks",
         ],
-        note="Layer-A: free disk SAFELY — never prune container images",
+        note="Layer-A: free disk SAFELY — gate long zarf deploys until DiskPressure=False",
     ),
     "T0.layer-a-zarf-tools": block(
         [
