@@ -528,10 +528,39 @@ HINTS = {
         note="S3 datapath: ConfigMap bucket must be reachable from the app and "
              "_active_dataset.json + span parquet must be readable (spans already in place).",
     ),
-    "T5.jupyterhub": zarf_deploy_recipe(
-        "jupyterhub,sample-notebooks",
-        note="JupyterHub missing/broken — same as field unblock: "
-        "zarf package deploy --components=jupyterhub (engine co-deploys notebooks)",
+    "T5.jupyterhub": block(
+        [
+            "kc get ns jupyterhub 2>/dev/null; kc -n jupyterhub get pods,deploy,svc,pvc -o wide",
+            "kc -n jupyterhub get pods -l 'component in (hub,proxy)' "
+            "--field-selector=status.phase=Pending -o wide 2>/dev/null",
+            "kc -n jupyterhub describe pod -l component=hub 2>/dev/null | sed -n '/Events:/,$p' | tail -25",
+            "kc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\" Ready=\"}"
+            "{range .status.conditions[?(@.type==\"Ready\")]}{.status}{end}"
+            "{\" DiskPressure=\"}{range .status.conditions[?(@.type==\"DiskPressure\")]}{.status}{end}"
+            "{\"\\n\"}{end}'",
+            "kc -n dask get pods -l dask.org/component=worker -o wide 2>/dev/null | head",
+            "kc -n jupyterhub get cm sample-notebooks 2>/dev/null | head",
+        ],
+        [
+            "# ── A) Node not schedulable (DiskPressure / taint / cordon) — NO zarf redeploy ──",
+            "# Wait until DiskPressure=False; then clear taint + uncordon (see T0.no-disk-pressure)",
+            "# ── B) Node schedulable + hub/proxy Pending — recycle only (engine does this) ──",
+            "kc -n jupyterhub delete pod -l component=hub --field-selector=status.phase=Pending "
+            "--force --grace-period=0 --wait=false 2>/dev/null || true",
+            "kc -n jupyterhub delete pod -l component=proxy --field-selector=status.phase=Pending "
+            "--force --grace-period=0 --wait=false 2>/dev/null || true",
+            "kc -n jupyterhub get pods -o wide",
+            "# ── C) Insufficient CPU/memory — cap Dask workers, then recycle hub/proxy ──",
+            "TARGET=$(( $(kc get nodes --no-headers 2>/dev/null | wc -l) - 1 )); "
+            "[ \"${TARGET:-1}\" -lt 1 ] && TARGET=1",
+            "kc -n dask patch daskcluster cybersec-dask --type merge "
+            "-p \"{\\\"spec\\\":{\\\"worker\\\":{\\\"replicas\\\":$TARGET}}}\" 2>/dev/null || true",
+            "# ── D) Namespace/deploy missing or ImagePull — package path ──",
+            'PKG="${PKG:-$PKG}"; test -f "$PKG" || { echo "package missing"; exit 1; }',
+            'zarf package deploy "$PKG" --confirm --components=jupyterhub,sample-notebooks --retries 10',
+        ],
+        note="jupyterhub: census first (Pending vs DiskPressure vs missing deploy). "
+             "Recycle pods when node is schedulable; zarf deploy only if chart/ns absent.",
     ),
     "T5.sample-notebooks": zarf_deploy_recipe(
         "sample-notebooks",

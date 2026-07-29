@@ -1925,58 +1925,335 @@ def _det_s3_datapath(ctx: Ctx) -> Probe:
     return Probe(False, f"S3 datapath: {err}\n{_panel_live_state(ctx)}")
 
 
+# JupyterHub control-plane pods (hub + proxy). Singleuser servers are user-triggered.
+_JH_NS = "jupyterhub"
+_JH_SELECTORS = ("component=hub", "component=proxy")
+
+
+def _pod_failed_scheduling_msgs(pod: dict) -> List[str]:
+    """Extract FailedScheduling / unschedulable messages from pod status."""
+    msgs: List[str] = []
+    st = pod.get("status") or {}
+    for c in st.get("conditions") or []:
+        if c.get("type") == "PodScheduled" and c.get("status") == "False":
+            reason = c.get("reason") or "Unschedulable"
+            msg = (c.get("message") or "").strip()
+            if msg:
+                msgs.append(f"{reason}: {msg}")
+            else:
+                msgs.append(reason)
+    # container waiting reasons (ImagePull, etc.) after schedule
+    for cs in (st.get("containerStatuses") or []) + (st.get("initContainerStatuses") or []):
+        waiting = ((cs.get("state") or {}).get("waiting") or {})
+        if waiting.get("reason"):
+            wmsg = (waiting.get("message") or "").strip()
+            msgs.append(
+                f"{waiting.get('reason')}"
+                + (f": {wmsg[:160]}" if wmsg else "")
+            )
+    return msgs
+
+
+def _jupyterhub_workload_census(ctx: Ctx) -> dict:
+    """Census hub/proxy pods + node schedulability — informs rem without re-deploy.
+
+    Returns keys:
+      hub_ready, hub_total, proxy_ready, proxy_total,
+      pending (list of {name, sel, phase, msgs}),
+      deploys (list of deploy names present),
+      node_schedulable (bool), node_blockers (list[str]),
+      disk_pressure (bool), summary (str one-liner for logs)
+    """
+    hub_r, hub_t = ctx.pods_ready(_JH_NS, "component=hub")
+    proxy_r, proxy_t = ctx.pods_ready(_JH_NS, "component=proxy")
+    pending: List[dict] = []
+    for sel in _JH_SELECTORS:
+        for p in ctx.items("pods", ns=_JH_NS, selector=sel):
+            phase = (p.get("status") or {}).get("phase") or "?"
+            name = (p.get("metadata") or {}).get("name") or "?"
+            if phase == "Pending" or (
+                phase == "Running"
+                and not any(
+                    c.get("type") == "Ready" and c.get("status") == "True"
+                    for c in (p.get("status") or {}).get("conditions") or []
+                )
+            ):
+                # Include not-Ready Running only when never scheduled (no nodeName)
+                node = (p.get("spec") or {}).get("nodeName")
+                if phase == "Pending" or not node:
+                    pending.append({
+                        "name": name,
+                        "sel": sel,
+                        "phase": phase,
+                        "msgs": _pod_failed_scheduling_msgs(p),
+                    })
+    deploys = []
+    for d in ctx.items("deployments", ns=_JH_NS) or []:
+        n = (d.get("metadata") or {}).get("name")
+        if n:
+            deploys.append(n)
+    # Also try apps/v1 via kind deploy
+    if not deploys:
+        for d in ctx.items("deploy", ns=_JH_NS) or []:
+            n = (d.get("metadata") or {}).get("name")
+            if n:
+                deploys.append(n)
+
+    node_blockers: List[str] = []
+    node_schedulable = True
+    for n in ctx.items("nodes"):
+        name = (n.get("metadata") or {}).get("name") or "?"
+        conds = {c.get("type"): c for c in (n.get("status") or {}).get("conditions") or []}
+        if str((conds.get("Ready") or {}).get("status", "")).lower() != "true":
+            node_blockers.append(f"{name}: NotReady")
+            node_schedulable = False
+        if str((conds.get("DiskPressure") or {}).get("status", "")).lower() == "true":
+            node_blockers.append(f"{name}: DiskPressure=True")
+            node_schedulable = False
+        if str((conds.get("MemoryPressure") or {}).get("status", "")).lower() == "true":
+            node_blockers.append(f"{name}: MemoryPressure=True")
+            node_schedulable = False
+        if n.get("spec", {}).get("unschedulable"):
+            node_blockers.append(f"{name}: cordoned")
+            node_schedulable = False
+        for t in n.get("spec", {}).get("taints", []) or []:
+            key = t.get("key") or ""
+            effect = t.get("effect") or ""
+            if effect in ("NoSchedule", "NoExecute") and "control-plane" not in key:
+                # control-plane tolerations usually present on system pods; hub may not
+                node_blockers.append(f"{name}: taint {key}:{effect}")
+                if "disk-pressure" in key or "memory-pressure" in key or "unschedulable" in key:
+                    node_schedulable = False
+
+    # Scheduling-message census (Insufficient cpu/memory, taints, etc.)
+    sched_hints: List[str] = []
+    for p in pending:
+        for m in p.get("msgs") or []:
+            if m not in sched_hints:
+                sched_hints.append(m)
+
+    parts = [
+        f"hub {hub_r}/{hub_t} Ready",
+        f"proxy {proxy_r}/{proxy_t} Ready",
+        f"pending={len(pending)}",
+        f"deploys={deploys or 'none'}",
+        f"node_schedulable={node_schedulable}",
+    ]
+    if node_blockers:
+        parts.append("blockers=[" + "; ".join(node_blockers[:4]) + "]")
+    if sched_hints:
+        parts.append("sched=[" + " | ".join(sched_hints[:3]) + "]")
+    summary = "  ".join(parts)
+
+    return {
+        "hub_ready": hub_r,
+        "hub_total": hub_t,
+        "proxy_ready": proxy_r,
+        "proxy_total": proxy_t,
+        "pending": pending,
+        "deploys": deploys,
+        "node_schedulable": node_schedulable,
+        "node_blockers": node_blockers,
+        "disk_pressure": any("DiskPressure" in b for b in node_blockers),
+        "sched_hints": sched_hints,
+        "summary": summary,
+    }
+
+
+def _recycle_jupyterhub_pending(ctx: Ctx) -> List[str]:
+    """Force-delete Pending (or unscheduled) hub/proxy pods so the scheduler retries."""
+    actions: List[str] = []
+    for sel in _JH_SELECTORS:
+        r = ctx.k([
+            "delete", "pod", "-n", _JH_NS, "-l", sel,
+            "--field-selector=status.phase=Pending",
+            "--force", "--grace-period=0", "--wait=false", "--ignore-not-found",
+        ])
+        if r.returncode == 0 and (Ctx.out_text(r.stdout) or Ctx.out_text(r.stderr)).strip():
+            actions.append(f"recycled Pending pods -l {sel}")
+        # Also pods with no nodeName stuck Running/unknown
+        for p in ctx.items("pods", ns=_JH_NS, selector=sel):
+            if (p.get("spec") or {}).get("nodeName"):
+                continue
+            name = (p.get("metadata") or {}).get("name")
+            phase = (p.get("status") or {}).get("phase")
+            if name and phase == "Pending":
+                # already covered by field-selector delete; belt
+                continue
+            if name and not (p.get("spec") or {}).get("nodeName"):
+                r2 = ctx.k([
+                    "delete", "pod", "-n", _JH_NS, name,
+                    "--force", "--grace-period=0", "--wait=false", "--ignore-not-found",
+                ])
+                if r2.returncode == 0:
+                    actions.append(f"recycled unscheduled pod {name}")
+    return actions
+
+
 def _det_jupyterhub(ctx: Ctx) -> Probe:
-    """Hub must be Ready; package uses sqlite-memory + singleuser storage none
-    (no PVC). Any jupyterhub PVC is a vestige from an older chart and a wedge."""
-    ready, total = ctx.pods_ready("jupyterhub", "component=hub")
-    pvcs = ctx.items("pvc", ns="jupyterhub")
+    """Hub Ready + proxy present when deployed; PVC vestiges and Pending census.
+
+    Package uses sqlite-memory + singleuser storage none (no PVC). Any jupyterhub
+    PVC is a vestige. Pending hub/proxy under DiskPressure is a scheduling problem
+    — not fixed by another zarf package deploy.
+    """
+    if not ctx.exists("namespace", _JH_NS):
+        return Probe(False, "jupyterhub namespace absent — need package deploy")
+
+    census = _jupyterhub_workload_census(ctx)
+    pvcs = ctx.items("pvc", ns=_JH_NS)
     if pvcs:
         names = [p.get("metadata", {}).get("name") for p in pvcs]
         phases = [p.get("status", {}).get("phase") for p in pvcs]
         return Probe(
             False,
-            f"jupyterhub hub ready {ready}/{total}; unexpected PVC(s) {names} "
-            f"phases={phases} — resilient package is sqlite-memory/storage none; "
-            "delete PVC/PV vestiges then redeploy")
-    if ready >= 1:
-        return Probe(True, f"jupyterhub hub ready {ready}/{total} (no PVC — resilient)")
-    return Probe(False, f"jupyterhub hub ready {ready}/{total}")
+            f"jupyterhub unexpected PVC(s) {names} phases={phases} — "
+            f"resilient package is sqlite-memory/storage none; "
+            f"census: {census['summary']}",
+        )
+
+    hub_ok = census["hub_ready"] >= 1
+    # Proxy is required when deploys exist; if only hub chart partial, still fail
+    proxy_ok = census["proxy_ready"] >= 1 or (
+        census["proxy_total"] == 0 and not any("proxy" in d for d in census["deploys"])
+    )
+    if hub_ok and proxy_ok and not census["pending"]:
+        return Probe(
+            True,
+            f"jupyterhub OK — {census['summary']} (no PVC — resilient)",
+        )
+
+    # Structured failure: prefer scheduling diagnosis over bare ready counts
+    if census["pending"] and not census["node_schedulable"]:
+        return Probe(
+            False,
+            f"jupyterhub hub/proxy unscheduled — node not schedulable; "
+            f"do NOT redeploy until clear. census: {census['summary']}",
+        )
+    if census["pending"] and census["node_schedulable"]:
+        return Probe(
+            False,
+            f"jupyterhub hub/proxy Pending but node schedulable — recycle pods. "
+            f"census: {census['summary']}",
+        )
+    if census["hub_total"] == 0 and not census["deploys"]:
+        return Probe(False, f"jupyterhub hub absent (no pods/deploys). census: {census['summary']}")
+    return Probe(
+        False,
+        f"jupyterhub not Ready — census: {census['summary']}",
+    )
 
 
 def _rem_jupyterhub(ctx: Ctx) -> Fix:
-    """SC-less hub path: remove ALL jupyterhub PVCs + hub-db PVs (old sqlite-pvc /
-    local-path vestiges), then redeploy chart (sqlite-memory, storage none).
+    """Resolve hub/proxy via census-driven procedure (not always zarf deploy).
 
-    Field: when the jupyterhub namespace is entirely absent (never installed, or
-    wiped), a plain ``zarf package deploy --components=jupyterhub`` is the
-    unblock — same as the successful manual remediation on-prem. PVC cleanup is
-    a no-op if the ns does not exist; deploy creates ns + hub + proxy.
+    Order (cheapest first):
+      1. Namespace/deploy missing → zarf package deploy jupyterhub,sample-notebooks
+      2. PVC vestiges → delete PVC/PV, recycle pods
+      3. Pending + node NOT schedulable (DiskPressure/taint/cordon) → MANUAL
+         (refuse expensive redeploy that worsens imagefs)
+      4. Pending + node schedulable → recycle Pending hub/proxy pods only
+      5. Still not Ready / missing deploy → zarf package deploy
+      6. Oversubscription hints in FailedScheduling → worker capacity rem hint
     """
     actions: List[str] = []
-    ns_obj = ctx.get("namespace", "jupyterhub")
-    if not ns_obj:
-        actions.append("jupyterhub namespace absent — deploy will create it")
-    for pvc in list(ctx.items("pvc", ns="jupyterhub")):
+    ns_obj = ctx.get("namespace", _JH_NS)
+
+    # --- 1/2 PVC vestiges (always safe) ------------------------------------
+    for pvc in list(ctx.items("pvc", ns=_JH_NS)):
         name = pvc.get("metadata", {}).get("name", "")
         phase = pvc.get("status", {}).get("phase")
         sc = (pvc.get("spec", {}) or {}).get("storageClassName")
         sc = "" if sc is None else sc
-        if name and _force_delete_pvc(ctx, "jupyterhub", name):
+        if name and _force_delete_pvc(ctx, _JH_NS, name):
             actions.append(f"deleted jupyterhub PVC {name} (phase={phase} sc={sc!r})")
     for pv in list(ctx.items("pv")):
         pname = (pv.get("metadata") or {}).get("name", "")
         claim = (pv.get("spec") or {}).get("claimRef") or {}
-        if claim.get("namespace") == "jupyterhub" or "hub-db" in pname:
+        if claim.get("namespace") == _JH_NS or "hub-db" in pname:
             phase = pv.get("status", {}).get("phase")
             if ctx.k(["delete", "pv", pname, "--ignore-not-found"]).returncode == 0:
                 actions.append(f"deleted hub-related PV {pname} (phase={phase})")
-    # Hub Deployment may still reference old volume — recycle hub pods after PVC gone
-    if ns_obj:
-        ctx.k(["delete", "pod", "-n", "jupyterhub", "-l", "component=hub",
-               "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
-    # Deploy hub + notebooks together (ns created by jupyterhub chart; ConfigMap
-    # rides sample-notebooks). Field unblock was exactly:
-    #   zarf package deploy --components=jupyterhub
+
+    census = _jupyterhub_workload_census(ctx)
+
+    # --- 3 Pending + node blocked → MANUAL (no zarf) -----------------------
+    if census["pending"] and not census["node_schedulable"]:
+        detail = (
+            f"MANUAL: hub/proxy Pending while node not schedulable — "
+            f"{census['summary']}. Free disk / clear DiskPressure / uncordon; "
+            f"then re-apply (engine will recycle pods). Refusing zarf redeploy."
+        )
+        if actions:
+            detail += f"  [unwound: {'; '.join(actions)}]"
+        return Fix(bool(actions), _manual.join_detail(
+            detail, _manual.hint_for("T5.jupyterhub")))
+
+    # --- 4 Pending + schedulable → recycle only ----------------------------
+    if census["pending"] and census["node_schedulable"] and (
+            census["deploys"] or census["hub_total"] or census["proxy_total"]):
+        recycled = _recycle_jupyterhub_pending(ctx)
+        actions.extend(recycled)
+        # brief re-census
+        again = _jupyterhub_workload_census(ctx)
+        if again["hub_ready"] >= 1 and (
+                again["proxy_ready"] >= 1 or again["proxy_total"] == 0):
+            return Fix(True, f"recycled hub/proxy after schedule restored — "
+                             f"{again['summary']}"
+                             + (f"  [unwound: {'; '.join(actions)}]" if actions else ""))
+        # If still pending but schedulable, one more recycle of all hub/proxy
+        # (covers controllers that recreate with stuck state)
+        if recycled:
+            for sel in _JH_SELECTORS:
+                ctx.k(["delete", "pod", "-n", _JH_NS, "-l", sel,
+                       "--force", "--grace-period=0", "--wait=false",
+                       "--ignore-not-found"])
+            actions.append("force-recycled all hub/proxy pods for reschedule")
+            again = _jupyterhub_workload_census(ctx)
+            if again["hub_ready"] >= 1:
+                return Fix(True, f"rescheduled jupyterhub — {again['summary']}  "
+                                 f"[unwound: {'; '.join(actions)}]")
+        # Deploy exists — wait next reconcile pass rather than immediate zarf redeploy
+        if census["deploys"] or again.get("deploys"):
+            detail = (
+                f"recycled pods; hub still not Ready — census: {again['summary']} "
+                f"(wait next pass / check resources)"
+            )
+            if actions:
+                detail += f"  [unwound: {'; '.join(actions)}]"
+            return Fix(bool(actions), detail)
+
+    # --- 5 Missing ns / deploys / pods → package deploy --------------------
+    if not ns_obj or (census["hub_total"] == 0 and not census["deploys"]):
+        if not ns_obj:
+            actions.append("jupyterhub namespace absent — deploy will create it")
+        fix = _zarf_deploy_components(ctx, "jupyterhub,sample-notebooks")
+        if actions:
+            return Fix(fix.changed or bool(actions),
+                       f"{fix.detail}  [unwound: {'; '.join(actions)}]")
+        return fix
+
+    # Deploy exists but never Ready and not a pure Pending-sched case → redeploy
+    # (ImagePull, CrashLoop, missing replica). Still refuse under disk pressure.
+    if _disk_pressure_issues(ctx):
+        return Fix(bool(actions), _manual.join_detail(
+            f"MANUAL: jupyterhub deploys present but not Ready under disk pressure — "
+            f"{census['summary']}",
+            _manual.hint_for("T5.jupyterhub"),
+        ))
+
+    # Worker oversubscription often coexists — try capacity rem first (cheap)
+    hints = " ".join(census.get("sched_hints") or []).lower()
+    if any(x in hints for x in ("insufficient", "memory", "cpu", "too many pods")):
+        cap = _rem_workers_capacity(ctx)
+        if cap.changed:
+            actions.append(cap.detail)
+            actions.extend(_recycle_jupyterhub_pending(ctx))
+            again = _jupyterhub_workload_census(ctx)
+            if again["hub_ready"] >= 1:
+                return Fix(True, f"worker cap + recycle → hub Ready — {again['summary']}  "
+                                 f"[unwound: {'; '.join(actions)}]")
+
     fix = _zarf_deploy_components(ctx, "jupyterhub,sample-notebooks")
     if actions:
         return Fix(fix.changed or bool(actions),
