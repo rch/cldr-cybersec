@@ -1,4 +1,4 @@
-# Air-Gap Convergent Deploy — Operator Runbook (v1.6.3)
+# Air-Gap Convergent Deploy — Operator Runbook (v1.6.6)
 
 **Audience.** You have a single-node, air-gapped Kubernetes (RKE2) and need to stand up the
 cybersec-dask / OTEL Navigator stack with **no internet**. The node may already carry a **partial
@@ -53,16 +53,16 @@ Verify integrity (`sha256sum -c SHA256SUMS`), then place each asset:
 
 | Asset | Destination |
 |-------|-------------|
-| `zarf-package-cybersec-dask-amd64-1.6.3.tar.zst` | `/var/tmp/` — **keep only ONE version there** (discovery is newest-by-mtime) |
+| `zarf-package-cybersec-dask-amd64-1.6.6.tar.zst` | `/var/tmp/` — **keep only ONE version there** (discovery is newest-by-mtime) |
 | `zarf-init-amd64-v0.70.1.tar.zst` *(Layer A — the piece partial procedures most often lack)* | `/var/tmp/` (beside the deploy package) |
 | `zarf` *(v0.70.1 binary)* | `/usr/local/bin/zarf` (`chmod +x`) |
-| `cybersec-converge-1.6.3.tar.gz` *(the engine)* | unpack anywhere writable |
+| `cybersec-converge-1.6.6.tar.gz` *(the engine)* | unpack anywhere writable |
 
 ```bash
 sha256sum -c SHA256SUMS
 install -m0755 zarf /usr/local/bin/zarf
-mv zarf-package-cybersec-dask-amd64-1.6.3.tar.zst zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
-mkdir -p ~/cybersec-converge && tar xzf cybersec-converge-1.6.3.tar.gz -C ~/cybersec-converge
+mv zarf-package-cybersec-dask-amd64-1.6.6.tar.zst zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
+mkdir -p ~/cybersec-converge && tar xzf cybersec-converge-1.6.6.tar.gz -C ~/cybersec-converge
 ```
 
 ## 4. Converge — one command
@@ -108,7 +108,126 @@ the authoritative post-state. Exit codes: `0` converged · `1` not converged (re
 diagnosis — it names the unmet condition, never a bare `rc=1`) · `2` CLOSURE violation (a Layer-A
 artifact is missing; re-transport — the engine will not pull).
 
-## 6. First data (closed world) — the OTEL_Data_Generator notebook
+## 6. Upgrade an existing deployment (pre-v1.6.5 → this package)
+
+**Audience.** The cluster already runs an older `cybersec-dask` stack (any release **before**
+this package). The closed world has **no internet** and **no** laptop-side tooling — only the
+assets in this release kit and `converge-node.sh`. Package and image wire names stay
+**`cybersec-dask`** (no rename mid-flight).
+
+### What the engine does on upgrade
+
+Converge is readiness-based **and** compares the running `cybersec-dask` image tag to the
+**target tag in this kit’s** `artifacts.manifest.json` (shipped inside `cybersec-converge-*.tar.gz`).
+A mismatch is **image drift** → `zarf package deploy` re-pushes layers from the new deploy
+package and rolls panel / Dask / Jupyter / ingress as needed. Content-derived tags (this cut:
+`2025.2.0-85f3d9ecf5`) defeat the stale `IfNotPresent` trap that a fixed tag would hit on
+existing nodes.
+
+**S3 data is preserved** (markers, parquet, CPHY HDF5 under operator prefixes). The package
+does not wipe the registry hostPath; new layers are added beside old ones (plan disk headroom).
+
+### Preconditions (closed world only)
+
+| Check | Requirement |
+|-------|-------------|
+| Node Ready | `kubectl get nodes` |
+| Disk | enough free space for **new image layers** (~deploy package size + headroom); never `crictl rmi --prune` |
+| Deploy package | **exactly one** `zarf-package-cybersec-dask-amd64-*.tar.zst` in discovery paths (`/var/tmp` …) — remove every older tarball |
+| Init package | `zarf-init-amd64-v0.70.1.tar.zst` beside the deploy package (Layer A) |
+| `zarf` binary | **this kit’s** v0.70.x binary — format skew with a stale CLI is unrecoverable air-gapped |
+| Engine | **this kit’s** `cybersec-converge-1.6.6.tar.gz` unpacked (old engine + new package ⇒ wrong target tag) |
+| S3 | same endpoint/bucket/creds the live stack already uses (`S3_BUCKET` required) |
+
+### Procedure
+
+```bash
+# 1. Integrity + replace Layer A (do not leave multiple deploy packages)
+sha256sum -c SHA256SUMS
+install -m0755 zarf /usr/local/bin/zarf
+zarf version    # expect v0.70.x
+
+rm -f /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst
+mv zarf-package-cybersec-dask-amd64-1.6.6.tar.zst \
+   zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
+
+# Fresh engine tree (do not mix sources with a previous unpack)
+rm -rf ~/cybersec-converge
+mkdir -p ~/cybersec-converge
+tar xzf cybersec-converge-1.6.6.tar.gz -C ~/cybersec-converge
+
+# 2. Same S3 as the running deployment (secrets off argv)
+umask 077; cat > /dev/shm/s3-creds <<'EOF'
+S3_ENDPOINT=<existing>
+S3_BUCKET=<existing>
+S3_REGION=<existing>
+S3_ACCESS_KEY=<existing>
+S3_SECRET_KEY=<existing>
+EOF
+
+# Optional: NodePort terminal path (ingress /ws needs no extra var)
+#   export PTY_PROXY_WS=ws://<node>:30765
+
+# 3. Converge — image push + component roll; detached if the session may drop
+sudo setsid bash -c 'env CONVERGE_CREDS_FILE=/dev/shm/s3-creds \
+  bash ~/cybersec-converge/converge-node.sh apply; echo $? > /var/tmp/converge.rc' \
+  </dev/null >> /var/tmp/converge.log 2>&1 &
+tail -f /var/tmp/converge.log
+
+# 4. Authoritative post-state
+sudo bash ~/cybersec-converge/converge-node.sh verify
+shred -u /dev/shm/s3-creds
+```
+
+Silence during image push / helm (10–20+ min) is normal. Two flat checks with no pod movement
+⇒ re-read the engine diagnosis line (it names the unmet tier), then re-run `apply` once before
+hand surgery.
+
+### Post-upgrade checks
+
+| Check | Good |
+|-------|------|
+| App image | panel / dask / jupyter singleuser image tag contains the kit content tag (`2025.2.0-85f3d9ecf5`, possibly with a `-zarf-…` rewrite suffix) |
+| Panel UI | ingress `panel.<domain>/otel-navigator` or NodePort `:30506` |
+| Terminal WS | ingress same-origin `/ws` → HTTP 101, or NodePort `:30765` with `PTY_PROXY_WS` set at apply |
+| Data path | `verify` / **T5.s3-datapath** still sees `_active_dataset.json` + readable parquet (existing data) |
+| Sample notebooks | ConfigMap updated; **writable** `/root/*.ipynb` may be stale until re-seed |
+
+**Jupyter home PVC:** startup seeds from the RO ConfigMap, but an existing user server may keep
+old home copies. After singleuser is on the new image, restart the user server **or**:
+
+```bash
+cp /root/sample-notebooks/HDF5_CPHY_Acquisition_Generator.ipynb /root/
+cp /root/sample-notebooks/HDF5_Iceberg_Metadata_Provider.ipynb /root/
+# plus OTEL_Data_Generator / Dask_S3_Validation as needed
+```
+
+### Compatibility (pre-v1.6.5 → 1.6.6)
+
+| Concern | Compatible? |
+|---------|-------------|
+| Wire name `cybersec-dask` (package / image) | Yes — no rename |
+| `converge apply` only (no `just`, no internet) | Yes — intended path |
+| Content image tag change | Yes — forces pull on existing nodes |
+| S3 / OTEL / operator data | Yes — preserved |
+| CPHY prefix `datasets/hdf5/cphy/` | Additive — does not replace older keys |
+| Ingress `/ws` terminal route | Yes if **ingress** is re-applied (this package’s apply does) |
+| Old engine tarball + new deploy package | **No** — always unpack **this** `cybersec-converge-1.6.6` |
+| Multiple deploy packages in `/var/tmp` | **No** — remove extras (mtime discovery) |
+| Stale `zarf` CLI ≠ kit v0.70.x | **No** — install kit binary first |
+
+### If verify is not clean
+
+1. Re-read the diagnosis (tier + condition).
+2. Re-run `converge-node.sh apply` once (multi-pass fixpoint).
+3. Common upgrade-adjacent tiers: **T0.package-uniqueness**, **T0.layer-a-zarf-tools**,
+   image drift / **T2**, panel LIVE STATE / **T5**, **T5.s3-datapath**.
+4. Layer-B clean slate only: `converge-node.sh teardown` then `apply` (registry + node images
+   **conserved**).
+
+Do **not** `zarf destroy` or prune images for a normal version upgrade.
+
+## 7. First data (closed world) — the OTEL_Data_Generator notebook
 
 The package ships **no data** (by design — datasets are provided or generated on site). The app
 resolves its dataset from `s3://$S3_BUCKET/_active_dataset.json` and **fails loud** (naming the
@@ -135,7 +254,7 @@ carry the S3 endpoint + credentials:
    Manual one-liner equivalent (AIRGAP-DISCOVERY.md §9) still works; the script is the SSOT.
 5. Load/refresh the app — it discovers the dataset from the marker; nothing is hardcoded.
 
-## 7. Access the app + the embedded terminal (`switch` and friends)
+## 8. Access the app + the embedded terminal (`switch` and friends)
 
 - **The app**: `http://panel.<your-ingress-domain>/otel-navigator` (ingress) or
   `http://<node>:30506/otel-navigator` (NodePort).
@@ -157,7 +276,7 @@ carry the S3 endpoint + credentials:
 - In the terminal, `switch` toggles the visualization; both panes rasterize via datashader over
   the Dask workers — viewport interactions fan out as distributed reads.
 
-## 8. Other modes
+## 9. Other modes
 
 - `converge-node.sh dry-run` — what *would* be remediated; changes nothing.
 - `converge-node.sh teardown` — clean-slate the app stack (registry + PV + node images
@@ -165,7 +284,7 @@ carry the S3 endpoint + credentials:
 - `CONVERGE_DYNAMIC_PROVISIONING=1` — opt into the default-StorageClass modality (resourced
   multi-node cluster with a working provisioner).
 
-## 9. What it resolves autonomously
+## 10. What it resolves autonomously
 
 | Symptom | The engine's action |
 |---------|---------------------|
