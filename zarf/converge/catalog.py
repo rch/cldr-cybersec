@@ -496,9 +496,34 @@ _S3_SECRET_KEYS = {"S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_SESSION_TOKEN"}
 _S3_DEPENDENT_COMPONENTS = ("panel-viz", "navigator-engine")
 
 
+def _zarf_deploy_timeout(components: str) -> int:
+    """Seconds for ``zarf package deploy --components=…``.
+
+    Every deploy still pulls *required* package components (cybersec-images,
+    dask-operator, dask-cluster) even when only jupyterhub/panel is requested.
+    Image push + helm + scheduler wait regularly exceeds 30 minutes on a single
+    air-gap node — field operators succeed with the same CLI when given time.
+    """
+    c = components.lower()
+    # Heavy / known-slow sets
+    if any(x in c for x in (
+        "cybersec-images", "jupyterhub", "sample-notebooks",
+        "panel-viz", "dask-operator", "dask-cluster",
+    )):
+        return 7200  # 2h — match manual operator patience on air-gap
+    return 3600
+
+
 def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
-    if not (ctx.have_zarf() and ctx.package_path):
-        reason = "zarf binary and/or package tarball not available to this engine instance"
+    missing = []
+    if not ctx.have_zarf():
+        missing.append(f"zarf binary missing (zarf_bin={ctx.zarf_bin!r})")
+    if not ctx.package_path:
+        missing.append("package path not passed to engine (--package / converge-node.sh arg)")
+    elif not Path(ctx.package_path).is_file():
+        missing.append(f"package file not found: {ctx.package_path}")
+    if missing:
+        reason = "; ".join(missing)
         return Fix(False, _manual.zarf_deploy_manual_line(components, reason=reason))
     # Fail LOUD rather than render an empty S3_BUCKET. An S3-dependent component
     # deployed with a blank bucket renders OTEL_DATA_PATH=s3:/// and bricks the app
@@ -548,8 +573,10 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
                 esc = v.replace("\\", "\\\\").replace('"', '\\"')
                 f.write(f'{k} = "{esc}"\n')
         env["ZARF_CONFIG"] = cfg_path
+    deploy_timeout = _zarf_deploy_timeout(components)
+    print(f"    $ zarf {' '.join(args)}  (timeout={deploy_timeout}s)", flush=True)
     try:
-        r = ctx.zarf(args, env=env)
+        r = ctx.zarf(args, env=env, timeout=deploy_timeout)
 
         # DEAD HELM RELEASE — field-proven (2026-07-15): a chart whose FIRST install
         # failed leaves a release with only `failed` revisions; every later
@@ -2066,11 +2093,13 @@ def build_catalog(dynamic_provisioning: bool = False,
                   depends_on=("T1.registry-running",), manual_hint=H("T2.images-pushed")),
 
         Invariant("T3.dask-operator", "T3", "Dask operator + CRDs", Layer.B,
-                  _det_operator, _rem_operator, depends_on=("T2.images-pushed",),
+                  _det_operator, _rem_operator, cost=Cost.EXPENSIVE,
+                  depends_on=("T2.images-pushed",),
                   manual_hint=H("T3.dask-operator")),
 
         Invariant("T4.scheduler", "T4", "Dask scheduler Ready", Layer.B,
-                  _det_scheduler, _rem_scheduler, depends_on=("T3.dask-operator",),
+                  _det_scheduler, _rem_scheduler, cost=Cost.EXPENSIVE,
+                  depends_on=("T3.dask-operator",),
                   manual_hint=H("T4.scheduler")),
         Invariant("T4.workers-capacity", "T4", "Workers fit schedulable capacity (no oversubscription)",
                   Layer.B, _det_workers_capacity, _rem_workers_capacity,
@@ -2084,10 +2113,12 @@ def build_catalog(dynamic_provisioning: bool = False,
                   _det_engine, _rem_engine, depends_on=("T4.scheduler",),
                   manual_hint=H("T5.navigator-engine")),
         Invariant("T5.jupyterhub", "T5", "JupyterHub hub Ready", Layer.B,
-                  _det_jupyterhub, _rem_jupyterhub, depends_on=("T2.images-pushed",),
+                  _det_jupyterhub, _rem_jupyterhub, cost=Cost.EXPENSIVE,
+                  depends_on=("T2.images-pushed",),
                   manual_hint=H("T5.jupyterhub")),
         Invariant("T5.sample-notebooks", "T5", "Sample-notebooks ConfigMap present", Layer.B,
-                  _det_sample_notebooks, _rem_sample_notebooks, depends_on=("T2.images-pushed",),
+                  _det_sample_notebooks, _rem_sample_notebooks, cost=Cost.EXPENSIVE,
+                  depends_on=("T2.images-pushed",),
                   manual_hint=H("T5.sample-notebooks")),
         # Data path: Ready pods ≠ app can load spans. Layer-B detect-only — seed data
         # / fix creds is operator action (script: zarf/scripts/verify-s3-datapath.sh).

@@ -161,12 +161,15 @@ trap cleanup EXIT
 ARGS=(--kubectl "$KUBECTL_CMD")
 [ -f "$MANIFEST_JSON" ] && ARGS+=(--manifest "$MANIFEST_JSON")
 [ -d "$MANIFESTS_DIR" ] && ARGS+=(--manifests-dir "$MANIFESTS_DIR")
+# Always pass zarf when we have one — remediations need it even if package discovery
+# failed (clearer errors). Package is required for component deploy remediations.
+[ -n "$ZARF_BIN" ] && ARGS+=(--zarf "$ZARF_BIN")
 if [ -n "$PKG_ARG" ] && [ -f "$PKG_ARG" ]; then
-  [ -n "$ZARF_BIN" ] && ARGS+=(--zarf "$ZARF_BIN")
   ARGS+=(--package "$PKG_ARG")
   echo "   package: $PKG_ARG"
 else
-  echo "   package: <none> — component-deploy fixes report MANUAL (verify/teardown still work)"
+  echo "   package: <none> — component-deploy fixes will MANUAL (pass package path as argv2)"
+  echo "            example: $0 apply /path/to/zarf-package-cybersec-dask-amd64-1.6.6.tar.zst"
 fi
 [ -n "$CREDS_FILE" ] && ARGS+=(--creds-file "$CREDS_FILE")
 # Multi-core / air-gap baseline 4; set DASK_WORKER_REPLICAS=1 for tiny smoke hosts

@@ -133,7 +133,7 @@ class Ctx:
             Path(self.zarf_bin).exists() or shutil.which(self.zarf_bin) is not None
         )
 
-    def zarf(self, args: List[str], timeout: int = 1800,
+    def zarf(self, args: List[str], timeout: int = 3600,
              env: Optional[dict] = None) -> subprocess.CompletedProcess:
         # Zarf component actions run bare `kubectl` in a plain shell — but air-gap
         # RKE2 nodes keep kubectl at /var/lib/rancher/rke2/bin, off root's PATH
@@ -141,6 +141,12 @@ class Ctx:
         # not found`, and the required-component rider blocked ALL deploys). Hand
         # the zarf subprocess a PATH guaranteed to resolve kubectl, and a
         # KUBECONFIG if the environment lacks one.
+        #
+        # Default timeout 3600s (was 1800): ``package deploy --components=X`` still
+        # pulls all *required* components (cybersec-images + dask-operator +
+        # dask-cluster). Image push + helm + scheduler wait routinely exceeds 30m
+        # on a single air-gap node — field operators finish the same command by
+        # hand when the engine timed out and reported a confusing MANUAL.
         e = dict(env or {})
         e.setdefault("PATH", self._path_with_kubectl())
         if not os.environ.get("KUBECONFIG"):
