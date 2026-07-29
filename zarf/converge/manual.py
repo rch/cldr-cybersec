@@ -428,10 +428,30 @@ HINTS = {
         "dask-operator",
         note="Dask operator / CRDs absent or not Ready",
     ),
-    "T4.scheduler": zarf_deploy_recipe(
-        "dask-cluster",
-        needs_s3=True,
-        note="Dask scheduler not Ready — redeploy dask-cluster (creates CR children)",
+    "T4.scheduler": block(
+        [
+            "kc -n dask get pods,daskcluster -o wide",
+            "kc -n dask describe pod -l dask.org/component=scheduler 2>/dev/null | sed -n '/Events:/,$p' | tail -30",
+            "kc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\" DiskPressure=\"}"
+            "{range .status.conditions[?(@.type==\"DiskPressure\")]}{.status}{end}{\"\\n\"}{end}'",
+            "kc -n zarf get pods -o wide; zarf tools registry catalog 2>/dev/null | head -20",
+            "kc -n dask-operator get pods -o wide",
+        ],
+        [
+            "# ── A) DiskPressure / taint — NO redeploy (see T0.no-disk-pressure) ──",
+            "# Wait DiskPressure=False; clear taint; uncordon",
+            "# ── B) Node schedulable + scheduler Pending/CrashLoop — recycle ──",
+            "kc -n dask delete pod -l dask.org/component=scheduler "
+            "--force --grace-period=0 --wait=false 2>/dev/null || true",
+            "# ── C) ImagePull — push app image then recycle ──",
+            'zarf package deploy "$PKG" --confirm --components=cybersec-images --retries 5',
+            "kc -n dask delete pod -l dask.org/component=scheduler --force --grace-period=0 2>/dev/null || true",
+            "# ── D) CR / cluster missing — package path (after-action wait may be 900s) ──",
+            'zarf package deploy "$PKG" --confirm --components=dask-cluster --retries 5 "${SETV[@]}"',
+            "# If only after-action wait timed out but CR exists: check pods; recycle; skip full redeploy",
+        ],
+        note="scheduler: census node+registry+pod first. Recycle when schedulable; "
+             "zarf dask-cluster only if CR/pods absent. Wait timeout ≠ missing objects.",
     ),
     "T4.workers-capacity": block(
         [

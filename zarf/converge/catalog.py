@@ -780,6 +780,170 @@ def _det_no_disk_pressure(ctx: Ctx) -> Probe:
     )
 
 
+def _node_schedulability_census(ctx: Ctx) -> dict:
+    """Single-node (or multi) knowable schedulability: Ready, pressure, taints, cordon.
+
+    Air-gap single-node field path: DiskPressure/MemoryPressure and imagefs pressure
+    explain almost all Pending after a successful package apply (wait actions timeout
+    while pods cannot schedule). No external APIs — pure kubectl inventory.
+    """
+    blockers: List[str] = []
+    notes: List[str] = []
+    schedulable = True
+    for n in ctx.items("nodes"):
+        name = (n.get("metadata") or {}).get("name") or "?"
+        conds = {c.get("type"): c for c in (n.get("status") or {}).get("conditions") or []}
+        ready = str((conds.get("Ready") or {}).get("status", "")).lower() == "true"
+        if not ready:
+            blockers.append(f"{name}: NotReady")
+            schedulable = False
+        for ptype in ("DiskPressure", "MemoryPressure", "PIDPressure"):
+            c = conds.get(ptype) or {}
+            if str(c.get("status", "")).lower() == "true":
+                msg = (c.get("message") or c.get("reason") or ptype).strip()
+                blockers.append(f"{name}: {ptype}=True ({msg})")
+                schedulable = False
+        if n.get("spec", {}).get("unschedulable"):
+            blockers.append(f"{name}: cordoned")
+            schedulable = False
+        for t in n.get("spec", {}).get("taints", []) or []:
+            key = t.get("key") or ""
+            effect = t.get("effect") or ""
+            if effect not in ("NoSchedule", "NoExecute"):
+                continue
+            if "control-plane" in key or "master" in key:
+                notes.append(f"{name}: system taint {key}:{effect} (tolerated by system pods)")
+                continue
+            blockers.append(f"{name}: taint {key}:{effect}")
+            if any(x in key for x in (
+                "disk-pressure", "memory-pressure", "pid-pressure",
+                "unreachable", "not-ready", "unschedulable",
+            )):
+                schedulable = False
+        # Allocatable vs capacity (informational)
+        alloc = (n.get("status") or {}).get("allocatable") or {}
+        if alloc.get("memory"):
+            notes.append(f"{name}: allocatable mem={alloc.get('memory')} cpu={alloc.get('cpu')}")
+    return {
+        "schedulable": schedulable,
+        "blockers": blockers,
+        "notes": notes,
+        "disk_pressure": any("DiskPressure" in b for b in blockers),
+        "summary": (
+            "node_schedulable=True" if schedulable
+            else "node_schedulable=False [" + "; ".join(blockers[:5]) + "]"
+        ),
+    }
+
+
+def _pod_failed_scheduling_msgs(pod: dict) -> List[str]:
+    """Extract FailedScheduling / wait reasons from pod status (knowable locally)."""
+    msgs: List[str] = []
+    st = pod.get("status") or {}
+    for c in st.get("conditions") or []:
+        if c.get("type") == "PodScheduled" and c.get("status") == "False":
+            reason = c.get("reason") or "Unschedulable"
+            msg = (c.get("message") or "").strip()
+            msgs.append(f"{reason}: {msg}" if msg else reason)
+    for cs in (st.get("containerStatuses") or []) + (st.get("initContainerStatuses") or []):
+        waiting = ((cs.get("state") or {}).get("waiting") or {})
+        if waiting.get("reason"):
+            wmsg = (waiting.get("message") or "").strip()
+            msgs.append(
+                f"{waiting.get('reason')}"
+                + (f": {wmsg[:160]}" if wmsg else "")
+            )
+        term = ((cs.get("state") or {}).get("terminated") or {})
+        if term.get("reason") in ("OOMKilled", "Error"):
+            msgs.append(f"terminated:{term.get('reason')}")
+    return msgs
+
+
+def _pod_terminal_census(ctx: Ctx, ns: str, selector: str) -> dict:
+    """Census one workload: phases, FailedScheduling, ImagePull, CrashLoop, images."""
+    pods = ctx.items("pods", ns=ns, selector=selector)
+    ready, total = ctx.pods_ready(ns, selector)
+    pending: List[dict] = []
+    image_pull: List[str] = []
+    crash: List[str] = []
+    images: List[str] = []
+    _PULL = ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull")
+    _CRASH = ("CrashLoopBackOff", "CreateContainerConfigError",
+              "RunContainerError", "OOMKilled")
+    for p in pods:
+        name = (p.get("metadata") or {}).get("name") or "?"
+        phase = (p.get("status") or {}).get("phase") or "?"
+        node = (p.get("spec") or {}).get("nodeName") or ""
+        msgs = _pod_failed_scheduling_msgs(p)
+        for m in msgs:
+            low = m.lower()
+            if any(x.lower() in low for x in _PULL):
+                image_pull.append(f"{name}:{m[:100]}")
+            if any(x.lower() in low for x in _CRASH) or "oomkilled" in low:
+                crash.append(f"{name}:{m[:100]}")
+        for c in (p.get("spec") or {}).get("containers") or []:
+            img = c.get("image") or ""
+            if img and img not in images:
+                images.append(img)
+        if phase == "Pending" or not node:
+            pending.append({
+                "name": name, "phase": phase, "node": node or None, "msgs": msgs,
+            })
+    return {
+        "ready": ready,
+        "total": total,
+        "pending": pending,
+        "image_pull": image_pull,
+        "crash": crash,
+        "images": images,
+        "summary": (
+            f"{ns}/{selector}: ready={ready}/{total} pending={len(pending)} "
+            f"image_pull={len(image_pull)} crash={len(crash)}"
+        ),
+    }
+
+
+def _registry_census(ctx: Ctx) -> dict:
+    """Knowable Layer-A registry state: pod Ready + catalog lists cybersec-dask."""
+    reg_ready, reg_total = ctx.pods_ready(ZARF_NS, "app=docker-registry")
+    if reg_total == 0:
+        reg_ready, reg_total = ctx.pods_ready(ZARF_NS, "app.kubernetes.io/name=docker-registry")
+    catalog_ok = None  # None = unknown, True/False known
+    catalog_detail = ""
+    if ctx.have_zarf():
+        r = ctx.zarf(["tools", "registry", "catalog"], timeout=60)
+        out = Ctx.out_text(r.stdout) + Ctx.out_text(r.stderr)
+        if r.returncode == 0:
+            catalog_ok = "cybersec-dask" in out
+            catalog_detail = (
+                "catalog has cybersec-dask" if catalog_ok
+                else "catalog reachable; cybersec-dask absent"
+            )
+        else:
+            catalog_detail = f"catalog query rc={r.returncode}"
+    return {
+        "registry_ready": reg_ready,
+        "registry_total": reg_total,
+        "catalog_has_app": catalog_ok,
+        "detail": (
+            f"registry pods {reg_ready}/{reg_total}"
+            + (f"; {catalog_detail}" if catalog_detail else "")
+        ),
+        "healthy": reg_ready >= 1 and catalog_ok is not False,
+    }
+
+
+def _cluster_orient_summary(ctx: Ctx, *pod_censuses: dict) -> str:
+    """One-line orientation for detect/rem logs (single-node air-gap)."""
+    node = _node_schedulability_census(ctx)
+    reg = _registry_census(ctx)
+    parts = [node["summary"], reg["detail"]]
+    for pc in pod_censuses:
+        if pc:
+            parts.append(pc.get("summary") or "")
+    return " | ".join(p for p in parts if p)
+
+
 def _det_layer_a_images(ctx: Ctx) -> Probe:
     """CLOSURE: the bootstrap images must be present in the closed world. Proxy via
     pod health — an ImagePullBackOff means the image isn't there. (Never pulls.)"""
@@ -1228,12 +1392,129 @@ def _rem_operator(ctx: Ctx) -> Fix:
 
 
 def _det_scheduler(ctx: Ctx) -> Probe:
-    ready, total = ctx.pods_ready("dask", "dask.org/component=scheduler")
-    return Probe(ready >= 1, f"scheduler ready {ready}/{total}")
+    """Scheduler Ready — census node/registry/pod when not Ready (air-gap local only)."""
+    pods = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
+    if pods["ready"] >= 1:
+        return Probe(True, f"scheduler ready {pods['ready']}/{pods['total']}")
+    orient = _cluster_orient_summary(ctx, pods)
+    has_cr = bool(ctx.items("daskcluster", ns="dask")) or bool(
+        ctx.items("daskclusters", ns="dask"))
+    if pods["image_pull"]:
+        return Probe(
+            False,
+            f"scheduler ImagePull — registry/image rewrite. census: {orient} "
+            f"pull={pods['image_pull'][:3]} cr={'yes' if has_cr else 'no'}",
+        )
+    if pods["crash"]:
+        return Probe(
+            False,
+            f"scheduler CrashLoop/OOM. census: {orient} crash={pods['crash'][:3]}",
+        )
+    node = _node_schedulability_census(ctx)
+    if pods["pending"] and not node["schedulable"]:
+        return Probe(
+            False,
+            f"scheduler Pending — node not schedulable (DiskPressure/taint/cordon). "
+            f"do NOT redeploy. census: {orient}",
+        )
+    if pods["pending"] and node["schedulable"]:
+        return Probe(
+            False,
+            f"scheduler Pending but node schedulable — recycle pod. census: {orient}",
+        )
+    if pods["total"] == 0:
+        return Probe(
+            False,
+            f"scheduler absent (0 pods) cr={'yes' if has_cr else 'no'}. census: {orient}",
+        )
+    return Probe(False, f"scheduler not Ready. census: {orient}")
 
 
 def _rem_scheduler(ctx: Ctx) -> Fix:
-    return _zarf_deploy_components(ctx, "dask-cluster")
+    """Census-driven scheduler rem (single-node air-gap).
+
+    Order:
+      1. Node not schedulable → MANUAL (DiskPressure) — no zarf
+      2. ImagePull → push cybersec-images (registry)
+      3. CrashLoop → recycle scheduler pod once; if still bad, redeploy dask-cluster
+      4. Pending + schedulable → recycle scheduler pod (operator recreates)
+      5. No pods / no CR → zarf package deploy dask-cluster
+      6. CR present, operator OK, still no Ready → redeploy dask-cluster
+    """
+    actions: List[str] = []
+    pods = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
+    node = _node_schedulability_census(ctx)
+    reg = _registry_census(ctx)
+    orient = _cluster_orient_summary(ctx, pods)
+
+    # 1) Node pressure / taint
+    if not node["schedulable"] and (pods["pending"] or pods["total"] == 0 or pods["ready"] < 1):
+        return Fix(False, _manual.join_detail(
+            f"MANUAL: scheduler blocked by node pressure/taint — {orient}. "
+            f"Clear DiskPressure (condition False) before zarf redeploy.",
+            _manual.hint_for("T0.no-disk-pressure"),
+        ))
+
+    # 2) Image pull → ensure images in registry
+    if pods["image_pull"] or reg.get("catalog_has_app") is False:
+        fix = _zarf_deploy_components(ctx, "cybersec-images")
+        actions.append(fix.detail)
+        # recycle so kubelet re-pulls after push
+        ctx.k(["delete", "pod", "-n", "dask", "-l", "dask.org/component=scheduler",
+               "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
+        actions.append("recycled scheduler pods after image push")
+        again = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
+        if again["ready"] >= 1:
+            return Fix(True, f"images+recycle → scheduler Ready — "
+                             f"{_cluster_orient_summary(ctx, again)}")
+        # continue toward cluster redeploy if still missing
+
+    # 3/4) Recycle on CrashLoop or Pending-while-schedulable
+    if pods["crash"] or (pods["pending"] and node["schedulable"]) or (
+            pods["total"] > 0 and pods["ready"] < 1 and node["schedulable"]
+            and not pods["image_pull"]):
+        r = ctx.k([
+            "delete", "pod", "-n", "dask", "-l", "dask.org/component=scheduler",
+            "--force", "--grace-period=0", "--wait=false", "--ignore-not-found",
+        ])
+        if r.returncode == 0:
+            actions.append("recycled scheduler pod(s) for reschedule/restart")
+        # Give operator a moment is next pass; also try worker cap if OOM/insufficient
+        hints = " ".join(
+            m for p in pods["pending"] for m in (p.get("msgs") or [])
+        ).lower()
+        if any(x in hints for x in ("insufficient", "memory", "cpu")) or pods["crash"]:
+            cap = _rem_workers_capacity(ctx)
+            if cap.changed:
+                actions.append(cap.detail)
+        again = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
+        if again["ready"] >= 1:
+            return Fix(True, f"recycle → scheduler Ready — "
+                             f"{_cluster_orient_summary(ctx, again)}  "
+                             f"[unwound: {'; '.join(actions)}]")
+        if again["pending"] and not _node_schedulability_census(ctx)["schedulable"]:
+            return Fix(bool(actions), _manual.join_detail(
+                f"recycled; still blocked by node — {_cluster_orient_summary(ctx, again)}",
+                _manual.hint_for("T0.no-disk-pressure"),
+            ))
+        # fall through to deploy if CR/pods still broken
+
+    # 5/6) Package path — create/reconcile DaskCluster
+    fix = _zarf_deploy_components(ctx, "dask-cluster")
+    detail = fix.detail
+    if actions:
+        detail = f"{detail}  [prior: {'; '.join(actions)}]"
+    # After deploy, if wait action timed out but CR exists, recycle once more
+    final = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
+    if final["ready"] < 1 and final["total"] >= 1 and node["schedulable"]:
+        ctx.k(["delete", "pod", "-n", "dask", "-l", "dask.org/component=scheduler",
+               "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
+        detail += "  [post-deploy recycle scheduler for readiness]"
+        return Fix(True, detail)
+    if final["ready"] >= 1:
+        return Fix(True, f"dask-cluster rem → scheduler Ready — "
+                         f"{_cluster_orient_summary(ctx, final)}")
+    return Fix(fix.changed or bool(actions), detail)
 
 
 def _det_workers_capacity(ctx: Ctx) -> Probe:
@@ -1928,30 +2209,6 @@ def _det_s3_datapath(ctx: Ctx) -> Probe:
 # JupyterHub control-plane pods (hub + proxy). Singleuser servers are user-triggered.
 _JH_NS = "jupyterhub"
 _JH_SELECTORS = ("component=hub", "component=proxy")
-
-
-def _pod_failed_scheduling_msgs(pod: dict) -> List[str]:
-    """Extract FailedScheduling / unschedulable messages from pod status."""
-    msgs: List[str] = []
-    st = pod.get("status") or {}
-    for c in st.get("conditions") or []:
-        if c.get("type") == "PodScheduled" and c.get("status") == "False":
-            reason = c.get("reason") or "Unschedulable"
-            msg = (c.get("message") or "").strip()
-            if msg:
-                msgs.append(f"{reason}: {msg}")
-            else:
-                msgs.append(reason)
-    # container waiting reasons (ImagePull, etc.) after schedule
-    for cs in (st.get("containerStatuses") or []) + (st.get("initContainerStatuses") or []):
-        waiting = ((cs.get("state") or {}).get("waiting") or {})
-        if waiting.get("reason"):
-            wmsg = (waiting.get("message") or "").strip()
-            msgs.append(
-                f"{waiting.get('reason')}"
-                + (f": {wmsg[:160]}" if wmsg else "")
-            )
-    return msgs
 
 
 def _jupyterhub_workload_census(ctx: Ctx) -> dict:

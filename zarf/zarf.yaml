@@ -179,7 +179,7 @@ components:
                 name: dask.org/component=scheduler
                 namespace: dask
                 condition: Ready
-            maxTotalSeconds: 300
+            maxTotalSeconds: 900
             description: Wait for Dask scheduler to be ready
           - cmd: |
               # Fail loud if the packaged image is missing notebook deps (air-gap: no pip).
