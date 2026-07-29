@@ -1202,6 +1202,17 @@ def _pre_init_cleanup(ctx: Ctx) -> List[str]:
         bad = bool(del_ts) or phase in ("Terminating", "Pending", "Lost") \
             or phase != "Bound" or cur != ""
         if bad:
+            # CONSERVATION backstop for LEGACY layouts (pre-v1.6.1 init): a Bound
+            # PVC on a dynamically provisioned PV (reclaimPolicy Delete) would
+            # take the registry DATA with it on delete. Patch the bound PV to
+            # Retain first — a mistaken delete then leaves the blobs on disk.
+            vol = (pvc.get("spec", {}) or {}).get("volumeName")
+            if vol and vol != REGISTRY_PV_NAME:
+                r = ctx.k(["patch", "pv", vol, "-p",
+                           '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'])
+                if r.returncode == 0:
+                    actions.append(f"reclaim=Retain backstop on bound PV {vol} "
+                                   "(legacy-layout conservation)")
             if _force_delete_pvc(ctx, ZARF_NS, REGISTRY_PVC_NAME):
                 actions.append(
                     f"deleted registry PVC (was phase={phase} sc={cur!r} "
