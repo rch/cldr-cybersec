@@ -115,6 +115,68 @@ this package). The closed world has **no internet** and **no** laptop-side tooli
 assets in this release kit and `converge-node.sh`. Package and image wire names stay
 **`cybersec-dask`** (no rename mid-flight).
 
+### 6.0 REQUIRED preflight — registry lineage, conservation backstop, disk, scaling
+
+Run these BEFORE anything else in this section. They are cheap and reversible,
+and they convert the worst known upgrade failure modes from unrecoverable to
+recoverable.
+
+**(a) Registry lineage probe.** The safe upgrade floor is set by the release
+that ran `zarf init` on this node (upgrades never re-init), not the package
+currently deployed:
+
+```bash
+kubectl -n zarf get pvc zarf-registry -o jsonpath='{.spec.storageClassName}'; echo
+```
+
+- Output **empty** → claimRef lineage (v1.6.1+ init). Continue with §6.
+- Output **non-empty** (e.g. `local-path`) → LEGACY registry on a dynamically
+  provisioned PV with `reclaimPolicy: Delete` — deleting that PVC deletes every
+  transported image. Do NOT run `apply` until (b) is in place, and prefer the
+  clean path: `converge-node.sh teardown` → re-init under this kit → `apply`.
+
+**(b) Conservation backstop — run unconditionally (harmless on claimRef).**
+
+```bash
+PV=$(kubectl -n zarf get pvc zarf-registry -o jsonpath='{.spec.volumeName}')
+kubectl patch pv "$PV" -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
+```
+
+With `Retain`, even a mistaken registry PVC deletion leaves the image data on
+disk instead of erasing it.
+
+**(c) Disk gate (imagefs).** The upgrade adds new layers BESIDE old ones in
+both the registry hostPath and containerd. Require free space ≥ 3× the deploy
+package size (this cut: **≥ 4 GiB**) before apply:
+
+```bash
+df -h /var/lib/rancher /var/lib/zarf-registry
+```
+
+kubelet image GC starts at **85% imagefs usage — before any disk-pressure
+taint the engine can observe** — and GC-evicted images are unrecoverable
+air-gapped once the kit tarballs are gone. Free space safely if needed (never
+`crictl rmi`, never prune). Keep BOTH kit tarballs staged in `/var/tmp` until
+`verify` is clean — and retain them afterwards as restore media.
+
+**(d) Preserve worker scaling.** This kit templates `DASK_WORKER_REPLICAS`
+(default **4**) on every apply. If the node was scaled up (e.g. 32 sized
+workers via the v1.6.5 engine), export the CURRENT values before apply or the
+cluster silently resets to 4 template-sized workers:
+
+```bash
+export DASK_WORKER_REPLICAS=32 DASK_WORKER_NTHREADS=2 \
+       DASK_WORKER_CPU=2 DASK_WORKER_MEMORY=28Gi
+```
+
+The v1.6.5 docs' `DASK_WORKER_MEM_REQUEST` / `DASK_WORKER_MEM_LIMIT` names are
+**not** honored by this package — use the names above.
+
+**Validation scope.** This upgrade path is procedure-reviewed and its engine
+mechanism (image-tag drift → redeploy) is code-verified; it has **not** yet
+been runtime-validated by a cross-version matrix case. The preflight above is
+mandatory, not optional.
+
 ### What the engine does on upgrade
 
 Converge is readiness-based **and** compares the running `cybersec-dask` image tag to the
@@ -215,6 +277,10 @@ cp /root/sample-notebooks/HDF5_Iceberg_Metadata_Provider.ipynb /root/
 | Old engine tarball + new deploy package | **No** — always unpack **this** `cybersec-converge-1.6.6` |
 | Multiple deploy packages in `/var/tmp` | **No** — remove extras (mtime discovery) |
 | Stale `zarf` CLI ≠ kit v0.70.x | **No** — install kit binary first |
+
+**Upgrade floor:** §6 as written assumes a **v1.6.1-or-later-initialized**
+registry (probe §6.0a: storageClassName empty). v1.5.0 / v1.6.0-initialized
+nodes: apply §6.0b, then prefer `teardown` → re-init under this kit → `apply`.
 
 ### If verify is not clean
 
