@@ -1,5 +1,7 @@
 [project]
-name = "cybersec"  # distribution/import path; product name is cyberphy (see scripts below)
+# Distribution / PyPI-style name is cyberphy. Import path remains cybersec.*
+# for wire/compat (CLI: cyberphy preferred; cybersec alias still installed).
+name = "cyberphy"
 version = "0.1.0"
 description = "Cyberphy — CPS observability toolkit (Flink, Iceberg, air-gap Zarf stack)"
 readme = "README.md"

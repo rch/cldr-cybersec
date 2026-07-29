@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Cyberphy** (product) is a CPS observability and analytics platform: OpenTelemetry from the plant floor and the platform itself, through Flink/NiFi, into an Iceberg lakehouse (Polaris + S3/RustFS), with air-gap delivery via Zarf.
 
-The Python import path and many wire identifiers remain `cybersec*` for compatibility (CLI aliases: `cyberphy` preferred, `cybersec` still works). Repo remote: [weathership/cyberphy](https://github.com/weathership/cyberphy).
+**Distribution name:** `cyberphy` (`uv sync` / pip). **Import path** remains `cybersec.*` for compatibility. **CLI:** `cyberphy` / `cyberphy-mcp` preferred (`cybersec` aliases still work). **Zarf package/image** remains `cybersec-dask` until a dedicated rename cut. Repo remote: [weathership/cyberphy](https://github.com/weathership/cyberphy).
 
 ## Build Commands
 

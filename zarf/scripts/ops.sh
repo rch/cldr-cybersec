@@ -32,12 +32,14 @@ _image_inputs() {
   for f in "$DOCKERFILE" zarf/images/requirements-airgap.txt \
            zarf/images/requirements-agent.txt zarf/images/otel-navigator.py \
            zarf/images/data-view.py zarf/images/data_view_lib.py \
-           zarf/scripts/generate-vpc-flow.py \
+           zarf/scripts/generate-vpc-flow.py zarf/scripts/generate_hdf5.py \
            zarf/images/loader.js; do
     [ -f "$f" ] && echo "$f"
   done
-  find cybersec config zarf/images/sample-notebooks -type f \
-    -not -path '*/__pycache__/*' -not -name '*.pyc' 2>/dev/null
+  # App code + standalone SDK baked into the image (not tag-bearing manifests).
+  find cybersec config packages/hdf5_iceberg zarf/images/sample-notebooks -type f \
+    -not -path '*/__pycache__/*' -not -name '*.pyc' \
+    -not -path '*/.pytest_cache/*' -not -name '*.egg-info' 2>/dev/null
 }
 content_tag() {
   local h
@@ -47,14 +49,20 @@ content_tag() {
 # The source files that carry the image tag (kept in lockstep with the build).
 _tag_files() {
   printf '%s\n' zarf/zarf.yaml zarf/artifacts.manifest.json \
-    zarf/manifests/engine.yaml zarf/manifests/panel-viz.yaml zarf/manifests/dask-cluster.yaml
+    zarf/manifests/engine.yaml zarf/manifests/panel-viz.yaml \
+    zarf/manifests/dask-cluster.yaml zarf/manifests/jupyterhub-values.yaml
 }
 current_tag() { grep -hoE "${IMG}:[A-Za-z0-9._-]+" zarf/zarf.yaml | head -1 | cut -d: -f2-; }
 bump_tag() {  # idempotent — rewrites the tag in the source manifests only if it changed
   local new="$1" old f
   old="$(current_tag)"
   if [ "$old" = "$new" ]; then echo "  image tag already ${new} (no manifest change)"; return 0; fi
-  for f in $(_tag_files); do sed -i "s|${IMG}:${old}|${IMG}:${new}|g" "$f"; done
+  for f in $(_tag_files); do
+    # Full image refs: cybersec-dask:<old>
+    sed -i "s|${IMG}:${old}|${IMG}:${new}|g" "$f"
+    # Helm values style: tag: "2025.2.0-notebook" (jupyterhub-values.yaml)
+    sed -i "s|tag: \"${old}\"|tag: \"${new}\"|g" "$f"
+  done
   echo "  bumped image tag ${old} -> ${new}"
 }
 

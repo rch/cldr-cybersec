@@ -28,6 +28,7 @@ INCLUDE_NOTEBOOKS = [
     "OTEL_Data_Generator.ipynb",
     "Dask_S3_Validation.ipynb",
     "HDF5_CPHY_Acquisition_Generator.ipynb",
+    "HDF5_Iceberg_Metadata_Provider.ipynb",
 ]
 
 # ConfigMap limit is 1 MiB; warn if we get close
@@ -87,6 +88,7 @@ def main():
         | `OTEL_Data_Generator.ipynb` | Generate synthetic OTEL spans (same methodology as 1TB dataset) | Configurable |
         | `Dask_S3_Validation.ipynb` | Out-of-core Dask stress test with 30GB dataset | 30 GB |
         | `HDF5_CPHY_Acquisition_Generator.ipynb` | CPHY/OTel HDF5 + Dask/datashader (idempotent Run All) | lab ~10 GiB / lab_tiny ~6 MiB / airgap ~2 TiB |
+        | `HDF5_Iceberg_Metadata_Provider.ipynb` | Standalone ``hdf5_iceberg`` SDK: RO data + ``cyberphy-md`` metadata | pointer table + DCAT TTL |
 
         ## Getting Started
 

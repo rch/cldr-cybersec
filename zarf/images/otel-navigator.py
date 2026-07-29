@@ -18,6 +18,8 @@ Environment variables:
 - AWS_ACCESS_KEY_ID: S3 access key
 - AWS_SECRET_ACCESS_KEY: S3 secret key
 - AWS_REGION: AWS region (default: us-east-1)
+- PTY_PROXY_WS: optional explicit terminal WebSocket URL (empty = auto-detect)
+- BOKEH_RESOURCES: set to "server" for air-gap panel serve (never cdn.bokeh.org)
 """
 import json
 import logging
@@ -25,6 +27,10 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+
+# Air-gap: force Bokeh assets from the Panel server before any bokeh/panel import.
+# "server" = pod-local static paths; never https://cdn.bokeh.org/
+os.environ.setdefault("BOKEH_RESOURCES", "server")
 
 import colorcet as cc
 import dask.dataframe as dd

@@ -68,17 +68,17 @@ proxy:
 # Single-user server configuration
 singleuser:
   # Air-gap notebook image: holoviews + h5py + generate_hdf5 (requirements-airgap.txt).
-  # MUST match zarf.yaml cybersec-images / dask-cluster (2025.2.0-notebook).
-  # Zarf rewrites registry and may append -zarf-<hash>; do not strip the -notebook suffix.
+  # MUST match zarf.yaml cybersec-images / dask-cluster (content-derived tag from `just image`).
+  # Zarf rewrites registry and may append -zarf-<hash>.
   image:
     name: localhost:5555/cybersec-dask
-    tag: "2025.2.0-notebook"
+    tag: "2025.2.0-85f3d9ecf5"
     pullPolicy: IfNotPresent
   # Network tools init container - same bundled image (air-gap, no extra pulls)
   networkTools:
     image:
       name: localhost:5555/cybersec-dask
-      tag: "2025.2.0-notebook"
+      tag: "2025.2.0-85f3d9ecf5"
       pullPolicy: IfNotPresent
   # Disable block-cloud-metadata init container (requires iptables,
   # which is not present in the cybersec-dask image)

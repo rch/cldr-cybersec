@@ -77,6 +77,9 @@ COPY zarf/scripts/generate-vpc-flow.py /app/generate-vpc-flow.py
 COPY zarf/scripts/generate_hdf5.py /app/generate_hdf5.py
 COPY zarf/scripts/generate_hdf5.py /app/lib/generate_hdf5.py
 
+# Standalone hdf5_iceberg SDK (import: from hdf5_iceberg import …) — not under cybersec/
+COPY packages/hdf5_iceberg/src/hdf5_iceberg /app/hdf5_iceberg
+
 # Pointer only under /app/sample-notebooks (avoids stale notebooks in File browser)
 RUN mkdir -p /app/sample-notebooks && printf '%s\n' \
   'Sample notebooks are served from the ConfigMap at /root/sample-notebooks.' \

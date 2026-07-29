@@ -15,9 +15,10 @@ a dense multi-series acquisition layout framed entirely in OpenTelemetry / CPHY 
 
 Iceberg File Format API readiness
 ---------------------------------
-Many fixed-window .h5 files under a hive-style prefix, with time bounds in
-filename + group attrs + dataset attrs, uuid chain for registration, and
-pointer-table-shaped inventory rows (see docs/current/.../hdf5-iceberg-metadata-plane.md).
+Many fixed-window .h5 files under a product prefix (Iceberg data-file style keys),
+with time bounds in filename + group attrs + dataset attrs, uuid chain for registration,
+and Arrow/pointer-table inventory rows (see docs/current/.../hdf5-iceberg-metadata-plane.md).
+Object keys are flat under datasets/hdf5/<product>/ — no Hive key=value path segments.
 
 Profiles
 --------
@@ -32,7 +33,7 @@ Usage:
         --dry-run   # print plan only
 
 By default the CLI is **idempotent**: if enough full-size parts already exist under
-the hive prefix, they are reused (same as the sample notebook). Pass ``--force``
+the product prefix, they are reused (same as the sample notebook). Pass ``--force``
 to write a new run.
 
 Dependencies: h5py, numpy; boto3 for S3.
@@ -146,9 +147,10 @@ class GenConfig:
     seed: int = 0
     time_unit: TimeUnit = "ns"  # OTel-native; set "us" for microsecond timestamps
     group_style: GroupStyle = "underscore"  # URL/HOCON-safe
-    product: str = "otelcphy"
-    # Hive layout under bucket: datasets/hdf5/otelcphy/service=…/date=…/hour=…
-    hive_layout: bool = True
+    product: str = "cphy"
+    # Object keys: datasets/hdf5/<product>/<filename> (Iceberg data-file style; not Hive)
+    # Time/partition semantics live in file attrs + metadata tables (Arrow/Iceberg), not paths.
+    product_prefix: bool = True
     base_time: Optional[datetime] = None  # UTC; default = now
 
     def estimated_values_bytes(self) -> int:
@@ -299,22 +301,24 @@ def timestamps_array(start_ns: int, n_time: int, step_ns: int, time_unit: TimeUn
 
 
 def part_filename(cfg: GenConfig, part_idx: int, start_ns: int) -> str:
-    """otelcphy_<YYYYMMDDTHHMMSS>_<part>Z.h5"""
+    """cphy_<YYYYMMDDTHHMMSS>_<part>Z.h5"""
     return f"{cfg.product}_{_iso_compact(start_ns)}_{part_idx:04d}Z.h5"
 
 
-def hive_key(cfg: GenConfig, part_idx: int, start_ns: int, filename: str) -> str:
-    """Relative key under bucket (no leading slash)."""
-    if not cfg.hive_layout:
+def object_key(cfg: GenConfig, part_idx: int, start_ns: int, filename: str) -> str:
+    """Relative object key under bucket (no leading slash).
+
+    Flat product prefix — Iceberg/Arrow metadata carry time bounds and tags,
+    not Hive-style service=/date=/hour= directories.
+    """
+    if not cfg.product_prefix:
         return filename
-    dt = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=start_ns // 1000)
-    return (
-        f"datasets/hdf5/{cfg.product}/"
-        f"service={cfg.service_name}/"
-        f"date={dt.strftime('%Y-%m-%d')}/"
-        f"hour={dt.strftime('%H')}/"
-        f"{filename}"
-    )
+    return f"datasets/hdf5/{cfg.product}/{filename}"
+
+
+# Backward-compatible alias (deprecated)
+def hive_key(cfg: GenConfig, part_idx: int, start_ns: int, filename: str) -> str:
+    return object_key(cfg, part_idx, start_ns, filename)
 
 
 def structural_fingerprint(cfg: GenConfig, collection_uuid: str) -> str:
@@ -479,7 +483,7 @@ def write_part(
 
     size = os.path.getsize(path)
     fname = part_filename(cfg, part_idx, start_ns)
-    key = hive_key(cfg, part_idx, start_ns, fname)
+    key = object_key(cfg, part_idx, start_ns, fname)
     fp = structural_fingerprint(cfg, collection_uuid)
     t_min_ns, t_max_ns = start_ns, end_ns - step_ns
     return {
@@ -569,7 +573,7 @@ def list_existing_parts(
     s3_endpoint: str | None = None,
     min_size_bytes: int | None = None,
 ) -> list[dict[str, Any]]:
-    """List existing acquisition .h5 objects under the product hive prefix.
+    """List existing acquisition .h5 objects under the product object prefix.
 
     Idempotent explore path: discovers prior runs without rewriting data.
     Filters by minimum size so tiny smoke leftovers are ignored when cfg is lab-sized.
@@ -581,9 +585,6 @@ def list_existing_parts(
         u = urlparse(out)
         bucket = u.netloc
         prefix = f"datasets/hdf5/{cfg.product}/"
-        if cfg.service_name:
-            # Prefer this collector's tree; still accept any service= under product.
-            pass
         client = _boto3_s3_client(s3_endpoint)
         token = None
         keys: list[tuple[str, int]] = []
@@ -644,7 +645,7 @@ def list_existing_parts(
 
     # Local filesystem
     root = Path(out)
-    if cfg.hive_layout:
+    if cfg.product_prefix:
         search_root = root / "datasets" / "hdf5" / cfg.product
     else:
         search_root = root
@@ -654,7 +655,7 @@ def list_existing_parts(
         size = path.stat().st_size
         if size < min_sz:
             continue
-        rel = str(path.relative_to(root)) if cfg.hive_layout else path.name
+        rel = str(path.relative_to(root)) if cfg.product_prefix else path.name
         inventory.append(
             {
                 "dataset_uuid": None,
@@ -715,7 +716,7 @@ def ensure_parts(
     )
 
     if reuse_existing and not force and not dry_run:
-        print("Listing existing full-size parts under hive prefix (no rewrite)…")
+        print("Listing existing full-size parts under product prefix (no rewrite)…")
         t_list = _time.time()
         existing = list_existing_parts(out, cfg, s3_endpoint=s3_endpoint)
         print(f"  list done in {_time.time() - t_list:.2f}s → {len(existing)} candidate(s)")
@@ -766,7 +767,7 @@ def generate_parts(
     """Generate all parts to local dir or s3://bucket[/prefix] (always writes).
 
     Prefer :func:`ensure_parts` for notebook/CI idempotency. For s3:// URLs the
-    hive key is absolute under the bucket when ``cfg.hive_layout`` is True.
+    object key is absolute under the bucket when ``cfg.product_prefix`` is True.
     """
     is_s3 = out.startswith("s3://")
     if is_s3:
@@ -797,7 +798,7 @@ def generate_parts(
         meta["reused"] = False
 
         if is_s3:
-            key = meta["key"] if cfg.hive_layout else f"{url_prefix}{fname}"
+            key = meta["key"] if cfg.product_prefix else f"{url_prefix}{fname}"
             uri = upload_s3(local, bucket, key, s3_endpoint)
             meta["uri"] = uri
             meta["key"] = key
@@ -812,8 +813,8 @@ def generate_parts(
             except OSError:
                 pass
         else:
-            # Local hive dirs
-            if cfg.hive_layout:
+            # Local product-prefix dirs
+            if cfg.product_prefix:
                 dest = os.path.join(workdir, meta["key"])
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
                 if dest != local:
@@ -889,7 +890,7 @@ def main():
     p.add_argument("--group-style", choices=["underscore", "brackets"], default="underscore")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--emit-kerchunk", action="store_true")
-    p.add_argument("--no-hive", action="store_true", help="Flat keys under --out prefix")
+    p.add_argument("--flat", action="store_true", help="Keys = filename only (no datasets/hdf5/<product>/ prefix)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument(
         "--force",
@@ -906,7 +907,7 @@ def main():
         "seed": args.seed,
         "chunk_series": args.chunk_series,
         "chunk_time": args.chunk_time,
-        "hive_layout": not args.no_hive,
+        "product_prefix": not args.flat,
     }
     for key, attr in [
         ("n_series", "n_series"),

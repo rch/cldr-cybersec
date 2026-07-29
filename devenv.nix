@@ -606,7 +606,7 @@ exit(asyncio.run(main()))
         echo "  - Release unused EIPs shown above"
         echo "  - Or request a quota increase from AWS"
         echo ""
-        echo "Run 'cybersec \"/aws preflight $REGION\"' for details."
+        echo "Run 'cyberphy \"/aws preflight $REGION\"' for details."
         exit 1
       fi
 
@@ -1182,7 +1182,7 @@ PY
 
     # Show developer identity and AWS configuration
     "aws:identity".exec = ''
-      uv run cybersec "/aws"
+      uv run cyberphy "/aws"
     '';
 
     # Show active AWS profile/region and validate credentials
@@ -1297,7 +1297,7 @@ PY
       echo "======================================"
 
       echo "Setting AWS region to us-east-1..."
-      uv run cybersec "/aws target us-east-1"
+      uv run cyberphy "/aws target us-east-1"
 
       echo ""
       echo "Developer identity:"
@@ -1317,9 +1317,9 @@ PY
     "aws:s3:verify".exec = ''
       BUCKET="''${1:-}"
       if [ -n "$BUCKET" ]; then
-        uv run cybersec "/aws s3:verify $BUCKET"
+        uv run cyberphy "/aws s3:verify $BUCKET"
       else
-        uv run cybersec "/aws s3:verify"
+        uv run cyberphy "/aws s3:verify"
       fi
     '';
 
@@ -1347,7 +1347,7 @@ PY
       [ -n "$APPLY" ] && CMD="$CMD --apply"
       [ -n "$SKIP_VERIFY" ] && CMD="$CMD --skip-verify"
 
-      uv run cybersec "$CMD"
+      uv run cyberphy "$CMD"
     '';
 
     # =========================================================================
@@ -1358,7 +1358,7 @@ PY
 
     # Show current AWS target configuration
     "aws:target".exec = ''
-      uv run cybersec "/aws target"
+      uv run cyberphy "/aws target"
     '';
 
     # Set AWS target region with validation
@@ -1375,22 +1375,22 @@ PY
         echo "Run 'devenv tasks run aws:target:list' for full list."
         exit 1
       fi
-      uv run cybersec "/aws target $REGION"
+      uv run cyberphy "/aws target $REGION"
     '';
 
     # Validate current AWS target without changes (dry-run)
     "aws:target:validate".exec = ''
       REGION="''${1:-}"
       if [ -n "$REGION" ]; then
-        uv run cybersec "/aws target $REGION --dry-run"
+        uv run cyberphy "/aws target $REGION --dry-run"
       else
-        uv run cybersec "/aws target --dry-run"
+        uv run cyberphy "/aws target --dry-run"
       fi
     '';
 
     # List allowed AWS regions
     "aws:target:list".exec = ''
-      uv run cybersec "/aws target --list"
+      uv run cyberphy "/aws target --list"
     '';
 
     "aws:inventory".exec = ''
@@ -2815,7 +2815,7 @@ asyncio.run(main())
     "zarf:preflight".exec = ''
       source scripts/polaris_bootstrap_helper.sh
       log_info "=== Zarf Air-Gap Preflight Validation ==="
-      uv run cybersec "/zarf preflight"
+      uv run cyberphy "/zarf preflight"
     '';
 
     "zarf:image".exec = ''

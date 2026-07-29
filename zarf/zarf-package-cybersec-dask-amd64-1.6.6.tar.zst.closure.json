@@ -1,0 +1,15 @@
+{
+  "package": "zarf-package-cybersec-dask-amd64-1.6.6.tar.zst",
+  "size_bytes": 1342910719,
+  "image_listing_present": true,
+  "transport_artifacts": [
+    {
+      "file": "zarf-init-amd64-v0.70.1.tar.zst",
+      "present": false,
+      "critical": true
+    }
+  ],
+  "external_artifacts": [
+    "agent-inference-model"
+  ]
+}
