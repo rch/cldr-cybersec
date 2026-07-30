@@ -177,6 +177,26 @@ class TestWorkersAbsentCR:
         assert "N/A" in p.detail or "absent" in p.detail.lower()
 
 
+class TestCrashLogClassify:
+    def test_import_and_s3_and_scrub(self):
+        from converge.catalog import _classify_log_text
+        text = """
+Traceback (most recent call last):
+  File "app.py", line 1
+ModuleNotFoundError: No module named 'h5py'
+Invalid bucket name 's3:'
+AWS_SECRET_ACCESS_KEY=supersecret should not appear as evidence
+Address already in use
+"""
+        findings = _classify_log_text(text)
+        ids = {f["id"] for f in findings}
+        assert "import_error" in ids
+        assert "s3_auth_or_bucket" in ids
+        assert "port_in_use" in ids
+        for f in findings:
+            assert "supersecret" not in f["evidence"]
+
+
 class TestVersion:
     def test_version(self):
-        assert __version__ == "0.5.4"
+        assert __version__ == "0.5.5"

@@ -22,7 +22,7 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .discovery import APP_NAMESPACES, DASK_CRD_KINDS
 from .kube import Ctx, _mem_to_gib
@@ -1699,9 +1699,12 @@ def _det_scheduler(ctx: Ctx) -> Probe:
             f"pull={pods['image_pull'][:3]} cr={'yes' if has_cr else 'no'}",
         )
     if pods["crash"]:
+        log_bits = _crash_log_census(ctx, "dask", "dask.org/component=scheduler")
+        log_s = ("\n" + "\n".join(log_bits)) if log_bits else ""
         return Probe(
             False,
-            f"scheduler CrashLoop/OOM. census: {orient} crash={pods['crash'][:3]}",
+            f"scheduler CrashLoop/OOM. census: {orient} crash={pods['crash'][:3]}"
+            f"{log_s}",
         )
     node = _node_schedulability_census(ctx)
     if pods["pending"] and not node["schedulable"]:
@@ -2577,6 +2580,169 @@ def _panel_s3_config_issue(ctx: Ctx) -> Optional[str]:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# In-situ crash log census (logs never leave the closed world)
+# --------------------------------------------------------------------------- #
+# Operators cannot exfiltrate pod logs; when CrashLoop/high restartCount is
+# visible, the engine pulls a short tail and classifies high-signal findings so
+# remediations and LIVE STATE name the next action without kubectl folklore.
+
+_LOG_TAIL_LINES = 100
+_RESTART_LOG_THRESHOLD = 3  # sample logs at ≥ this restartCount when not ready
+
+# (regex, finding_id, operator/engine hint) — first match wins per line; we keep
+# unique finding_ids. Never capture secrets (no patterns on KEY=value tokens).
+_LOG_FINDINGS: Tuple[Tuple[re.Pattern, str, str], ...] = (
+    (re.compile(r"ModuleNotFoundError|ImportError|No module named", re.I),
+     "import_error",
+     "image missing Python deps — rebuild/push cybersec-dask (no pip air-gap)"),
+    (re.compile(r"Invalid bucket name|NoSuchBucket|S3.*AccessDenied|403 Forbidden.*[Ss]3|"
+                r"Unable to locate credentials|Could not connect to the endpoint", re.I),
+     "s3_auth_or_bucket",
+     "S3 path/creds — check ConfigMap S3_BUCKET + Secret keys; config-only rem"),
+    (re.compile(r"Address already in use|EADDRINUSE|bind.*98", re.I),
+     "port_in_use",
+     "port conflict — recycle pod; if persists, check hostNetwork/NodePort clash"),
+    (re.compile(r"OOM|MemoryError|Cannot allocate memory|heap out of memory", re.I),
+     "oom",
+     "memory pressure — cap workers (T4.workers-capacity) or raise limits"),
+    (re.compile(r"Permission denied|EACCES|Read-only file system", re.I),
+     "permission",
+     "filesystem perms — hostPath/spill/registry mode (chmod 0777 registry path)"),
+    (re.compile(r"Connection refused|Name or service not known|Temporary failure in name|"
+                r"nodename nor servname|Failed to resolve", re.I),
+     "dns_or_connect",
+     "in-cluster DNS/service — check endpoints + coredns; wait for deps Ready"),
+    (re.compile(r"SSL|certificate verify failed|x509|TLS", re.I),
+     "tls",
+     "TLS/cert issue — air-gap often needs verify=false or correct CA bundle"),
+    (re.compile(r"Panel|Bokeh|tornado|WebSocket|ghostty", re.I),
+     "panel_ui",
+     "Panel/Bokeh/WS stack — check BOKEH_RESOURCES=server and /ws ingress"),
+    (re.compile(r"Traceback \(most recent call last\)", re.I),
+     "python_traceback",
+     "Python crash — see IN SITU LOG excerpt below for the exception type"),
+    (re.compile(r"FATAL|panic:|runtime error:|segmentation fault", re.I),
+     "fatal",
+     "process fatal — excerpt below; often OOM or bad binary/arch"),
+    (re.compile(r"Error:|Exception:|FAILED|critical", re.I),
+     "generic_error",
+     "error line in logs — see IN SITU LOG excerpt"),
+)
+
+
+def _container_crashy(cs: dict) -> bool:
+    waiting = ((cs.get("state") or {}).get("waiting") or {})
+    if waiting.get("reason") in ("CrashLoopBackOff", "CreateContainerConfigError",
+                                   "RunContainerError"):
+        return True
+    term = ((cs.get("state") or {}).get("terminated") or {})
+    if term.get("reason") in ("OOMKilled", "Error", "ContainerCannotRun"):
+        return True
+    last = ((cs.get("lastState") or {}).get("terminated") or {})
+    if last.get("reason") in ("OOMKilled", "Error"):
+        return True
+    rc = int(cs.get("restartCount") or 0)
+    if rc >= _RESTART_LOG_THRESHOLD and not cs.get("ready"):
+        return True
+    return False
+
+
+def _pod_needs_log_census(pod: dict) -> bool:
+    for cs in (pod.get("status") or {}).get("containerStatuses") or []:
+        if _container_crashy(cs):
+            return True
+    phase = (pod.get("status") or {}).get("phase")
+    return phase in ("Failed", "Unknown")
+
+
+def _fetch_container_log(ctx: Ctx, ns: str, pod: str, container: str,
+                         *, previous: bool = False) -> str:
+    args = ["logs", "-n", ns, pod, f"--tail={_LOG_TAIL_LINES}", f"-c={container}"]
+    if previous:
+        args.append("--previous")
+    r = ctx.k(args, timeout=30)
+    text = Ctx.out_text(r.stdout) if r.returncode == 0 else ""
+    if not text.strip() and not previous:
+        # CrashLoop often needs the previous terminated instance
+        return _fetch_container_log(ctx, ns, pod, container, previous=True)
+    return text
+
+
+def _classify_log_text(text: str) -> List[dict]:
+    """Return unique findings [{id, hint, evidence}] from a log tail."""
+    found: List[dict] = []
+    seen = set()
+    if not text:
+        return found
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or len(s) > 400:
+            s = s[:400]
+        # Never echo lines that look like secret material
+        if re.search(r"(SECRET|PASSWORD|TOKEN|AWS_SECRET|AKIA[0-9A-Z]{16})\s*[=:]",
+                     s, re.I):
+            continue
+        for pat, fid, hint in _LOG_FINDINGS:
+            if fid in seen:
+                continue
+            if pat.search(s):
+                seen.add(fid)
+                found.append({
+                    "id": fid,
+                    "hint": hint,
+                    "evidence": s[:200],
+                })
+                break
+    return found
+
+
+def _crash_log_census(ctx: Ctx, ns: str, selector: str) -> List[str]:
+    """In-situ log facts for crashy pods under selector (closed-world only).
+
+    Returns human lines for detect detail / LIVE STATE — never secret values.
+    """
+    lines: List[str] = []
+    pods = ctx.items("pods", ns=ns, selector=selector)
+    crashy = [p for p in pods if _pod_needs_log_census(p)]
+    if not crashy:
+        return lines
+    lines.append("IN SITU LOG (engine-sampled; not exfiltrated):")
+    for p in crashy[:3]:  # bound work
+        pname = (p.get("metadata") or {}).get("name", "?")
+        statuses = (p.get("status") or {}).get("containerStatuses") or []
+        containers = [cs for cs in statuses if _container_crashy(cs)]
+        if not containers:
+            containers = statuses[:1]
+        for cs in containers[:2]:
+            cname = cs.get("name") or "main"
+            waiting = ((cs.get("state") or {}).get("waiting") or {})
+            reason = waiting.get("reason") or (
+                ((cs.get("lastState") or {}).get("terminated") or {}).get("reason")
+                or "crash")
+            lines.append(
+                f"  {ns}/{pname}:{cname} reason={reason} "
+                f"restarts={cs.get('restartCount', 0)}")
+            text = _fetch_container_log(ctx, ns, pname, cname)
+            findings = _classify_log_text(text)
+            if findings:
+                for f in findings[:5]:
+                    lines.append(f"    FINDING [{f['id']}]: {f['hint']}")
+                    lines.append(f"      evidence: {f['evidence']}")
+            else:
+                # Last non-empty lines as raw evidence (scrubbed)
+                raw = [ln.strip() for ln in text.splitlines() if ln.strip()]
+                raw = [ln for ln in raw
+                       if not re.search(
+                           r"(SECRET|PASSWORD|TOKEN|AWS_SECRET)\s*[=:]", ln, re.I)]
+                for ln in raw[-4:]:
+                    lines.append(f"      log: {ln[:180]}")
+            if not text.strip():
+                lines.append("      log: (empty — try: kubectl -n %s logs %s -c %s "
+                             "--previous --tail=80)" % (ns, pname, cname))
+    return lines
+
+
 def _pod_container_issues(pod: dict, *, expect_containers: int = 0) -> List[str]:
     """Per-container waiting/terminated reasons + ready-count mismatch."""
     issues: List[str] = []
@@ -2612,8 +2778,8 @@ def _pod_container_issues(pod: dict, *, expect_containers: int = 0) -> List[str]
     return issues
 
 
-def _panel_workload_issues(ctx: Ctx, selector: str, *, expect_containers: int = 0
-                           ) -> List[str]:
+def _panel_workload_issues(ctx: Ctx, selector: str, *, expect_containers: int = 0,
+                           sample_logs: bool = True) -> List[str]:
     issues: List[str] = []
     if not ctx.exists("namespace", _PANEL_NS):
         return [f"{_PANEL_NS} namespace absent"]
@@ -2629,11 +2795,17 @@ def _panel_workload_issues(ctx: Ctx, selector: str, *, expect_containers: int = 
         return issues
     if ctx.pod_image_missing(_PANEL_NS, selector) is True:
         issues.append("ImagePullBackOff/ErrImagePull — image not in closed-world registry")
+    crashy = False
     for p in pods:
         issues.extend(_pod_container_issues(p, expect_containers=expect_containers))
+        if _pod_needs_log_census(p):
+            crashy = True
     drift = _image_drift(ctx, _PANEL_NS, selector)
     if drift:
         issues.append(drift)
+    # Pull logs in-situ when crash/restart — facts stay on the operator console
+    if sample_logs and crashy:
+        issues.extend(_crash_log_census(ctx, _PANEL_NS, selector))
     return issues
 
 
@@ -2709,9 +2881,17 @@ def _panel_live_state(ctx: Ctx) -> str:
         ("app=navigator-engine", "navigator-engine", 1),
     ):
         ready, total = ctx.pods_ready(_PANEL_NS, sel)
-        issues = _panel_workload_issues(ctx, sel, expect_containers=n_expect)
+        # sample_logs=False here — append census once below to avoid double fetch
+        issues = _panel_workload_issues(
+            ctx, sel, expect_containers=n_expect, sample_logs=False)
+        short = [i for i in issues if not i.startswith("IN SITU") and not i.startswith("  ")]
         lines.append(f"  {label}: ready {ready}/{total}"
-                     + (f"  issues=[{'; '.join(issues[:3])}]" if issues else "  OK"))
+                     + (f"  issues=[{'; '.join(short[:3])}]" if short else "  OK"))
+    # In-situ log census for crashy panel pods (facts stay on the operator console)
+    for sel in ("app=otel-navigator", "app=navigator-engine"):
+        log_lines = _crash_log_census(ctx, _PANEL_NS, sel)
+        if log_lines:
+            lines.extend(log_lines)
 
     s3i = _panel_s3_config_issue(ctx)
     if s3i:
