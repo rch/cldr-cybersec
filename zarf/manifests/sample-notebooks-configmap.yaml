@@ -1368,6 +1368,9 @@ data:
             f"load_active_spans_ddf: {len(uris)} parquet under s3://{spans}/ "
             f"(layout≈{layout})\n  sample: {sample}"
         )
+        # Explicit URI list — never pass a glob string to dd.read_parquet.
+        # Glob expansion without path-style + timeouts hangs on custom S3 endpoints
+        # (field notebooks-03: correct date=* path still hung).
         ddf = dd.read_parquet(
             uris,
             storage_options=cfg.storage_options(),
@@ -1381,4 +1384,68 @@ data:
                 f"s3://{spans}/. Check storage_options / credentials; sample={sample}"
             )
         return ddf
+
+
+    def paste_load_spans_cell() -> str:
+        """Return a self-contained cell for *old* in-situ notebooks (no package wait).
+
+        Fixes notebooks-03 hang: old cells call ``dd.read_parquet(glob, storage_options)``
+        without path-style addressing / timeouts, and block forever on custom endpoints.
+        """
+        return r'''# --- SAFE load (paste over hung dd.read_parquet cell) ---
+    # OTEL generator layout: s3://$BUCKET/$PREFIX/spans/date=YYYY-MM-DD/*.parquet
+    # Do NOT pass globs to dd.read_parquet; do NOT omit path-style on custom endpoints.
+    import os, sys
+    for _p in ("/root/sample-notebooks", "/root", "/app"):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+
+    try:
+        from cluster_env import load_cluster_config, list_span_parquet_keys, load_active_spans_ddf
+        CFG = load_cluster_config()
+        print(CFG.summary())
+        keys = list_span_parquet_keys(CFG)
+        print(f"listed {len(keys)} parquet; sample={keys[:3]}")
+        if not keys:
+            raise FileNotFoundError(f"no files under {CFG.spans_prefix_s3}")
+        ddf = load_active_spans_ddf(CFG)
+    except ImportError:
+        # Fallback without cluster_env — still path-style + explicit file list
+        import s3fs
+        import dask.dataframe as dd
+        endpoint = os.environ.get("S3_ENDPOINT") or ""
+        bucket = os.environ.get("S3_BUCKET") or "dhfo"
+        prefix = os.environ.get("OTEL_PREFIX") or "otel-notebook"
+        opts = {
+            "anon": False,
+            "key": os.environ.get("AWS_ACCESS_KEY_ID") or None,
+            "secret": os.environ.get("AWS_SECRET_ACCESS_KEY") or None,
+            "token": os.environ.get("AWS_SESSION_TOKEN") or None,
+        }
+        if endpoint:
+            opts["client_kwargs"] = {"endpoint_url": endpoint, "region_name": os.environ.get("AWS_REGION", "us-east-1")}
+            opts["config_kwargs"] = {
+                "s3": {"addressing_style": "path"},
+                "connect_timeout": 5,
+                "read_timeout": 30,
+                "retries": {"max_attempts": 2, "mode": "standard"},
+            }
+        fs = s3fs.S3FileSystem(**opts)
+        spans = f"{bucket}/{prefix}/spans"
+        print(f"listing s3://{spans}/ (find, no glob)…")
+        keys = [k for k in fs.find(spans) if str(k).endswith(".parquet")]
+        print(f"found {len(keys)}; sample={keys[:3]}")
+        if not keys:
+            # date-only generator layout
+            keys = [k for k in (fs.glob(f"{spans}/date=*/*.parquet") or []) if str(k).endswith(".parquet")]
+            print(f"glob date=*/* → {len(keys)}")
+        if not keys:
+            raise FileNotFoundError(f"no parquet under s3://{spans}/date=*/*.parquet")
+        uris = [f"s3://{k}" if not str(k).startswith("s3://") else k for k in keys]
+        ddf = dd.read_parquet(uris, storage_options=opts, engine="pyarrow")
+
+    print("partitions", ddf.npartitions, "columns", list(ddf.columns))
+    assert list(ddf.columns), "columns=[] — still path/creds; not schema"
+    ddf
+    '''
 
