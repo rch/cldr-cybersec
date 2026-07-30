@@ -237,47 +237,81 @@ def require_parquet_stack() -> dict:
     return info
 
 
+# ---------------------------------------------------------------------------
+# O(files) discovery wall (field notebooks, 2026-07-30)
+# ---------------------------------------------------------------------------
+# Silent client-side grind (Dask dashboard empty until the first task renders):
+#   1. recursive listing of every partition dir (sequential LISTs, high latency)
+#   2. graph construction / optimization over one task per file
+#   3. shipping a huge graph to the scheduler
+# At dozens of files it's invisible; at months × many files/day it is minutes
+# before workers start — then overhead-dominated tiny tasks.
+#
+# Near-term cures (escalating):
+#   • Prune BEFORE discovery — narrow the root (date=YYYY-MM-DD/), not only
+#     filters= after a full tree walk.
+#   • List ONCE (fs.find on that root) and hand the file list to read_parquet
+#     (otel-navigator enumerate-window-read pattern).
+#   • Fatten tasks — aggregate_files=True / blocksize so small files merge.
+#   • ddf.persist() if iterating — pay discovery+load once.
+#
+# Strategic: Iceberg/metadata plane (#42–45) replaces O(files) listing with
+# manifest-based planning. Explicit-list keeps notebooks snappy until then.
+
+
 def list_span_parquet_keys(
     cfg: Optional[ClusterConfig] = None,
     *,
+    under: Optional[str] = None,
+    date: Optional[str] = None,
     max_list: int = 500_000,
 ) -> list:
-    """List parquet object keys under ``{bucket}/{prefix}/spans/`` (recursive).
+    """List parquet keys under spans/ — **one recursive find**, optionally pruned.
 
-    Layouts (in priority order for discovery):
-      1. **OTEL_Data_Generator (pyarrow notebook)** — ``spans/date=YYYY-MM-DD/*.parquet``
-         (no hour= partition; batch_*.parquet directly under date=)
-      2. Production-style — ``spans/date=*/hour=*/*.parquet``
+    Layouts:
+      1. OTEL_Data_Generator — ``spans/date=YYYY-MM-DD/*.parquet`` (no hour=)
+      2. Production — ``spans/date=*/hour=*/*.parquet``
       3. Shard layouts — ``spans/shard=*/date=*/…``
 
-    Prefer ``find()`` then explicit globs. Never use ``**`` (s3fs often empty).
+    Args:
+      under: object-store prefix to list (default ``{bucket}/{otel_prefix}/spans``).
+             Narrow here to prune listing (e.g. ``…/spans/date=2026-07-01``).
+      date:  convenience — appends ``/date={date}`` under the default spans root.
+             Prefer this over ``filters=[("date",…)]`` on a wide root: filters=
+             only prune reads *after* full discovery.
+
+    Never use per-directory ``ls`` loops as the primary path (O(partitions) RTT).
+    Never use ``**`` globs (s3fs often empty / pathological).
     """
     import s3fs
 
     cfg = cfg or load_cluster_config()
     fs = s3fs.S3FileSystem(**cfg.storage_options())
-    root = cfg.dataset_root_key
-    spans = f"{root.rstrip('/')}/spans"
-    files: list = []
+    root = cfg.dataset_root_key.rstrip("/")
+    spans = f"{root}/spans"
+    if under:
+        list_root = under.replace("s3://", "").rstrip("/")
+    elif date:
+        list_root = f"{spans}/date={date}"
+    else:
+        list_root = spans
 
-    # 1) Recursive find under spans/ (covers date-only and date/hour trees)
+    files: list = []
+    # Single recursive LIST (paginated) — preferred over N× per-date ls
     try:
-        if fs.exists(spans):
-            found = fs.find(spans)
+        if fs.exists(list_root):
+            found = fs.find(list_root)
             files = [e for e in found if str(e).endswith(".parquet")]
-    except Exception:
+    except Exception as e:
+        print(f"list_span_parquet_keys: find({list_root!r}) failed: {e}")
         files = []
 
-    # 2) Explicit globs — notebook generator first (date=*/*.parquet, no hour=)
-    if not files:
+    # Fallback globs only if find returned nothing (empty or odd FS)
+    if not files and list_root.rstrip("/").endswith("/spans"):
         for pat in (
-            f"{spans}/date=*/*.parquet",  # OTEL_Data_Generator notebook
-            f"{spans}/date=*/batch_*.parquet",
-            f"{spans}/date=*/hour=*/*.parquet",  # production / 1TB style
-            f"{spans}/date=*/*/*.parquet",
-            f"{spans}/shard=*/date=*/*.parquet",
-            f"{spans}/shard=*/date=*/batch_*.parquet",
-            f"{spans}/shard=*/date=*/*/*.parquet",
+            f"{list_root}/date=*/*.parquet",
+            f"{list_root}/date=*/hour=*/*.parquet",
+            f"{list_root}/shard=*/date=*/*.parquet",
         ):
             try:
                 hits = [h for h in (fs.glob(pat) or []) if str(h).endswith(".parquet")]
@@ -286,30 +320,20 @@ def list_span_parquet_keys(
             if hits:
                 files = hits
                 break
-
-    # 3) One-level ls of each date= partition (robust when glob is picky)
-    if not files:
+    elif not files and "/date=" in list_root:
         try:
-            date_dirs = fs.glob(f"{spans}/date=*") or []
-            for d in date_dirs:
-                try:
-                    for name in fs.ls(d):
-                        if str(name).endswith(".parquet"):
-                            files.append(name)
-                        else:
-                            # hour= subdir
-                            try:
-                                for sub in fs.ls(name):
-                                    if str(sub).endswith(".parquet"):
-                                        files.append(sub)
-                            except Exception:
-                                pass
-                except Exception:
-                    continue
+            files = [
+                h for h in (fs.glob(f"{list_root}/*.parquet") or [])
+                if str(h).endswith(".parquet")
+            ]
         except Exception:
-            pass
+            files = []
 
     if len(files) > max_list:
+        print(
+            f"list_span_parquet_keys: truncating {len(files)} → {max_list} "
+            f"(pass max_list= or narrow date=/under=)"
+        )
         files = files[:max_list]
     return files
 
@@ -319,6 +343,10 @@ def load_active_spans_ddf(
     *,
     columns: Optional[list] = None,
     require_dask: bool = True,
+    date: Optional[str] = None,
+    under: Optional[str] = None,
+    aggregate_files: bool = True,
+    persist: bool = False,
 ):
     """Lazy Dask DataFrame over partitioned span parquet — never full pyarrow load.
 
@@ -326,8 +354,16 @@ def load_active_spans_ddf(
 
         s3://{bucket}/{prefix}/spans/date=YYYY-MM-DD/batch_*.parquet
 
-    (date= only — no hour=). Also accepts production date=/hour= trees.
+    Near-term anti-O(files) pattern (see module note above)::
+
+        # prune listing to one day, fatten partitions, optional persist
+        ddf = load_active_spans_ddf(date="2026-07-01", aggregate_files=True)
+        ddf = ddf.persist()   # if iterating
+
+    ``filters=`` on a wide ``spans/`` root is *not* enough — discovery still
+    walks every partition. Use ``date=`` / ``under=`` to prune the LIST.
     """
+    import time
     import dask.dataframe as dd
 
     stack = require_parquet_stack()
@@ -341,40 +377,57 @@ def load_active_spans_ddf(
         raise RuntimeError("USE_DASK=0 but load_active_spans_ddf requires Dask for large data")
 
     spans = f"{cfg.dataset_root_key.rstrip('/')}/spans"
-    files = list_span_parquet_keys(cfg)
+    t0 = time.time()
+    files = list_span_parquet_keys(cfg, under=under, date=date)
+    t_list = time.time() - t0
     if not files:
+        scope = under or (f"{spans}/date={date}" if date else spans)
         raise FileNotFoundError(
-            f"no parquet under s3://{spans}/.\n"
-            f"OTEL_Data_Generator writes: s3://{spans}/date=YYYY-MM-DD/*.parquet\n"
-            f"(date= only — no hour=). Not validation-30gb; not date=*/**/*.\n"
-            f"Empty columns after a bad glob is PATH drift, not schema drift.\n"
-            f"Fix: OTEL_DATA_PATH / prefix so root is …/otel-notebook/spans/."
+            f"no parquet under s3://{scope}/.\n"
+            f"OTEL_Data_Generator: s3://{spans}/date=YYYY-MM-DD/*.parquet "
+            f"(date= only — no hour=).\n"
+            f"Prune with date='YYYY-MM-DD' or under='bucket/prefix/spans/date=…'."
         )
     uris = [f"s3://{f}" if not str(f).startswith("s3://") else str(f) for f in files]
     sample = uris[:3]
-    # Detect layout for operator feedback
-    layout = "date=/*.parquet"
-    if any("/hour=" in u for u in sample):
-        layout = "date=/hour=/*.parquet"
+    layout = "date=/hour=/*" if any("/hour=" in u for u in sample) else "date=/*"
     print(
-        f"load_active_spans_ddf: {len(uris)} parquet under s3://{spans}/ "
-        f"(layout≈{layout})\n  sample: {sample}"
+        f"load_active_spans_ddf: listed {len(uris)} files in {t_list:.1f}s "
+        f"(layout≈{layout}) under s3://{spans}/"
+        f"{' date='+date if date else ''}\n  sample: {sample}"
     )
-    # Explicit URI list — never pass a glob string to dd.read_parquet.
-    # Glob expansion without path-style + timeouts hangs on custom S3 endpoints
-    # (field notebooks-03: correct date=* path still hung).
-    ddf = dd.read_parquet(
-        uris,
-        storage_options=cfg.storage_options(),
-        columns=columns,
-        engine="pyarrow",
-    )
+    if len(uris) > 500:
+        print(
+            f"  ⚠ {len(uris)} files → client graph construction can dominate "
+            f"(dashboard empty until first task). Prefer date=/under= prune + "
+            f"aggregate_files; durable fix is Iceberg/metadata plane (#42–45)."
+        )
+
+    # Explicit URI list (otel-navigator pattern). aggregate_files fattens tiny tasks.
+    t1 = time.time()
+    kwargs: dict = {
+        "storage_options": cfg.storage_options(),
+        "columns": columns,
+        "aggregate_files": aggregate_files,
+    }
+    try:
+        ddf = dd.read_parquet(uris, **kwargs)
+    except TypeError:
+        # older dask without aggregate_files
+        kwargs.pop("aggregate_files", None)
+        ddf = dd.read_parquet(uris, **kwargs)
+    t_graph = time.time() - t1
+    print(f"  graph built in {t_graph:.1f}s  partitions={ddf.npartitions}")
+
     cols = list(getattr(ddf, "columns", []) or [])
     if not cols:
         raise RuntimeError(
-            f"dd.read_parquet returned columns=[] for {len(uris)} files under "
-            f"s3://{spans}/. Check storage_options / credentials; sample={sample}"
+            f"dd.read_parquet returned columns=[] for {len(uris)} files; "
+            f"sample={sample}"
         )
+    if persist:
+        ddf = ddf.persist()
+        print("  persisted to workers (subsequent aggs skip rediscovery/reload)")
     return ddf
 
 
@@ -434,7 +487,7 @@ except ImportError:
     if not keys:
         raise FileNotFoundError(f"no parquet under s3://{spans}/date=*/*.parquet")
     uris = [f"s3://{k}" if not str(k).startswith("s3://") else k for k in keys]
-    ddf = dd.read_parquet(uris, storage_options=opts, engine="pyarrow")
+    ddf = dd.read_parquet(uris, storage_options=opts)
 
 print("partitions", ddf.npartitions, "columns", list(ddf.columns))
 assert list(ddf.columns), "columns=[] — still path/creds; not schema"
