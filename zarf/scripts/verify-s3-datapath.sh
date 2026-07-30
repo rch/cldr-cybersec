@@ -238,55 +238,151 @@ try:
 except Exception as e:
     die(1, f"cannot list bucket {bucket!r}: {type(e).__name__}: {e}", **info)
 
-# --- active dataset marker (same as otel-navigator.get_active_dataset) ---
-marker_key = f"{bucket}/_active_dataset.json"
-try:
-    if not fs.exists(marker_key):
-        die(1, f"marker missing: s3://{marker_key} — generate spans or copy marker "
-               f"(OTEL_Data_Generator notebook / generate-otel-data.py)", **info)
-    with fs.open(marker_key, "r") as f:
-        marker = json.load(f)
-except Exception as e:
-    die(1, f"cannot read marker s3://{marker_key}: {e}", **info)
+# --- resolve data root (marker dataset and/or OTEL_DATA_PATH) ---
+# App loads s3://{bucket}/{dataset}/spans/… (partitioned), never only top-level
+# of OTEL_DATA_PATH. Field: OTEL_DATA_PATH=s3://dhfo/otel-notebook/ with parquet
+# under otel-notebook/spans/date=*/hour=*/*.parquet.
+def _s3_key_from_uri(uri: str, default_bucket: str) -> str:
+    """s3://b/prefix/ → b/prefix  (no leading/trailing slash on prefix side)."""
+    u = (uri or "").strip()
+    if u.startswith("s3://"):
+        rest = u[5:].strip("/")
+        return rest
+    return f"{default_bucket}/{u.strip('/')}" if u else default_bucket
 
-dataset = marker.get("dataset") or marker.get("prefix")
-if not dataset:
-    die(1, "marker has no 'dataset' key", marker=marker, **info)
-
-info["marker"] = {
-    "dataset": dataset,
-    "phase": marker.get("phase"),
-    "total_spans": marker.get("total_spans", marker.get("span_count")),
-    "updated_at": marker.get("updated_at"),
-}
-info["dataset_path"] = f"s3://{bucket}/{dataset}/"
-
-# --- span parquet under the active dataset (app loads …/spans/) ---
-# Layouts seen in field: {dataset}/spans/date=…/hour=…/*.parquet
-#                        {dataset}/spans/shard=…/date=…/*.parquet
-patterns = [
-    f"{bucket}/{dataset}/spans/**/*.parquet",
-    f"{bucket}/{dataset}/**/spans/**/*.parquet",
-    f"{bucket}/{dataset}/**/*.parquet",
-]
-files = []
-for pat in patterns:
+def _dataset_roots():
+    """Ordered unique roots to search (bucket/prefix without trailing slash)."""
+    roots = []
+    # 1) marker at bucket root (same as otel-navigator.get_active_dataset)
+    marker_key = f"{bucket}/_active_dataset.json"
+    marker = None
     try:
-        found = fs.glob(pat)
-    except Exception:
-        found = []
-    if found:
-        files = list(found)
-        info["glob_pattern"] = pat
+        if fs.exists(marker_key):
+            with fs.open(marker_key, "r") as f:
+                marker = json.load(f)
+    except Exception as e:
+        die(1, f"cannot read marker s3://{marker_key}: {e}", **info)
+    if marker is not None:
+        ds = (marker.get("dataset") or marker.get("prefix") or "").strip().strip("/")
+        if ds:
+            roots.append(f"{bucket}/{ds}")
+            info["marker"] = {
+                "dataset": ds,
+                "phase": marker.get("phase"),
+                "total_spans": marker.get("total_spans", marker.get("span_count")),
+                "updated_at": marker.get("updated_at"),
+            }
+        else:
+            info["marker_warning"] = "marker has no dataset/prefix key"
+    else:
+        info["marker_warning"] = f"marker missing s3://{marker_key}"
+    # 2) OTEL_DATA_PATH from ConfigMap (may be s3://bucket/otel-notebook/)
+    if cfg_path:
+        root = _s3_key_from_uri(cfg_path, bucket)
+        if root and root not in roots:
+            # If path is just the bucket, skip; need a dataset prefix
+            if root != bucket and root != f"{bucket}/":
+                roots.append(root.rstrip("/"))
+    # de-dupe preserve order
+    seen = set()
+    out_roots = []
+    for r in roots:
+        r = r.rstrip("/")
+        if r and r not in seen:
+            seen.add(r)
+            out_roots.append(r)
+    return out_roots
+
+def _find_span_parquet(data_root: str):
+    """Parquet under {root}/spans/ only (partitioned layout), not top-level of root.
+
+    Mirrors otel-navigator.load_span_data: always append /spans, then partition globs.
+    s3fs ** is unreliable — use find() + explicit partition patterns.
+    """
+    spans = f"{data_root.rstrip('/')}/spans"
+    found = []
+    method = None
+    # Explicit layouts (same order as otel-navigator)
+    patterns = [
+        f"{spans}/shard=*/date=*/batch_*.parquet",
+        f"{spans}/shard=*/date=*/*.parquet",
+        f"{spans}/date=*/hour=*/*.parquet",
+        f"{spans}/date=*/*.parquet",
+        f"{spans}/date=*/hour=*/**/*.parquet",
+    ]
+    for pat in patterns:
+        try:
+            hits = list(fs.glob(pat) or [])
+        except Exception:
+            hits = []
+        hits = [h for h in hits if str(h).endswith(".parquet")]
+        if hits:
+            found, method = hits, f"glob:{pat}"
+            break
+    if not found:
+        try:
+            # Recursive listing under spans/ only (never dataset top-level)
+            entries = fs.find(spans) if fs.exists(spans) else []
+            found = [e for e in entries if str(e).endswith(".parquet")]
+            if found:
+                method = f"find:{spans}"
+        except Exception:
+            found = []
+    return found, spans, method
+
+roots = _dataset_roots()
+if not roots:
+    die(1, "no data root: need _active_dataset.json dataset=… and/or OTEL_DATA_PATH "
+           "with a prefix (e.g. s3://bucket/otel-notebook/)", **info)
+
+files = []
+chosen_root = None
+spans_path = None
+for root in roots:
+    hits, spans_p, method = _find_span_parquet(root)
+    info.setdefault("roots_tried", []).append({
+        "root": f"s3://{root}/",
+        "spans": f"s3://{spans_p}/",
+        "parquet": len(hits),
+        "method": method,
+    })
+    if hits:
+        files = hits
+        chosen_root = root
+        spans_path = spans_p
+        info["glob_pattern"] = method
         break
+
+if not chosen_root:
+    r0 = roots[0]
+    msg = (
+        f"no parquet under s3://{r0}/spans/ (partitioned layout required: "
+        f"spans/date=*/hour=*/*.parquet or spans/shard=*/date=*/*.parquet) — "
+        f"parquet only at top-level of OTEL_DATA_PATH is NOT enough"
+    )
+    if allow_empty:
+        info["ok"] = True
+        info["parquet_count"] = 0
+        info["warning"] = msg
+        print(json.dumps(info))
+        sys.exit(0)
+    die(1, msg, **info)
+
+info["dataset_path"] = f"s3://{chosen_root}/"
+info["spans_path"] = f"s3://{spans_path}/"
+ds_name = chosen_root[len(bucket):].lstrip("/") if chosen_root.startswith(bucket) else chosen_root
+if not isinstance(info.get("marker"), dict):
+    info["marker"] = {"dataset": ds_name}
+elif not info["marker"].get("dataset"):
+    info["marker"]["dataset"] = ds_name
 
 info["parquet_count"] = len(files)
 info["parquet_sample"] = files[:5]
 
 if len(files) < min_pq and not allow_empty:
     die(1,
-        f"found {len(files)} parquet under s3://{bucket}/{dataset}/ "
-        f"(need ≥{min_pq}) — spans not present or wrong prefix",
+        f"found {len(files)} parquet under s3://{spans_path}/ "
+        f"(need ≥{min_pq}) — check partitioned spans layout under dataset root",
         **info)
 
 # --- open first object (read path, not just list) ---
@@ -383,7 +479,9 @@ print("  active dataset:     ", m.get("dataset"))
 print("  marker phase:       ", m.get("phase"))
 print("  marker spans:       ", m.get("total_spans"))
 print("  dataset_path:       ", d.get("dataset_path"))
+print("  spans_path:         ", d.get("spans_path"))
 print("  parquet_count:      ", d.get("parquet_count"))
+print("  discovery:          ", d.get("glob_pattern"))
 print("  sample_readable:    ", d.get("sample_readable"))
 if d.get("parquet_sample"):
     print("  sample keys:")

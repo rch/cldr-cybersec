@@ -3531,28 +3531,73 @@ try:
     fs.ls(bucket)
 except Exception as e:
     out["error"] = f"list bucket: {type(e).__name__}: {e}"; print(json.dumps(out)); sys.exit(1)
+# Data root: marker dataset and/or OTEL_DATA_PATH. Parquet lives under
+# {root}/spans/ with partitions (date=/hour= or shard=/date=) — never only
+# at the top level of OTEL_DATA_PATH (field: s3://dhfo/otel-notebook/spans/…).
+cfg = (os.environ.get("OTEL_DATA_PATH") or os.environ.get("CHECK_CFG_PATH") or "").strip()
+roots = []
 mk = f"{bucket}/_active_dataset.json"
-if not fs.exists(mk):
-    out["error"] = f"marker missing s3://{mk}"; print(json.dumps(out)); sys.exit(1)
-with fs.open(mk, "r") as f:
-    marker = json.load(f)
-ds = marker.get("dataset") or marker.get("prefix")
-if not ds:
-    out["error"] = "marker has no dataset"; print(json.dumps(out)); sys.exit(1)
-files = []
-for pat in (f"{bucket}/{ds}/spans/**/*.parquet",
-            f"{bucket}/{ds}/**/spans/**/*.parquet",
-            f"{bucket}/{ds}/**/*.parquet"):
+if fs.exists(mk):
+    with fs.open(mk, "r") as f:
+        marker = json.load(f)
+    ds = (marker.get("dataset") or marker.get("prefix") or "").strip().strip("/")
+    if ds:
+        roots.append(f"{bucket}/{ds}")
+        out["dataset"] = ds
+    else:
+        out["marker_warning"] = "no dataset key"
+else:
+    out["marker_warning"] = f"missing {mk}"
+if cfg.startswith("s3://"):
+    root = cfg[5:].strip("/")
+    if root and root != bucket and root not in roots:
+        roots.append(root)
+if not roots:
+    out["error"] = "no data root (marker dataset and/or OTEL_DATA_PATH prefix)"
+    print(json.dumps(out)); sys.exit(1)
+
+def find_span_pq(data_root):
+    spans = data_root.rstrip("/") + "/spans"
+    for pat in (
+        spans + "/shard=*/date=*/batch_*.parquet",
+        spans + "/shard=*/date=*/*.parquet",
+        spans + "/date=*/hour=*/*.parquet",
+        spans + "/date=*/*.parquet",
+    ):
+        try:
+            hits = [h for h in (fs.glob(pat) or []) if str(h).endswith(".parquet")]
+        except Exception:
+            hits = []
+        if hits:
+            return hits, spans, "glob:" + pat
     try:
-        files = list(fs.glob(pat)) or []
+        if fs.exists(spans):
+            hits = [e for e in fs.find(spans) if str(e).endswith(".parquet")]
+            if hits:
+                return hits, spans, "find:" + spans
     except Exception:
-        files = []
-    if files:
+        pass
+    return [], spans, None
+
+files, spans_path, method = [], None, None
+for root in roots:
+    hits, sp, method = find_span_pq(root)
+    if hits:
+        files, spans_path = hits, sp
+        out["dataset_path"] = "s3://" + root.rstrip("/") + "/"
+        out["spans_path"] = "s3://" + sp + "/"
+        out["glob_pattern"] = method
+        if "dataset" not in out:
+            out["dataset"] = root[len(bucket):].lstrip("/") if root.startswith(bucket) else root
         break
-out["dataset"] = ds
 out["parquet_count"] = len(files)
 if not files:
-    out["error"] = f"no parquet under s3://{bucket}/{ds}/"; print(json.dumps(out)); sys.exit(1)
+    out["error"] = (
+        f"no parquet under s3://{roots[0]}/spans/ "
+        f"(need spans/date=*/hour=*/*.parquet or spans/shard=*/date=*/*.parquet; "
+        f"top-level of OTEL_DATA_PATH is not enough)"
+    )
+    print(json.dumps(out)); sys.exit(1)
 with fs.open(files[0], "rb") as f:
     f.read(64)
 out["ok"] = True
