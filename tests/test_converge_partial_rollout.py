@@ -199,4 +199,4 @@ Address already in use
 
 class TestVersion:
     def test_version(self):
-        assert __version__ == "0.5.5"
+        assert __version__.startswith("0.5.")

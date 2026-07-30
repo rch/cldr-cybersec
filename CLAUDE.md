@@ -2,6 +2,32 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Portable paths (air-gap converge) — HARD RULE
+
+**Never encode site-specific filesystem layouts into converge code.**
+
+Field nodes use different mounts, homes, and directory names. Paths observed on
+one host (`/mnt/…`, `DHFO_*`, `/home/<user>/…`, hostnames) are **not portable**
+and must not be copied into:
+
+- `zarf/scripts/converge-node.sh` (or other converge entrypoints)
+- `zarf/converge/*.py` path discovery / package search
+
+**Allowed package location sources only:**
+
+1. **Operator argv** — absolute or relative path they pass (always preferred)
+2. **Co-location** — same directory as `converge-node.sh`, or **CWD** they run from
+3. **Portable convention** — `/var/tmp` (optional staging; not required)
+
+Do **not** add: `/mnt/**` globs, site product names, remote home directories, or
+“fallback discovery” that walks foreign trees by mtime.
+
+Credentials stay **on the operator’s node only** — never invent remote home paths
+for `CONVERGE_CREDS_FILE` or paste secret material into commits/docs.
+
+Guard: `tests/test_converge_portable_paths.py` fails CI/local test if forbidden
+patterns reappear in converge scripts/modules.
+
 ## Project Overview
 
 **Cyberphy** (product) is a CPS observability and analytics platform: OpenTelemetry from the plant floor and the platform itself, through Flink/NiFi, into an Iceberg lakehouse (Polaris + S3/RustFS), with air-gap delivery via Zarf.
