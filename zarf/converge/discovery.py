@@ -1,4 +1,4 @@
-"""Cluster-wide discovery and Layer-B vestige sweep.
+"""Cluster-wide discovery and Layer-B vestige / partial-rollout sweep.
 
 Design intent (CADS — comprehensive anticipatory):
   * Every ``apply`` pass **always** re-walks entry points on the RKE2 instance:
@@ -7,6 +7,10 @@ Design intent (CADS — comprehensive anticipatory):
   * Relationships are followed to root cause (mount → PVC → PV; ownerRef chain;
     finalizers blocking deletion; helm pending blocking upgrade).
   * Vestigial **Layer-B** husks are eliminated when they block convergence.
+  * **Partial rollout artifacts** (FSM- or zarf-started intermediate state) are
+    detected and unwound **when the functional surface is not fully Ready** —
+    so converge remains valid from every intermediate state. Unwinds stay
+    Layer-B only and idempotent (no-op on a healthy surface).
   * **Layer-A** is never destroyed: no image prune, no hostPath registry data wipe,
     no deletion of zarf-init package / zarf binary, no crictl rmi.
 
@@ -24,6 +28,8 @@ from .kube import Ctx
 # Pending pods older than this become wedges (eviction fallout that never resumed).
 # Age is computed from pod metadata.creationTimestamp (kubectl/API SoR — not a journal).
 _PENDING_GRACE_S = 300
+# Workloads that never became Available within this age are partial-rollout wedges.
+_STALL_GRACE_S = 180
 
 # --------------------------------------------------------------------------- #
 # Scope: what we own vs what we must not touch
@@ -66,6 +72,23 @@ LAYER_A_PROTECTED = (
 _IMAGE_WAIT_BAD = ("ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull")
 _HELM_PENDING = ("pending-install", "pending-upgrade", "pending-rollback")
 _POD_JUNK_PHASES = ("Failed", "Evicted", "Unknown")
+
+# Functional surface: package workloads that must read Ready for "converged".
+# Each entry: (namespace, alternative label selectors, min_ready).
+# Absent namespace is "not ready" only after zarf init / first apply has created it
+# — surface assessment treats missing ns as a gap only when *other* surface parts
+# exist (partial rollout), not on a clean slate.
+_FUNCTIONAL_SURFACE: Tuple[Tuple[str, Tuple[str, ...], int], ...] = (
+    (PLATFORM_NS, (
+        "app=docker-registry",
+        "app.kubernetes.io/name=docker-registry",
+        "app.kubernetes.io/name=zarf-docker-registry",
+    ), 1),
+    ("dask-operator", ("app.kubernetes.io/name=dask-kubernetes-operator",), 1),
+    ("dask", ("dask.org/component=scheduler",), 1),
+    ("panel-viz", ("app=otel-navigator",), 1),
+    ("jupyterhub", ("component=hub",), 1),
+)
 
 
 @dataclass
@@ -637,12 +660,344 @@ def _is_zarf_husk(ctx: Ctx) -> Optional[str]:
     return None
 
 
-def sweep_vestiges(ctx: Ctx, *, dry_run: bool = False) -> List[str]:
-    """Eliminate Layer-B vestiges that block convergence. Never touches Layer-A.
+# --------------------------------------------------------------------------- #
+# Functional surface + partial-rollout classification
+# --------------------------------------------------------------------------- #
 
-    Safe on a healthy cluster: if registry Ready and app pods Ready, actions ≈ [].
+def _pods_ready_any(ctx: Ctx, ns: str, selectors: Sequence[str]) -> Tuple[int, int]:
+    """(ready, total) for the first selector that matches any pods."""
+    best = (0, 0)
+    for sel in selectors:
+        r, t = ctx.pods_ready(ns, sel)
+        if t > best[1]:
+            best = (r, t)
+        if r >= 1:
+            return r, t
+    return best
+
+
+def functional_surface(ctx: Ctx) -> dict:
+    """Whether the package functional surface is Ready across the board.
+
+    Used to decide **deep** partial-rollout unwind: when the surface is not
+    fully Ready, intermediate FSM/zarf artifacts (failed helm revs, stalled
+    Deployments, Failed Jobs, …) are wedges that must be cleared before the
+    next remediate pass is valid. When every surface check is Ready, deep
+    unwind no-ops (only always-safe vestiges run).
+
+    Returns dict: ready (bool), issues (list[str]), checks (list[dict]).
+    """
+    issues: List[str] = []
+    checks: List[dict] = []
+    any_ns = False
+    for ns, selectors, need in _FUNCTIONAL_SURFACE:
+        ns_obj = ctx.get("namespace", ns)
+        if not ns_obj:
+            checks.append({"ns": ns, "ready": 0, "total": 0, "absent": True})
+            continue
+        any_ns = True
+        ready, total = _pods_ready_any(ctx, ns, selectors)
+        checks.append({
+            "ns": ns, "ready": ready, "total": total, "absent": False,
+            "ok": ready >= need,
+        })
+        if ready < need:
+            issues.append(f"{ns}: ready={ready}/{total} (need ≥{need})")
+    # Clean slate (no managed ns at all) is not a "partial rollout" — no deep
+    # unwind yet; first apply creates state. Surface not ready when we have
+    # some stack but not full Ready.
+    if not any_ns:
+        return {"ready": False, "issues": ["no managed namespaces yet (pre-deploy)"],
+                "checks": checks, "partial": False}
+    partial = bool(issues)
+    return {
+        "ready": not issues,
+        "issues": issues,
+        "checks": checks,
+        "partial": partial,
+    }
+
+
+def _helm_release_index(ctx: Ctx) -> List[dict]:
+    """Index helm release secrets → one row per (ns, release name).
+
+    Each row:
+      ns, name, latest_ver, latest_status, latest_secret,
+      history: set of statuses, secrets: [(ver, secret_name, status), ...]
+    """
+    obj = ctx.kjson(["get", "secrets", "-A", "-l", "owner=helm"]) or {}
+    by: Dict[Tuple[str, str], dict] = {}
+    for s in obj.get("items", []) or []:
+        md = s.get("metadata", {}) or {}
+        lab = md.get("labels", {}) or {}
+        ns = md.get("namespace") or ""
+        rel = lab.get("name") or ""
+        if not ns or not rel:
+            continue
+        try:
+            ver = int(lab.get("version", 0))
+        except (TypeError, ValueError):
+            continue
+        status = lab.get("status") or ""
+        secret = md.get("name") or ""
+        key = (ns, rel)
+        row = by.setdefault(key, {
+            "ns": ns, "name": rel,
+            "latest_ver": -1, "latest_status": "", "latest_secret": "",
+            "history": set(), "secrets": [],
+        })
+        row["history"].add(status)
+        row["secrets"].append((ver, secret, status))
+        if ver > row["latest_ver"]:
+            row["latest_ver"] = ver
+            row["latest_status"] = status
+            row["latest_secret"] = secret
+    return list(by.values())
+
+
+def classify_helm_release(row: dict) -> str:
+    """Return pending | dead | interrupted | ok | other for a helm release index row."""
+    status = row.get("latest_status") or ""
+    hist = row.get("history") or set()
+    if status in _HELM_PENDING:
+        return "pending"
+    if status == "failed" and not (hist & {"deployed", "superseded"}):
+        return "dead"
+    if status == "failed" and (hist & {"deployed", "superseded"}):
+        return "interrupted"
+    if status in ("deployed", "superseded", "uninstalled"):
+        return "ok"
+    return "other"
+
+
+def _age_s_from_meta(obj: dict) -> Optional[float]:
+    ts = (obj.get("metadata") or {}).get("creationTimestamp")
+    if not ts:
+        return None
+    try:
+        # RFC3339
+        if ts.endswith("Z"):
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        else:
+            dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def _deployment_progress_failed(dep: dict) -> bool:
+    for c in (dep.get("status") or {}).get("conditions") or []:
+        if c.get("type") == "Progressing" and c.get("status") == "False":
+            if c.get("reason") == "ProgressDeadlineExceeded":
+                return True
+    return False
+
+
+def _deployment_stalled_unavailable(dep: dict) -> bool:
+    """Desired replicas > 0, none available, older than stall grace."""
+    spec = dep.get("spec") or {}
+    status = dep.get("status") or {}
+    desired = spec.get("replicas")
+    if desired is None:
+        desired = 1
+    try:
+        desired = int(desired)
+    except (TypeError, ValueError):
+        desired = 1
+    if desired <= 0:
+        return False
+    avail = status.get("availableReplicas") or 0
+    try:
+        avail = int(avail)
+    except (TypeError, ValueError):
+        avail = 0
+    if avail > 0:
+        return False
+    age = _age_s_from_meta(dep)
+    return age is not None and age > _STALL_GRACE_S
+
+
+def _unwind_helm_partial(ctx: Ctx, *, dry_run: bool) -> List[str]:
+    """Clear helm intermediate states that block the next deploy.
+
+    * pending-* latest → delete that secret (already always-safe)
+    * DEAD (failed only) → delete **all** release secrets (install can restart)
+    * INTERRUPTED (failed latest + prior deployed) → delete **latest failed** only
+      so upgrade can retry from last good revision
     """
     actions: List[str] = []
+    for row in _helm_release_index(ctx):
+        kind = classify_helm_release(row)
+        ns, rel = row["ns"], row["name"]
+        if kind == "pending":
+            name = row["latest_secret"]
+            if dry_run:
+                actions.append(
+                    f"(dry-run) delete pending helm {ns}/{name} ({rel} v{row['latest_ver']})")
+            elif name and ctx.k(["delete", "secret", name, "-n", ns,
+                                "--ignore-not-found"]).returncode == 0:
+                actions.append(
+                    f"unwedged pending Helm {ns}/{rel} v{row['latest_ver']} "
+                    f"({row['latest_status']})")
+        elif kind == "dead":
+            # All revisions failed — wipe release bookkeeping so next zarf install
+            # is not blocked by 'has no deployed releases'.
+            secrets = sorted(row["secrets"], key=lambda x: x[0], reverse=True)
+            deleted = 0
+            for ver, secret, status in secrets:
+                if dry_run:
+                    actions.append(
+                        f"(dry-run) delete DEAD helm secret {ns}/{secret} "
+                        f"({rel} v{ver} {status})")
+                    deleted += 1
+                    continue
+                if secret and ctx.k(["delete", "secret", secret, "-n", ns,
+                                    "--ignore-not-found"]).returncode == 0:
+                    deleted += 1
+            if deleted:
+                actions.append(
+                    f"unwound DEAD helm release {ns}/{rel} "
+                    f"({deleted} failed-only revision secret(s))")
+        elif kind == "interrupted":
+            name = row["latest_secret"]
+            if dry_run:
+                actions.append(
+                    f"(dry-run) delete INTERRUPTED helm latest {ns}/{name} "
+                    f"({rel} v{row['latest_ver']} failed; prior deployed kept)")
+            elif name and ctx.k(["delete", "secret", name, "-n", ns,
+                                "--ignore-not-found"]).returncode == 0:
+                actions.append(
+                    f"unwound INTERRUPTED helm {ns}/{rel} "
+                    f"(dropped failed v{row['latest_ver']}; prior deployed retained)")
+    return actions
+
+
+def _unwind_stalled_workloads(ctx: Ctx, *, dry_run: bool) -> List[str]:
+    """Recycle partial Deployments / Failed Jobs when surface is not Ready.
+
+    Targets FSM- and zarf-created intermediate controllers that will never
+    become Available without a pod recycle or re-create.
+    """
+    actions: List[str] = []
+    for ns in APP_NAMESPACES:
+        if not ctx.exists("namespace", ns):
+            continue
+        for dep in list(ctx.items("deployments", ns=ns)):
+            name = (dep.get("metadata") or {}).get("name")
+            if not name:
+                continue
+            stalled = (_deployment_progress_failed(dep)
+                       or _deployment_stalled_unavailable(dep))
+            if not stalled:
+                continue
+            reason = ("ProgressDeadlineExceeded" if _deployment_progress_failed(dep)
+                      else f"unavailable>{_STALL_GRACE_S}s")
+            if dry_run:
+                actions.append(
+                    f"(dry-run) recycle stalled Deployment {ns}/{name} ({reason})")
+                continue
+            # Prefer label from deployment selector so the RS recreates pods
+            match = ((dep.get("spec") or {}).get("selector") or {}).get("matchLabels") or {}
+            if match:
+                sel = ",".join(f"{k}={v}" for k, v in match.items())
+                if ctx.k(["delete", "pod", "-n", ns, "-l", sel,
+                          "--force", "--grace-period=0", "--wait=false",
+                          "--ignore-not-found"]).returncode == 0:
+                    actions.append(
+                        f"recycled pods for stalled Deployment {ns}/{name} ({reason})")
+                else:
+                    actions.append(
+                        f"attempted recycle stalled Deployment {ns}/{name} ({reason})")
+            else:
+                actions.append(
+                    f"stalled Deployment {ns}/{name} ({reason}) — no selector to recycle")
+
+        # Failed Jobs (helm hooks / one-shot) block some chart re-applies
+        for job in list(ctx.items("jobs", ns=ns)):
+            name = (job.get("metadata") or {}).get("name")
+            status = job.get("status") or {}
+            failed = int(status.get("failed") or 0)
+            succeeded = int(status.get("succeeded") or 0)
+            if failed > 0 and succeeded == 0 and name:
+                if dry_run:
+                    actions.append(f"(dry-run) delete Failed Job {ns}/{name}")
+                elif ctx.k(["delete", "job", name, "-n", ns,
+                            "--wait=false", "--ignore-not-found"]).returncode == 0:
+                    actions.append(f"deleted Failed Job {ns}/{name} (partial rollout)")
+
+        # Zero-replica ReplicaSets left after a failed scale/roll — GC layer-B only
+        for rs in list(ctx.items("replicasets", ns=ns)):
+            name = (rs.get("metadata") or {}).get("name")
+            desired = (rs.get("spec") or {}).get("replicas")
+            try:
+                desired = int(desired if desired is not None else 1)
+            except (TypeError, ValueError):
+                desired = 1
+            status = rs.get("status") or {}
+            replicas = int(status.get("replicas") or 0)
+            age = _age_s_from_meta(rs)
+            if desired == 0 and replicas == 0 and age is not None and age > _STALL_GRACE_S:
+                if dry_run:
+                    actions.append(f"(dry-run) delete orphan ReplicaSet {ns}/{name}")
+                elif name and ctx.k(["delete", "replicaset", name, "-n", ns,
+                                    "--wait=false", "--ignore-not-found"]).returncode == 0:
+                    actions.append(f"deleted orphan ReplicaSet {ns}/{name}")
+    return actions
+
+
+def _unwind_partial_dask_children(ctx: Ctx, *, dry_run: bool) -> List[str]:
+    """If DaskCluster CR exists but scheduler Deployment is missing — partial CR.
+
+    Operator is creation-only; a live CR with no scheduler child is an intermediate
+    that will never heal without CR recycle (handled fully in catalog rem; here we
+    only annotate via action log when dry-run, or strip stuck finalizers).
+    """
+    actions: List[str] = []
+    if not ctx.exists("namespace", "dask"):
+        return actions
+    crs = ctx.items("daskcluster", ns="dask") or ctx.items("daskclusters", ns="dask")
+    if not crs:
+        return actions
+    scheds = ctx.items("deployments", ns="dask", selector="dask.org/component=scheduler")
+    if scheds:
+        return actions
+    for cr in crs:
+        name = (cr.get("metadata") or {}).get("name") or "cybersec-dask"
+        if dry_run:
+            actions.append(
+                f"(dry-run) DaskCluster {name} has no scheduler Deployment "
+                f"(partial — catalog rem will recycle CR)")
+            continue
+        # Do not delete CR here (needs package re-apply path); strip stuck delete
+        if (cr.get("metadata") or {}).get("deletionTimestamp"):
+            if ctx.k(["patch", "daskcluster", name, "-n", "dask", "--type=merge",
+                      "-p", '{"metadata":{"finalizers":null}}']).returncode == 0:
+                actions.append(f"stripped finalizers stuck-deleting DaskCluster/{name}")
+        else:
+            actions.append(
+                f"partial DaskCluster/{name}: no scheduler Deployment "
+                f"(deferred to T4.scheduler rem)")
+    return actions
+
+
+def sweep_vestiges(ctx: Ctx, *, dry_run: bool = False) -> List[str]:
+    """Eliminate Layer-B vestiges + partial-rollout artifacts that block convergence.
+
+    Never touches Layer-A. Safe on a healthy cluster: if the functional surface is
+    fully Ready, deep partial-rollout unwind no-ops and only always-safe vestiges
+    (pending helm, junk pods, Terminating) may act — usually empty.
+
+    When the surface is **not** Ready across the board (partial=True), also unwind:
+      * DEAD / INTERRUPTED helm releases
+      * stalled Deployments (ProgressDeadlineExceeded / long unavailable)
+      * Failed Jobs, orphan zero ReplicaSets
+      * stuck-deleting Dask CR finalizers
+    """
+    actions: List[str] = []
+    surface = functional_surface(ctx)
+    deep = bool(surface.get("partial"))  # some stack present but not fully Ready
 
     def act(msg: str, fn=None) -> None:
         if dry_run:
@@ -652,25 +1007,19 @@ def sweep_vestiges(ctx: Ctx, *, dry_run: bool = False) -> List[str]:
             fn()
         actions.append(msg)
 
-    # 1. Helm pending (all namespaces — bookkeeping only)
-    obj = ctx.kjson(["get", "secrets", "-A", "-l", "owner=helm"]) or {}
-    latest: dict = {}
-    for s in obj.get("items", []):
-        md = s.get("metadata", {}) or {}
-        lab = md.get("labels", {}) or {}
-        try:
-            ver = int(lab.get("version", 0))
-        except (TypeError, ValueError):
-            continue
-        key = (md.get("namespace"), lab.get("name"))
-        if key not in latest or ver > latest[key][0]:
-            latest[key] = (ver, md.get("name"), lab.get("status"))
-    for (ns, rel), (ver, name, status) in latest.items():
-        if status in _HELM_PENDING and ns and name:
-            if dry_run:
-                actions.append(f"(dry-run) delete pending helm {ns}/{name} ({rel} v{ver})")
-            elif ctx.k(["delete", "secret", name, "-n", ns]).returncode == 0:
-                actions.append(f"unwedged pending Helm {ns}/{rel} v{ver} ({status})")
+    # 0. Helm intermediate states — always (pending/dead/interrupted block deploy)
+    actions.extend(_unwind_helm_partial(ctx, dry_run=dry_run))
+
+    # 0b. Deep partial-rollout unwind only when functional surface incomplete.
+    # (Idempotent: fully Ready → skip; partial stack → clear intermediate artifacts.)
+    if deep:
+        more = _unwind_stalled_workloads(ctx, dry_run=dry_run)
+        more += _unwind_partial_dask_children(ctx, dry_run=dry_run)
+        if more:
+            actions.append(
+                "partial-rollout unwind (surface not ready: "
+                + "; ".join(surface["issues"][:4]) + ")")
+            actions.extend(more)
 
     # 2. Agent poison on app namespaces
     for ns in APP_NAMESPACES:

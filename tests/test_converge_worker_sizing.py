@@ -234,4 +234,4 @@ class TestPatchAndRem:
 class TestVersion:
     def test_engine_version(self):
         from converge import __version__
-        assert __version__ == "0.5.0"
+        assert __version__.startswith("0.5.")

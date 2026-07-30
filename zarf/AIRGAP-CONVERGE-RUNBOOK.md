@@ -723,11 +723,19 @@ helm pending secrets → VolumeAttachments → Dask CR finalizers
 **Apply** additionally, **each reconcile pass**:
 
 1. Print discovery (entry → relationship → root condition)
-2. **Vestige sweep** (Layer-B only): pending helm, agent poison labels, Terminating
-   namespaces/PVCs, junk/Failed pods, Service-only husks, Deploy/STS with zero pods,
-   orphan app PVs, stuck VolumeAttachments, stuck Dask CRs
-3. Re-detect **every** invariant (no sticky OK)
-4. Remediate broken Layer-B tiers
+2. **Functional surface** check (registry, operator, scheduler, otel-navigator, hub)
+3. **Vestige + partial-rollout sweep** (Layer-B only):
+   - **Always:** pending / DEAD / INTERRUPTED helm secrets, agent poison labels,
+     Terminating ns/PVCs, junk pods, husks, orphan app PVs, stuck VolumeAttachments,
+     stuck Dask CR finalizers
+   - **When surface not Ready across the board:** stalled Deployments
+     (ProgressDeadlineExceeded / long unavailable), Failed Jobs, orphan zero
+     ReplicaSets, partial DaskCluster (no scheduler child) notes — so every
+     FSM/zarf intermediate is unwound before the next remediate
+4. Re-detect **every** invariant (no sticky OK)
+5. Remediate broken Layer-B tiers
+
+Idempotent: a fully Ready surface makes deep partial-rollout unwind a no-op.
 
 **Never disposed (Layer-A / foundational):** containerd images, `/var/lib/zarf-registry`
 data, zarf binary + init/deploy packages on disk, RKE2 system namespaces. A Bound
