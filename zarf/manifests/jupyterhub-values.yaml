@@ -144,12 +144,16 @@ singleuser:
       fi
       # Seed writable working copies in HOME (ConfigMap mount is read-only)
       if [ -d "$SAMPLES" ]; then
-        for f in "$SAMPLES"/*.ipynb "$SAMPLES"/generate_hdf5.py; do
+        for f in "$SAMPLES"/*.ipynb "$SAMPLES"/generate_hdf5.py "$SAMPLES"/cluster_env.py; do
           [ -f "$f" ] || continue
           base=$(basename "$f")
           # Always refresh from ConfigMap so users get latest samples after redeploy
           cp -f "$f" "${HOME_DIR}/${base}"
         done
+        # Import path for `from cluster_env import …` without PYTHONPATH hacks
+        if [ -f "${HOME_DIR}/cluster_env.py" ]; then
+          export PYTHONPATH="${HOME_DIR}:${PYTHONPATH:-}"
+        fi
         printf '%s\n' \
           'sample-notebooks/ is READ-ONLY (ConfigMap).' \
           'Editable copies are in this folder (/root/*.ipynb) — open those.' \
@@ -212,9 +216,19 @@ singleuser:
     S3_ENDPOINT: "###ZARF_VAR_S3_ENDPOINT###"
     AWS_ACCESS_KEY_ID: "###ZARF_VAR_S3_ACCESS_KEY###"
     AWS_SECRET_ACCESS_KEY: "###ZARF_VAR_S3_SECRET_KEY###"
+    # Optional STS (empty when using long-lived keys)
+    AWS_SESSION_TOKEN: "###ZARF_VAR_S3_SESSION_TOKEN###"
     S3_BUCKET: "###ZARF_VAR_S3_BUCKET###"
-    # Dask scheduler address in same cluster
+    # Region + dataset path — same vars converge patches into panel-viz ConfigMap
+    AWS_REGION: "###ZARF_VAR_S3_REGION###"
+    AWS_DEFAULT_REGION: "###ZARF_VAR_S3_REGION###"
+    S3_REGION: "###ZARF_VAR_S3_REGION###"
+    # s3://$S3_BUCKET/ when unset at package time; operators may set OTEL_DATA_PATH
+    OTEL_DATA_PATH: "s3://###ZARF_VAR_S3_BUCKET###/"
+    # Dask scheduler address in same cluster (aliases for notebook cluster_env)
     DASK_SCHEDULER_ADDRESS: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
+    DASK_SCHEDULER: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
+    USE_DASK: "1"
     # Air-gap: do not load Bokeh/HoloViews JS from cdn.bokeh.org (blank plots otherwise)
     BOKEH_RESOURCES: "inline"
 

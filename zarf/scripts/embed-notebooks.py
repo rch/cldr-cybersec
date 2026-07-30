@@ -21,6 +21,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 NOTEBOOKS_DIR = PROJECT_ROOT / "zarf" / "notebooks"
 GENERATOR_SCRIPT = PROJECT_ROOT / "zarf" / "scripts" / "generate_hdf5.py"
+# Prefer scripts/generate_hdf5.py; fall back to notebooks tree / image copy
+if not GENERATOR_SCRIPT.is_file():
+    GENERATOR_SCRIPT = PROJECT_ROOT / "zarf" / "images" / "sample-notebooks" / "generate_hdf5.py"
+CLUSTER_ENV_SCRIPT = PROJECT_ROOT / "zarf" / "notebooks" / "snippets" / "cluster_env.py"
 OUTPUT_FILE = PROJECT_ROOT / "zarf" / "manifests" / "sample-notebooks-configmap.yaml"
 
 # Notebooks to include (order matters for README table)
@@ -103,14 +107,19 @@ def main():
         full-size parts under ``s3://…/datasets/hdf5/…``. Set ``FORCE_REGENERATE = True``
         (or ``HDF5_FORCE_REGENERATE=1``) only when you want a fresh write.
 
-        ## Environment Variables
+        ## Environment Variables (injected — no notebook edits)
 
-        The following are pre-configured (local lab: RustFS admin/admin, bucket cyberphy):
-        - `DASK_SCHEDULER_ADDRESS`: Dask cluster endpoint
-        - `S3_ENDPOINT`: S3 endpoint (RustFS on lab nodes; empty for AWS)
-        - `S3_BUCKET`: data bucket (default cyberphy in notebooks)
-        - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`: S3 credentials
-        - `HDF5_PROFILE` / `HDF5_FORCE_REGENERATE`: optional CPHY generator overrides
+        JupyterHub singleuser gets these from Zarf vars that **converge** passes
+        (``--creds-file`` / ``S3_*``). Notebooks load them via ``cluster_env.py``:
+
+        - `DASK_SCHEDULER_ADDRESS` / `DASK_SCHEDULER`: in-cluster scheduler
+        - `S3_ENDPOINT`, `S3_BUCKET`, `AWS_REGION` / `S3_REGION`
+        - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`
+        - `OTEL_DATA_PATH` / `OTEL_PREFIX`: dataset root (parquet under ``…/spans/``)
+        - `HDF5_PROFILE` / `HDF5_FORCE_REGENERATE` / `VALIDATION_SPANS` / `USE_ACTIVE_SPANS`
+
+        **Large data:** use Dask only (`dd.read_parquet` / `load_active_spans_ddf`).
+        Do **not** `pyarrow.dataset.to_table()` multi‑GB sets in the kernel.
 
         ## Cluster Resources
 
@@ -149,7 +158,7 @@ def main():
         yaml_parts.append(f"  {nb_name}: |")
         yaml_parts.append(yaml_block_scalar(nb_json))
 
-    # Ship generate_hdf5.py alongside notebooks (ConfigMap mount replaces image dir)
+    # Ship generate_hdf5.py + cluster_env.py (ConfigMap mount → /root/sample-notebooks/)
     if GENERATOR_SCRIPT.is_file():
         gen_text = GENERATOR_SCRIPT.read_text()
         yaml_parts.append("  generate_hdf5.py: |")
@@ -157,6 +166,14 @@ def main():
         print(f"  generate_hdf5.py: {len(gen_text):,} bytes")
     else:
         print(f"Warning: {GENERATOR_SCRIPT} not found — CPHY notebook import may fail", file=sys.stderr)
+
+    if CLUSTER_ENV_SCRIPT.is_file():
+        ce_text = CLUSTER_ENV_SCRIPT.read_text()
+        yaml_parts.append("  cluster_env.py: |")
+        yaml_parts.append(yaml_block_scalar(ce_text))
+        print(f"  cluster_env.py: {len(ce_text):,} bytes")
+    else:
+        print(f"Warning: {CLUSTER_ENV_SCRIPT} not found — notebooks use env fallback", file=sys.stderr)
 
     yaml_content = "\n".join(yaml_parts) + "\n"
 
