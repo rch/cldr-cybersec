@@ -203,6 +203,55 @@ def load_cluster_config() -> ClusterConfig:
     )
 
 
+def list_span_parquet_keys(
+    cfg: Optional[ClusterConfig] = None,
+    *,
+    max_list: int = 500_000,
+) -> list:
+    """List parquet object keys under ``{bucket}/{prefix}/spans/`` (recursive).
+
+    Prefer ``find()`` over ``**`` globs — s3fs/Dask often miss nested hour=
+    partitions with patterns like ``date=*/**/*.parquet`` (field notebooks-02).
+    """
+    import s3fs
+
+    cfg = cfg or load_cluster_config()
+    fs = s3fs.S3FileSystem(**cfg.storage_options())
+    root = cfg.dataset_root_key
+    spans = f"{root.rstrip('/')}/spans"
+    files: list = []
+
+    # 1) Recursive find under spans/ only (most reliable for date=/hour= trees)
+    try:
+        if fs.exists(spans):
+            found = fs.find(spans)
+            files = [e for e in found if str(e).endswith(".parquet")]
+    except Exception:
+        files = []
+
+    # 2) Explicit partition globs (no ** — s3fs is unreliable with **)
+    if not files:
+        for pat in (
+            f"{spans}/date=*/hour=*/*.parquet",
+            f"{spans}/date=*/*/*.parquet",
+            f"{spans}/date=*/*.parquet",
+            f"{spans}/shard=*/date=*/*.parquet",
+            f"{spans}/shard=*/date=*/batch_*.parquet",
+            f"{spans}/shard=*/date=*/*/*.parquet",
+        ):
+            try:
+                hits = [h for h in (fs.glob(pat) or []) if str(h).endswith(".parquet")]
+            except Exception:
+                hits = []
+            if hits:
+                files = hits
+                break
+
+    if len(files) > max_list:
+        files = files[:max_list]
+    return files
+
+
 def load_active_spans_ddf(
     cfg: Optional[ClusterConfig] = None,
     *,
@@ -211,34 +260,17 @@ def load_active_spans_ddf(
 ):
     """Lazy Dask DataFrame over partitioned span parquet — never full pyarrow load.
 
-    Discovers files under ``{bucket}/{prefix}/spans/`` (date=/hour= or shard=).
+    Discovers files under ``{bucket}/{prefix}/spans/`` (date=/hour= or shard=)
+    via recursive listing — never ``date=*/**/*.parquet`` (misses partitions).
     """
     import dask.dataframe as dd
-    import s3fs
 
     cfg = cfg or load_cluster_config()
     if require_dask and not cfg.use_dask:
         raise RuntimeError("USE_DASK=0 but load_active_spans_ddf requires Dask for large data")
 
-    fs = s3fs.S3FileSystem(**cfg.storage_options())
-    root = cfg.dataset_root_key
-    spans = f"{root}/spans"
-    files = []
-    for pat in (
-        f"{spans}/date=*/hour=*/*.parquet",
-        f"{spans}/date=*/*.parquet",
-        f"{spans}/shard=*/date=*/*.parquet",
-        f"{spans}/shard=*/date=*/batch_*.parquet",
-    ):
-        try:
-            hits = [h for h in (fs.glob(pat) or []) if str(h).endswith(".parquet")]
-        except Exception:
-            hits = []
-        if hits:
-            files = hits
-            break
-    if not files and fs.exists(spans):
-        files = [e for e in fs.find(spans) if str(e).endswith(".parquet")]
+    spans = f"{cfg.dataset_root_key.rstrip('/')}/spans"
+    files = list_span_parquet_keys(cfg)
     if not files:
         raise FileNotFoundError(
             f"no parquet under s3://{spans}/ (partitioned layout required).\n"
@@ -246,14 +278,28 @@ def load_active_spans_ddf(
             f"empty columns from a missing prefix look like a missing schema.\n"
             f"Expected: s3://{{bucket}}/otel-notebook/spans/date=*/hour=*/*.parquet "
             f"(or your OTEL_DATA_PATH + /spans/).\n"
-            f"Do not load validation-30gb / validation-dask unless you generated them.\n"
+            f"Do not use validation-30gb or globs with '**' "
+            f"(s3://…/spans/date=*/**/*.parquet often matches nothing).\n"
             f"Fix: OTEL_DATA_PATH / OTEL_PREFIX from JupyterHub env (converge → zarf)."
         )
     # dd.read_parquet wants s3:// URIs when using storage_options
     uris = [f"s3://{f}" if not str(f).startswith("s3://") else str(f) for f in files]
-    return dd.read_parquet(
+    # Sample keys so operators can confirm hour= partitions
+    sample = uris[:3]
+    print(
+        f"load_active_spans_ddf: {len(uris)} parquet files under s3://{spans}/\n"
+        f"  sample: {sample}"
+    )
+    ddf = dd.read_parquet(
         uris,
         storage_options=cfg.storage_options(),
         columns=columns,
         engine="pyarrow",
     )
+    cols = list(getattr(ddf, "columns", []) or [])
+    if not cols:
+        raise RuntimeError(
+            f"dd.read_parquet returned columns=[] for {len(uris)} files under "
+            f"s3://{spans}/. Check storage_options / credentials; sample={sample}"
+        )
+    return ddf
