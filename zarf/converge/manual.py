@@ -457,22 +457,18 @@ HINTS = {
     ),
     "T0.package-uniqueness": block(
         [
-            "ls -lt /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst "
-            "./zarf-package-cybersec-dask-amd64-*.tar.zst /opt/zarf/zarf-package-*.tar.zst "
-            "/mnt/*/*/zarf-package-cybersec-dask-amd64-*.tar.zst 2>/dev/null",
+            "ls -lt ./zarf-package-cybersec-dask-amd64-*.tar.zst "
+            "/var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst 2>/dev/null",
+            "# package path is always operator-chosen — never assumed by the script",
         ],
         [
-            "# Preferred: pin the kit explicitly (engine will not fail uniqueness):",
-            'PKG=/var/tmp/zarf-package-cybersec-dask-amd64-1.6.6.tar.zst',
-            'cp -a "$PKG" /var/tmp/ 2>/dev/null || true',
-            'sudo converge-node.sh apply "$PKG"',
-            "# Optional cleanup (Layer-A — operator only; engine never deletes packages):",
-            "mkdir -p /var/tmp/pkg-archive",
-            "mv /var/tmp/zarf-package-cybersec-dask-amd64-<old-or-duplicate>.tar.zst "
-            "/var/tmp/pkg-archive/ 2>/dev/null || true",
+            "# Pin the kit explicitly (path you control):",
+            'sudo ./converge-node.sh apply /path/you/chose/zarf-package-cybersec-dask-amd64-1.6.6.tar.zst',
+            "# Or place the package next to converge-node.sh / in CWD and omit argv2",
+            "# Optional: archive extras (engine never deletes Layer-A packages)",
         ],
-        note="Multiple deploy packages only matter when discovery picks by mtime. "
-             "With explicit argv2/--package, converge treats siblings as archive OK.",
+        note="Multiple packages only matter without --package (discovery). "
+             "Explicit argv2/--package pins the kit; siblings are archive OK.",
     ),
     "T4.workers-capacity": block(
         [

@@ -484,7 +484,8 @@ def det_package_uniqueness(ctx: Ctx) -> Probe:
     detail so CONVERGED is possible while still naming the archive copies.
     """
     pkgs = find_deploy_packages()
-    # Include the explicit package even if outside DEFAULT_PKG_DIRS (e.g. /mnt/…)
+    # Include the explicit package even if outside DEFAULT_PKG_DIRS
+    # (operator-chosen path — any absolute/relative location they pass).
     if ctx.package_path:
         try:
             exp = Path(ctx.package_path).resolve()

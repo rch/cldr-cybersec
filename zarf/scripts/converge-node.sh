@@ -99,13 +99,12 @@ if [ -z "$KUBECTL_CMD" ]; then
 fi
 
 # --- locate the transported deploy package (optional for verify / kubectl-only) -
-# Prefer operator intent and co-located kit over global mtime (converge-16/17):
-# clearing argv2 and running ls -t across /mnt picked …/temp/ over the package
-# sitting next to this script (visible in field ll -a). Order:
-#   1) explicit argv2 if present AND readable
-#   2) same basename next to converge-node / CWD /var/tmp
-#   3) any package next to engine / CWD /var/tmp (first match, stable order)
-#   4) last resort: newest under /mnt (LOUD — may be the wrong archive)
+# Paths are NEVER site- or mount-specific (no /mnt/… layouts, remote homes, etc.).
+# Portable sources only — operator chooses where to run and what path to pass:
+#   1) explicit argv2 (absolute or relative path this uid can read)
+#   2) same basename next to this script / in CWD / in /var/tmp
+#   3) any package next to this script / in CWD / in /var/tmp
+# Do not invent packages from other trees.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _pkg_abs() {
   local p="$1" d
@@ -113,16 +112,10 @@ _pkg_abs() {
   d="$(cd "$(dirname "$p")" && pwd)" || return 1
   printf '%s\n' "$d/$(basename "$p")"
 }
-_pkg_discover_local() {
-  # Prefer kit staged with the engine (field: extract tarball, package beside it)
-  local c abs
+_pkg_in_dir() {
+  local dir="$1" c abs
   shopt -s nullglob
-  for c in \
-    "$SCRIPT_DIR"/zarf-package-cybersec-dask-amd64-*.tar.zst \
-    "$SCRIPT_DIR"/../zarf-package-cybersec-dask-amd64-*.tar.zst \
-    ./zarf-package-cybersec-dask-amd64-*.tar.zst \
-    /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst
-  do
+  for c in "$dir"/zarf-package-cybersec-dask-amd64-*.tar.zst; do
     abs="$(_pkg_abs "$c")" || continue
     printf '%s\n' "$abs"
     shopt -u nullglob
@@ -131,23 +124,7 @@ _pkg_discover_local() {
   shopt -u nullglob
   return 1
 }
-_pkg_discover_mnt_newest() {
-  local c abs
-  # Process substitution avoids pipeline subshell losing the match
-  while IFS= read -r c; do
-    [ -n "$c" ] || continue
-    abs="$(_pkg_abs "$c")" || continue
-    printf '%s\n' "$abs"
-    return 0
-  done < <(ls -t \
-    /mnt/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
-    /mnt/*/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
-    /mnt/*/*/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
-    2>/dev/null || true)
-  return 1
-}
 
-EXPLICIT_PKG="${PKG_ARG:-}"
 if [ -n "$PKG_ARG" ]; then
   if RESOLVED="$(_pkg_abs "$PKG_ARG")"; then
     PKG_ARG="$RESOLVED"
@@ -156,31 +133,27 @@ if [ -n "$PKG_ARG" ]; then
       echo "   ⚠ package path does not exist as $(id -un): ${PKG_ARG}"
     else
       echo "   ⚠ package path not readable as $(id -un): ${PKG_ARG}"
-      echo "     (NFS root_squash under sudo — copy next to converge-node.sh or /var/tmp)"
     fi
     ls -la "$PKG_ARG" 2>&1 | sed 's/^/     /' || true
-    # Co-located same basename (converge-17: kit was beside engine while argv2
-    # pointed at a missing July_30_2026 path)
     base="$(basename "$PKG_ARG")"
-    if RESOLVED="$(_pkg_abs "$SCRIPT_DIR/$base" 2>/dev/null)" || \
-       RESOLVED="$(_pkg_abs "./$base" 2>/dev/null)" || \
-       RESOLVED="$(_pkg_abs "/var/tmp/$base" 2>/dev/null)"; then
-      echo "   → using co-located package instead: $RESOLVED"
+    if RESOLVED="$(_pkg_abs "$SCRIPT_DIR/$base")" || \
+       RESOLVED="$(_pkg_abs "./$base")" || \
+       RESOLVED="$(_pkg_abs "/var/tmp/$base")"; then
+      echo "   → using co-located package (same basename): $RESOLVED"
       PKG_ARG="$RESOLVED"
     else
-      echo "   → no co-located $base; trying package next to engine /var/tmp"
+      echo "   → pass a path this process can read, or place the package next to"
+      echo "     converge-node.sh / in CWD / in /var/tmp"
       PKG_ARG=""
     fi
   fi
 fi
 if [ -z "$PKG_ARG" ]; then
-  if RESOLVED="$(_pkg_discover_local)"; then
+  if RESOLVED="$(_pkg_in_dir "$SCRIPT_DIR")" || \
+     RESOLVED="$(_pkg_in_dir ".")" || \
+     RESOLVED="$(_pkg_in_dir "/var/tmp")"; then
     PKG_ARG="$RESOLVED"
-    echo "   → discovered package next to engine/staging: $PKG_ARG"
-  elif RESOLVED="$(_pkg_discover_mnt_newest)"; then
-    PKG_ARG="$RESOLVED"
-    echo "   ⚠ using newest package under /mnt (may not be the intended kit): $PKG_ARG"
-    echo "     pass an explicit *existing* path, or place the package next to converge-node.sh"
+    echo "   package (beside script / CWD /var/tmp): $PKG_ARG"
   else
     PKG_ARG=""
   fi
@@ -239,21 +212,11 @@ ARGS=(--kubectl "$KUBECTL_CMD")
 if [ -n "$PKG_ARG" ] && [ -f "$PKG_ARG" ] && [ -r "$PKG_ARG" ]; then
   ARGS+=(--package "$PKG_ARG")
   echo "   package: $PKG_ARG"
-  # Hint when multiple 1.6.x packages exist (mtime / content-tag skew)
-  _n_pkgs="$(ls /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst \
-    /mnt/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
-    /mnt/*/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
-    2>/dev/null | wc -l | tr -d ' ')"
-  if [ "${_n_pkgs:-0}" -gt 1 ]; then
-    echo "   ⚠ ${_n_pkgs} deploy packages visible — engine uses the path above;"
-    echo "     remove extras to avoid content-tag drift (image rem needs matching package)"
-  fi
 else
   echo "   package: <none> — component-deploy / image-push remediations will MANUAL"
-  echo "            pass a *readable* package as argv2, e.g.:"
-  echo "              cp -a /mnt/.../zarf-package-cybersec-dask-amd64-1.6.6.tar.zst /var/tmp/"
-  echo "              sudo $0 apply /var/tmp/zarf-package-cybersec-dask-amd64-1.6.6.tar.zst"
-  echo "            (NFS root_squash: root often cannot read /mnt — stage under /var/tmp)"
+  echo "            pass a path this process can read as argv2, or place the package"
+  echo "            next to converge-node.sh / in CWD / in /var/tmp, e.g.:"
+  echo "              $0 apply /path/you/chose/zarf-package-cybersec-dask-amd64-1.6.6.tar.zst"
 fi
 [ -n "$CREDS_FILE" ] && ARGS+=(--creds-file "$CREDS_FILE")
 # Multi-core / air-gap baseline 4; set DASK_WORKER_REPLICAS=1 for tiny smoke hosts
