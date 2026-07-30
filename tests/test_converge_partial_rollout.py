@@ -150,6 +150,22 @@ class TestRegistryReclaim:
         ctx.apply_yaml.assert_not_called()
 
 
+class TestImageRetarget:
+    """converge-10: recycle-only leaves CR on old tag → Ready-but-wrong loop."""
+
+    def test_retarget_strips_zarf_suffix(self):
+        from converge.catalog import _retarget_image_ref
+        old = "127.0.0.1:31999/cybersec-dask:2025.2.0-e66f38622f-zarf-2560517462"
+        new = _retarget_image_ref(old, "2025.2.0-85f3d9ecf5")
+        assert new == "127.0.0.1:31999/cybersec-dask:2025.2.0-85f3d9ecf5"
+
+    def test_retarget_plain(self):
+        from converge.catalog import _retarget_image_ref
+        old = "localhost:5555/cybersec-dask:2025.2.0-old"
+        assert _retarget_image_ref(old, "2025.2.0-new") == \
+            "localhost:5555/cybersec-dask:2025.2.0-new"
+
+
 class TestVersion:
     def test_version(self):
-        assert __version__ == "0.5.2"
+        assert __version__ == "0.5.3"

@@ -1771,20 +1771,58 @@ def _rem_scheduler(ctx: Ctx) -> Fix:
                              f"{_cluster_orient_summary(ctx, again)}")
         # continue toward cluster redeploy if still missing
 
-    # 2b) Ready-or-running on stale image: force roll (operator won't)
+    # 2b) Image drift — NEVER recycle-only (operator recreates from CR with the
+    # OLD tag → Ready-but-wrong forever; converge-10 class loop).
+    # Order: push target layers → retarget CR+Deployments → recycle pods →
+    # optional dask-cluster deploy → refuse success while drift remains.
     drift = _image_drift(ctx, "dask", "dask.org/component=scheduler")
     if drift and node["schedulable"]:
+        target = _target_cybersec_tag(ctx)
+        actions.append(f"image drift: {drift}")
+        # Layers must exist in the in-cluster registry before retarget
+        img_fix = _zarf_deploy_components(ctx, "cybersec-images")
+        actions.append(img_fix.detail)
+        actions.extend(_retarget_dask_workload_images(ctx, target))
         ctx.k(["delete", "pod", "-n", "dask", "-l", "dask.org/component=scheduler",
                "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
-        # workers often same tag — roll them too so CR children match package
         ctx.k(["delete", "pod", "-n", "dask", "-l", "dask.org/component=worker",
                "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
-        actions.append(f"rolled dask pods for image drift ({drift})")
+        actions.append("recycled dask pods after image retarget")
+        # If still drifted, full dask-cluster package path (templates new image)
+        if _image_drift(ctx, "dask", "dask.org/component=scheduler"):
+            fix = _zarf_deploy_components(ctx, "cybersec-images,dask-cluster")
+            actions.append(fix.detail)
+            actions.extend(_retarget_dask_workload_images(ctx, target))
+            ctx.k(["delete", "pod", "-n", "dask",
+                   "-l", "dask.org/component=scheduler",
+                   "--force", "--grace-period=0", "--wait=false",
+                   "--ignore-not-found"])
+            ctx.k(["delete", "pod", "-n", "dask",
+                   "-l", "dask.org/component=worker",
+                   "--force", "--grace-period=0", "--wait=false",
+                   "--ignore-not-found"])
+            actions.append("post-deploy recycle for image pickup")
         again = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
-        if again["ready"] >= 1 and not _image_drift(
-                ctx, "dask", "dask.org/component=scheduler"):
-            return Fix(True, f"image-drift roll → scheduler Ready — "
-                             f"{_cluster_orient_summary(ctx, again)}")
+        still = _image_drift(ctx, "dask", "dask.org/component=scheduler")
+        if again["ready"] >= 1 and not still:
+            return Fix(True, f"image-drift rem → scheduler Ready on {target} — "
+                             f"{_cluster_orient_summary(ctx, again)}  "
+                             f"[{'; '.join(actions)}]")
+        # Dual-package / package≠engine-manifest skew: MANUAL not infinite loop
+        hint = (
+            "Image drift remains after push+retarget+recycle. Common cause: "
+            "engine artifacts.manifest target tag is not in the staged "
+            "zarf-package (two 1.6.6 tarballs with different content tags). "
+            "Keep ONE package that matches the engine, re-transport if needed, "
+            "then: zarf package deploy $PKG --confirm "
+            "--components=cybersec-images,dask-cluster"
+        )
+        return Fix(bool(actions), _manual.join_detail(
+            f"image drift NOT cleared — still: {still or drift}; "
+            f"running={_running_cybersec_ref(ctx, 'dask', 'dask.org/component=scheduler')}; "
+            f"actions=[{'; '.join(actions)}]",
+            hint,
+        ))
 
     # 3/4) Recycle on CrashLoop or Pending-while-schedulable
     if pods["crash"] or (pods["pending"] and node["schedulable"]) or (
@@ -1805,7 +1843,9 @@ def _rem_scheduler(ctx: Ctx) -> Fix:
             if cap.changed:
                 actions.append(cap.detail)
         again = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
-        if again["ready"] >= 1:
+        # Do not declare success while image drift remains (Ready ≠ correct tag)
+        if again["ready"] >= 1 and not _image_drift(
+                ctx, "dask", "dask.org/component=scheduler"):
             return Fix(True, f"recycle → scheduler Ready — "
                              f"{_cluster_orient_summary(ctx, again)}  "
                              f"[unwound: {'; '.join(actions)}]")
@@ -1827,10 +1867,18 @@ def _rem_scheduler(ctx: Ctx) -> Fix:
         ctx.k(["delete", "pod", "-n", "dask", "-l", "dask.org/component=scheduler",
                "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
         detail += "  [post-deploy recycle scheduler for readiness]"
+        # Progress, not success — next pass re-detects Ready/drift
         return Fix(True, detail)
-    if final["ready"] >= 1:
+    if final["ready"] >= 1 and not _image_drift(
+            ctx, "dask", "dask.org/component=scheduler"):
         return Fix(True, f"dask-cluster rem → scheduler Ready — "
                          f"{_cluster_orient_summary(ctx, final)}")
+    if final["ready"] >= 1 and _image_drift(
+            ctx, "dask", "dask.org/component=scheduler"):
+        # Deploy "succeeded" but wrong content tag still running — do not loop
+        # as success; force image-drift path next pass via failed detect
+        return Fix(True, detail + "  [deployed but image drift remains — "
+                   "next pass will retarget CR/Deployments]")
     return Fix(fix.changed or bool(actions), detail)
 
 
@@ -2291,10 +2339,38 @@ def _image_tag(ref: str) -> str:
     return tag.split("-zarf-", 1)[0]
 
 
+def _retarget_image_ref(ref: str, target_tag: str) -> str:
+    """Rewrite a (possibly zarf-rewritten) cybersec-dask ref to ``target_tag``.
+
+    Preserves the registry host (``127.0.0.1:31999`` etc.) so pulls stay
+    in-cluster. Drops any ``-zarf-HASH`` suffix — that hash is content-bound to
+    the *old* push; the new tag is pullable as ``host/cybersec-dask:TARGET``
+    after ``cybersec-images`` re-push (zarf may rewrite again on next create).
+
+    '127.0.0.1:31999/cybersec-dask:2025.2.0-OLD-zarf-ABC' + '2025.2.0-NEW'
+      → '127.0.0.1:31999/cybersec-dask:2025.2.0-NEW'
+    """
+    if not ref or not target_tag or "cybersec-dask" not in ref:
+        return ref
+    base, _at, _digest = ref.partition("@")
+    if ":" not in base.rsplit("/", 1)[-1]:
+        return ref
+    prefix, _, _tag = base.rpartition(":")
+    return f"{prefix}:{target_tag}"
+
+
 def _target_cybersec_tag(ctx: Ctx) -> str:
     for img in ctx.manifest.get("package_images", {}).get("images", []):
         if "cybersec-dask" in img.get("ref", ""):
             return _image_tag(img["ref"])
+    return ""
+
+
+def _target_cybersec_ref(ctx: Ctx) -> str:
+    """Preferred full ref from artifacts.manifest (pre-zarf-rewrite)."""
+    for img in ctx.manifest.get("package_images", {}).get("images", []):
+        if "cybersec-dask" in img.get("ref", ""):
+            return img["ref"]
     return ""
 
 
@@ -2312,6 +2388,101 @@ def _image_drift(ctx: Ctx, ns: str, selector: str) -> "str | None":
                 if running and running != target:
                     return f"image drift: running {running}, target {target}"
     return None
+
+
+def _running_cybersec_ref(ctx: Ctx, ns: str, selector: str) -> str:
+    for p in ctx.items("pods", ns=ns, selector=selector):
+        for c in p.get("spec", {}).get("containers", []):
+            img = c.get("image", "")
+            if "cybersec-dask" in img:
+                return img
+    return ""
+
+
+def _retarget_dask_workload_images(ctx: Ctx, target_tag: str) -> List[str]:
+    """Patch DaskCluster CR + Deployments so children recreate on target tag.
+
+    Operator is creation-only for many fields and will not roll image-only CR
+    updates — we patch both the CR (source of truth for next CREATE) and live
+    Deployments, then the caller must delete pods. Never touches Layer-A.
+    """
+    actions: List[str] = []
+    if not target_tag:
+        return actions
+
+    # --- DaskCluster CR ---
+    cr = ctx.get("daskcluster", "cybersec-dask", ns="dask")
+    if cr:
+        w = (cr.get("spec") or {}).get("worker") or {}
+        s = (cr.get("spec") or {}).get("scheduler") or {}
+        changed = False
+        for role, block in (("scheduler", s), ("worker", w)):
+            containers = ((block.get("spec") or {}).get("containers") or [])
+            for c in containers:
+                img = c.get("image") or ""
+                if "cybersec-dask" not in img:
+                    continue
+                new = _retarget_image_ref(img, target_tag)
+                if new != img:
+                    c["image"] = new
+                    changed = True
+        if changed:
+            patch = {"spec": {"scheduler": s, "worker": w}}
+            r = ctx.k(["patch", "daskcluster", "cybersec-dask", "-n", "dask",
+                       "--type", "merge", "-p", json.dumps(patch)])
+            actions.append(
+                f"patched DaskCluster images → {target_tag}"
+                if r.returncode == 0 else
+                f"DaskCluster image patch rc={r.returncode}")
+
+    # --- Live Deployments (operator often leaves these on old tag) ---
+    for sel in ("dask.org/component=scheduler", "dask.org/component=worker"):
+        for dep in ctx.items("deployments", ns="dask", selector=sel):
+            name = (dep.get("metadata") or {}).get("name")
+            if not name:
+                continue
+            tpl = (((dep.get("spec") or {}).get("template") or {})
+                   .get("spec") or {})
+            containers = tpl.get("containers") or []
+            new_containers = []
+            dep_changed = False
+            for c in containers:
+                c = dict(c)
+                img = c.get("image") or ""
+                if "cybersec-dask" in img:
+                    new = _retarget_image_ref(img, target_tag)
+                    if new != img:
+                        c["image"] = new
+                        dep_changed = True
+                new_containers.append(c)
+            if not dep_changed:
+                continue
+            # Strategic merge on pod template containers by name
+            patch = {
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": new_containers,
+                        }
+                    }
+                }
+            }
+            r = ctx.k(["patch", "deployment", name, "-n", "dask",
+                       "--type", "strategic", "-p", json.dumps(patch)])
+            if r.returncode != 0:
+                # fallback: set image via kubectl set image
+                pairs = []
+                for c in new_containers:
+                    if "cybersec-dask" in (c.get("image") or ""):
+                        pairs.append(f"{c.get('name', 'scheduler')}={c['image']}")
+                if pairs:
+                    r = ctx.k(["set", "image", f"deployment/{name}",
+                               "-n", "dask", *pairs])
+            actions.append(
+                f"retargeted Deployment/{name} → {target_tag}"
+                if r.returncode == 0 else
+                f"Deployment/{name} retarget rc={r.returncode}")
+    return actions
 
 
 # --------------------------------------------------------------------------- #
