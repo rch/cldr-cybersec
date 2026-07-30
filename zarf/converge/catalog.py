@@ -856,26 +856,45 @@ def _disk_pressure_issues(ctx: Ctx) -> List[str]:
 
 
 def _det_no_disk_pressure(ctx: Ctx) -> Probe:
-    """DiskPressure condition/taint + df vs configured hard eviction floor."""
+    """DiskPressure vs df floors — NoSchedule taint is the scheduling gate.
+
+    When free >= soft and only the condition bit is sticky (no disk-pressure
+    taint), treat as OK so rem does not block multi-minute waits (converge-19).
+    """
     issues = _disk_pressure_issues(ctx)
     free = _platform.disk_free_census()
-    if not issues and not free.get("below_hard"):
+    min_free = free.get("min_free_gib")
+    soft = free.get("soft_gib")
+    hard = free.get("hard_gib")
+    if free.get("below_hard"):
+        return Probe(
+            False,
+            f"df below hard eviction floor (min_free={min_free}Gi < hard={hard}Gi); "
+            f"{free['summary']}",
+        )
+    # Any disk-pressure NoSchedule taint → not OK (pods cannot schedule)
+    taint_only = [i for i in issues if "disk-pressure taint" in i or "NoSchedule" in i]
+    cond_only = [i for i in issues if "DiskPressure=True" in i or "condition DiskPressure" in i]
+    if taint_only:
+        detail = "; ".join(taint_only + ([free["summary"]] if free.get("summary") else []))
+        if min_free is not None and soft is not None and float(min_free) >= float(soft):
+            detail += f" — df >= soft ({soft}Gi); rem will clear taint without long wait"
+        elif issues and not free.get("below_hard"):
+            detail += f" — df above hard; rem will clear taint / short-wait"
+        return Probe(False, detail)
+    # Condition True but no taint: if df >= soft, scheduling works — OK
+    if cond_only and min_free is not None and soft is not None \
+            and float(min_free) >= float(soft):
         return Probe(
             True,
-            f"no DiskPressure; {free['summary']}",
+            f"DiskPressure condition lag with df >= soft ({free['summary']}) — "
+            f"no NoSchedule taint; not blocking",
         )
-    # Still report free census so rem can choose MANUAL free-disk vs wait/clear
+    if not issues and not free.get("below_hard"):
+        return Probe(True, f"no DiskPressure; {free['summary']}")
     detail_parts = list(issues) if issues else []
-    if free.get("below_hard"):
-        detail_parts.append(
-            f"df below hard eviction floor (min_free={free.get('min_free_gib')}Gi "
-            f"< hard={free.get('hard_gib')}Gi)"
-        )
-    elif issues:
-        detail_parts.append(
-            f"df above hard floor — expect clear within "
-            f"~{free.get('clear_wait_s')}s ({free['summary']})"
-        )
+    if issues:
+        detail_parts.append(free["summary"])
     return Probe(False, "; ".join(detail_parts) if detail_parts else free["summary"])
 
 

@@ -249,18 +249,21 @@ def rem_resolve_disk_pressure(ctx: Ctx) -> Fix:
     """FSM resolution for DiskPressure when free space is knowable.
 
     Policy (single-node air-gap, operator-owned):
-      * df min free < configured hard eviction GiB → MANUAL free disk (early return)
-      * df min free >= hard GiB → clear taint, uncordon, poll until DiskPressure=False
-        for configured clear_wait_s (soft grace + lag); then OK for FSM to continue
-      * if wait expires with condition still True but df still >= hard → MANUAL
-        (kubelet lag / sticky condition) with census for operator
+      * df min free < hard GiB → MANUAL free disk (early return; never prune images)
+      * df min free >= hard GiB → clear NoSchedule taint + uncordon (scheduling can resume)
+      * df min free >= soft GiB → **do not** block on a long wait for condition=False
+        (converge-19: free already >10Gi but rem waited full soft-grace+lag ~420s
+        for a sticky kubelet condition). Brief poll only, then continue; next pass
+        re-enters if kubelet re-taints.
+      * hard <= free < soft → poll up to clear_wait_s for condition/taint to clear;
+        if wait ends with df still >= hard and taint cleared → continue (condition lag OK)
+      * free drops below hard mid-wait → MANUAL
 
     Never prunes images. Does not delete Layer-A packages.
     """
     free = disk_free_census()
     pressured = _node_disk_pressure_true(ctx)
     if not pressured and not free.get("below_hard"):
-        # No pressure signal — nothing to do (detect may have raced)
         return Fix(False, f"no DiskPressure to resolve ({free['summary']})")
 
     if free.get("below_hard"):
@@ -272,23 +275,26 @@ def rem_resolve_disk_pressure(ctx: Ctx) -> Fix:
             _manual.hint_for("T0.no-disk-pressure"),
         ))
 
-    # Free space is above hard floor — expect kubelet to clear condition; help it.
+    min_free = free.get("min_free_gib")
+    soft = float(free.get("soft_gib") or DEFAULT_EVICTION_SOFT_GIB)
+    hard = float(free.get("hard_gib") or DEFAULT_EVICTION_HARD_GIB)
+    above_soft = min_free is not None and float(min_free) >= soft
+
     actions: List[str] = []
     if os.geteuid() != 0:
         return Fix(False, _manual.join_detail(
-            f"MANUAL: free space OK ({free['summary']}) but need root to clear taint / "
-            f"wait for DiskPressure=False on {pressured}",
+            f"MANUAL: free space OK ({free['summary']}) but need root to clear "
+            f"disk-pressure taint on {pressured}",
             _manual.hint_for("T0.no-disk-pressure"),
         ))
 
-    for name in pressured or [
-        (n.get("metadata") or {}).get("name")
-        for n in ctx.items("nodes")
-        if (n.get("metadata") or {}).get("name")
-    ]:
-        if not name:
-            continue
-        # Clear sticky taint so scheduling can resume once condition flips
+    node_names = list(pressured) or [
+        n for n in (
+            (n.get("metadata") or {}).get("name")
+            for n in ctx.items("nodes")
+        ) if n
+    ]
+    for name in node_names:
         r = ctx.k([
             "taint", "nodes", name,
             "node.kubernetes.io/disk-pressure:NoSchedule-",
@@ -299,19 +305,53 @@ def rem_resolve_disk_pressure(ctx: Ctx) -> Fix:
         if r2.returncode == 0:
             actions.append(f"uncordoned {name}")
 
+    # df already satisfies soft floor → condition=True is lag; don't burn 420s.
+    # Brief poll (kubelet may flip quickly after taint clear), then continue FSM.
+    if above_soft:
+        short_s = min(45, int(free.get("clear_wait_s") or DISK_PRESSURE_CLEAR_WAIT_S) // 8)
+        short_s = max(short_s, 15)
+        print(
+            f"    df min={min_free}Gi >= soft={soft}Gi — short wait {short_s}s for "
+            f"condition lag (not full soft-grace); taint cleared so scheduling can resume",
+            flush=True,
+        )
+        deadline = time.time() + short_s
+        while time.time() < deadline:
+            if not _node_disk_pressure_true(ctx):
+                return Fix(
+                    True,
+                    f"DiskPressure cleared (df >= soft; {free['summary']}; "
+                    f"actions={actions or ['none']})",
+                )
+            time.sleep(DISK_PRESSURE_POLL_S)
+            free = disk_free_census()
+            if free.get("below_hard"):
+                return Fix(False, _manual.join_detail(
+                    f"MANUAL: free space fell below hard during short wait "
+                    f"({free['summary']})",
+                    _manual.hint_for("T0.no-disk-pressure"),
+                ))
+        # Still condition True but free >= soft and we cleared NoSchedule — continue.
+        # Multi-pass re-detects if kubelet re-taints.
+        return Fix(
+            True,
+            f"df >= soft ({free['summary']}); taint cleared; "
+            f"DiskPressure condition may lag — continuing without full "
+            f"{free.get('clear_wait_s')}s wait  [actions={actions or ['none']}]",
+        )
+
+    # Between hard and soft: longer wait for soft eviction to release
     wait_s = int(free.get("clear_wait_s") or DISK_PRESSURE_CLEAR_WAIT_S)
-    poll = DISK_PRESSURE_POLL_S
-    deadline = time.time() + wait_s
     print(
-        f"    waiting up to {wait_s}s for DiskPressure=False "
-        f"(df min={free.get('min_free_gib')}Gi >= hard={free.get('hard_gib')}Gi)",
+        f"    waiting up to {wait_s}s for DiskPressure clear "
+        f"(hard <= df min={min_free}Gi < soft={soft}Gi)",
         flush=True,
     )
+    deadline = time.time() + wait_s
     while time.time() < deadline:
         still = _node_disk_pressure_true(ctx)
         if not still:
-            # re-clear taint if kubelet re-added during clear
-            for name in pressured:
+            for name in node_names:
                 ctx.k([
                     "taint", "nodes", name,
                     "node.kubernetes.io/disk-pressure:NoSchedule-",
@@ -321,8 +361,7 @@ def rem_resolve_disk_pressure(ctx: Ctx) -> Fix:
                 f"DiskPressure cleared after wait "
                 f"({free['summary']}; actions={actions or ['none']})",
             )
-        time.sleep(poll)
-        # re-check free — if it dropped below hard mid-wait, escalate to MANUAL
+        time.sleep(DISK_PRESSURE_POLL_S)
         free = disk_free_census()
         if free.get("below_hard"):
             return Fix(False, _manual.join_detail(
@@ -330,12 +369,34 @@ def rem_resolve_disk_pressure(ctx: Ctx) -> Fix:
                 f"({free['summary']})",
                 _manual.hint_for("T0.no-disk-pressure"),
             ))
+        # Crossed soft mid-wait → stop waiting (same short-circuit as above)
+        mf = free.get("min_free_gib")
+        if mf is not None and float(mf) >= float(free.get("soft_gib") or soft):
+            for name in node_names:
+                ctx.k([
+                    "taint", "nodes", name,
+                    "node.kubernetes.io/disk-pressure:NoSchedule-",
+                ])
+            return Fix(
+                True,
+                f"df rose to >= soft during wait ({free['summary']}); "
+                f"continuing (condition lag OK)  [actions={actions or ['none']}]",
+            )
 
     still = _node_disk_pressure_true(ctx)
+    # Taint cleared + free still >= hard: don't MANUAL solely for sticky condition
+    free = disk_free_census()
+    if not free.get("below_hard") and actions:
+        return Fix(
+            True,
+            f"waited {wait_s}s; df still >= hard ({free['summary']}); "
+            f"taint clear attempted; condition lag still={still} — continuing  "
+            f"[actions={actions}]",
+        )
     return Fix(False, _manual.join_detail(
-        f"MANUAL: waited {wait_s}s for DiskPressure=False with df above hard "
+        f"MANUAL: waited {wait_s}s for DiskPressure clear with df above hard "
         f"({free['summary']}); still pressured={still}. "
-        f"Check kubelet logs / restart rke2-server if sticky.",
+        f"Free more disk (above soft={soft}Gi) or check kubelet if sticky.",
         _manual.hint_for("T0.no-disk-pressure"),
     ))
 
