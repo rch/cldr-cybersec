@@ -316,7 +316,8 @@ HINTS = {
             "# Also ensure T0.kubelet-gc absolute free-space thresholds on large disks",
         ],
         note="DiskPressure: MANUAL only if df < configured hard GiB (default 5Gi from "
-             "kubelet eviction-hard). If df >= hard, FSM clears taint and waits soft-grace+lag "
+             "kubelet eviction-hard). If df >= hard, FSM clears taint and waits "
+             "configured soft-grace + 10s only "
              "for condition False, then continues.",
     ),
     "T0.layer-a-zarf-tools": block(

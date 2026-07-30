@@ -59,8 +59,11 @@ _KUBELET_GC_ARGS = (
 # Hard = DiskPressure / NoSchedule; soft = grace before hard.
 DEFAULT_EVICTION_HARD_GIB = 5.0
 DEFAULT_EVICTION_SOFT_GIB = 10.0
-# Soft grace is 5m in config; wait hard+buffer for condition to clear after free OK.
-DISK_PRESSURE_CLEAR_WAIT_S = 420   # 5m soft grace + 2m kubelet lag
+# Soft grace default matches _KUBELET_GC_ARGS (5m). Wait budget is ALWAYS
+# configured soft-grace (from rke2/kubelet config) + this lag — never invent
+# multi-minute padding (converge-19: 420s was wrong).
+DEFAULT_EVICTION_SOFT_GRACE_S = 300
+DISK_PRESSURE_CONDITION_LAG_S = 10
 DISK_PRESSURE_POLL_S = 15
 
 # System namespaces we observe but never mutate (except never).
@@ -158,7 +161,7 @@ def configured_eviction_thresholds_gib(text: Optional[str] = None) -> Dict[str, 
     raw = text if text is not None else _read_rke2_config()
     hard = DEFAULT_EVICTION_HARD_GIB
     soft = DEFAULT_EVICTION_SOFT_GIB
-    grace_s = 300  # 5m default from _KUBELET_GC_ARGS
+    grace_s = DEFAULT_EVICTION_SOFT_GRACE_S
     if raw:
         for label, store in (("eviction-hard", "hard"), ("eviction-soft", "soft")):
             m = re.search(rf"{label}=([^\s\"']+)", raw)
@@ -177,14 +180,28 @@ def configured_eviction_thresholds_gib(text: Optional[str] = None) -> Dict[str, 
                         hard = min(vals)
                     else:
                         soft = min(vals)
-        gm = re.search(r"eviction-soft-grace-period=[^\n]*nodefs\.available=(\d+)m", raw)
+        # Prefer nodefs grace; fall back to imagefs or any available=Nm in the line
+        gm = re.search(
+            r"eviction-soft-grace-period=[^\n]*nodefs\.available=(\d+)m", raw)
+        if not gm:
+            gm = re.search(
+                r"eviction-soft-grace-period=[^\n]*imagefs\.available=(\d+)m", raw)
+        if not gm:
+            gm = re.search(
+                r"eviction-soft-grace-period=[^\n]*available=(\d+)m", raw)
         if gm:
             grace_s = int(gm.group(1)) * 60
+        # seconds form: nodefs.available=300s
+        gs = re.search(
+            r"eviction-soft-grace-period=[^\n]*nodefs\.available=(\d+)s", raw)
+        if gs:
+            grace_s = int(gs.group(1))
     return {
         "hard_gib": hard,
         "soft_gib": soft,
         "soft_grace_s": grace_s,
-        "clear_wait_s": grace_s + 120,  # grace + kubelet lag
+        # Configured soft-grace only + fixed lag — no invented multi-minute pad
+        "clear_wait_s": grace_s + DISK_PRESSURE_CONDITION_LAG_S,
     }
 
 
@@ -250,18 +267,18 @@ def rem_resolve_disk_pressure(ctx: Ctx) -> Fix:
 
     Policy (single-node air-gap, operator-owned):
       * df min free < hard GiB → MANUAL free disk (early return; never prune images)
-      * df min free >= hard GiB → clear NoSchedule taint + uncordon (scheduling can resume)
-      * df min free >= soft GiB → **do not** block on a long wait for condition=False
-        (converge-19: free already >10Gi but rem waited full soft-grace+lag ~420s
-        for a sticky kubelet condition). Brief poll only, then continue; next pass
-        re-enters if kubelet re-taints.
-      * hard <= free < soft → poll up to clear_wait_s for condition/taint to clear;
-        if wait ends with df still >= hard and taint cleared → continue (condition lag OK)
+      * df min free >= hard GiB → clear NoSchedule taint + uncordon
+      * Wait budget is **only** configured soft-grace (from rke2/kubelet config
+        eviction-soft-grace-period) **+ 10s** — never invent 420s or other padding
+      * df min free >= soft GiB → wait at most the +10s lag (grace already satisfied
+        by free space); then continue even if condition bit lags
+      * hard <= free < soft → wait up to soft_grace_s + 10s
       * free drops below hard mid-wait → MANUAL
 
     Never prunes images. Does not delete Layer-A packages.
     """
     free = disk_free_census()
+    thr = configured_eviction_thresholds_gib()
     pressured = _node_disk_pressure_true(ctx)
     if not pressured and not free.get("below_hard"):
         return Fix(False, f"no DiskPressure to resolve ({free['summary']})")
@@ -276,8 +293,11 @@ def rem_resolve_disk_pressure(ctx: Ctx) -> Fix:
         ))
 
     min_free = free.get("min_free_gib")
-    soft = float(free.get("soft_gib") or DEFAULT_EVICTION_SOFT_GIB)
-    hard = float(free.get("hard_gib") or DEFAULT_EVICTION_HARD_GIB)
+    soft = float(free.get("soft_gib") or thr["soft_gib"])
+    grace_s = int(thr.get("soft_grace_s") or DEFAULT_EVICTION_SOFT_GRACE_S)
+    lag_s = DISK_PRESSURE_CONDITION_LAG_S
+    # Configured grace + fixed lag only (no multi-minute invention)
+    clear_wait_s = int(thr.get("clear_wait_s") or (grace_s + lag_s))
     above_soft = min_free is not None and float(min_free) >= soft
 
     actions: List[str] = []
@@ -305,46 +325,14 @@ def rem_resolve_disk_pressure(ctx: Ctx) -> Fix:
         if r2.returncode == 0:
             actions.append(f"uncordoned {name}")
 
-    # df already satisfies soft floor → condition=True is lag; don't burn 420s.
-    # Brief poll (kubelet may flip quickly after taint clear), then continue FSM.
-    if above_soft:
-        short_s = min(45, int(free.get("clear_wait_s") or DISK_PRESSURE_CLEAR_WAIT_S) // 8)
-        short_s = max(short_s, 15)
-        print(
-            f"    df min={min_free}Gi >= soft={soft}Gi — short wait {short_s}s for "
-            f"condition lag (not full soft-grace); taint cleared so scheduling can resume",
-            flush=True,
-        )
-        deadline = time.time() + short_s
-        while time.time() < deadline:
-            if not _node_disk_pressure_true(ctx):
-                return Fix(
-                    True,
-                    f"DiskPressure cleared (df >= soft; {free['summary']}; "
-                    f"actions={actions or ['none']})",
-                )
-            time.sleep(DISK_PRESSURE_POLL_S)
-            free = disk_free_census()
-            if free.get("below_hard"):
-                return Fix(False, _manual.join_detail(
-                    f"MANUAL: free space fell below hard during short wait "
-                    f"({free['summary']})",
-                    _manual.hint_for("T0.no-disk-pressure"),
-                ))
-        # Still condition True but free >= soft and we cleared NoSchedule — continue.
-        # Multi-pass re-detects if kubelet re-taints.
-        return Fix(
-            True,
-            f"df >= soft ({free['summary']}); taint cleared; "
-            f"DiskPressure condition may lag — continuing without full "
-            f"{free.get('clear_wait_s')}s wait  [actions={actions or ['none']}]",
-        )
-
-    # Between hard and soft: longer wait for soft eviction to release
-    wait_s = int(free.get("clear_wait_s") or DISK_PRESSURE_CLEAR_WAIT_S)
+    # Wait: soft_grace (from config) + 10s. If df already >= soft, grace is
+    # satisfied by free space — only the +10s lag applies.
+    wait_s = lag_s if above_soft else clear_wait_s
     print(
-        f"    waiting up to {wait_s}s for DiskPressure clear "
-        f"(hard <= df min={min_free}Gi < soft={soft}Gi)",
+        f"    DiskPressure wait budget={wait_s}s "
+        f"(configured soft-grace={grace_s}s + lag={lag_s}s"
+        f"{'; df>=soft → grace skipped' if above_soft else ''}; "
+        f"df min={min_free}Gi soft={soft}Gi)",
         flush=True,
     )
     deadline = time.time() + wait_s
@@ -359,9 +347,10 @@ def rem_resolve_disk_pressure(ctx: Ctx) -> Fix:
             return Fix(
                 True,
                 f"DiskPressure cleared after wait "
-                f"({free['summary']}; actions={actions or ['none']})",
+                f"({free['summary']}; wait={wait_s}s grace={grace_s}s+{lag_s}s; "
+                f"actions={actions or ['none']})",
             )
-        time.sleep(DISK_PRESSURE_POLL_S)
+        time.sleep(min(DISK_PRESSURE_POLL_S, max(1, wait_s // 3)))
         free = disk_free_census()
         if free.get("below_hard"):
             return Fix(False, _manual.join_detail(
@@ -369,33 +358,31 @@ def rem_resolve_disk_pressure(ctx: Ctx) -> Fix:
                 f"({free['summary']})",
                 _manual.hint_for("T0.no-disk-pressure"),
             ))
-        # Crossed soft mid-wait → stop waiting (same short-circuit as above)
         mf = free.get("min_free_gib")
-        if mf is not None and float(mf) >= float(free.get("soft_gib") or soft):
-            for name in node_names:
-                ctx.k([
-                    "taint", "nodes", name,
-                    "node.kubernetes.io/disk-pressure:NoSchedule-",
-                ])
-            return Fix(
-                True,
-                f"df rose to >= soft during wait ({free['summary']}); "
-                f"continuing (condition lag OK)  [actions={actions or ['none']}]",
+        # Crossed soft mid-wait → only remaining lag applies
+        if (not above_soft and mf is not None
+                and float(mf) >= float(free.get("soft_gib") or soft)):
+            above_soft = True
+            wait_s = lag_s
+            deadline = time.time() + lag_s
+            print(
+                f"    df now >= soft ({free['summary']}) — remaining wait {lag_s}s only",
+                flush=True,
             )
 
     still = _node_disk_pressure_true(ctx)
-    # Taint cleared + free still >= hard: don't MANUAL solely for sticky condition
     free = disk_free_census()
+    # Taint cleared + free still >= hard: continue; condition may lag
     if not free.get("below_hard") and actions:
         return Fix(
             True,
-            f"waited {wait_s}s; df still >= hard ({free['summary']}); "
-            f"taint clear attempted; condition lag still={still} — continuing  "
-            f"[actions={actions}]",
+            f"waited {wait_s}s (grace={grace_s}s+{lag_s}s); df still >= hard "
+            f"({free['summary']}); taint clear attempted; condition lag still={still} "
+            f"— continuing  [actions={actions}]",
         )
     return Fix(False, _manual.join_detail(
-        f"MANUAL: waited {wait_s}s for DiskPressure clear with df above hard "
-        f"({free['summary']}); still pressured={still}. "
+        f"MANUAL: waited {wait_s}s (configured soft-grace={grace_s}s + {lag_s}s) "
+        f"for DiskPressure clear; df={free['summary']}; still pressured={still}. "
         f"Free more disk (above soft={soft}Gi) or check kubelet if sticky.",
         _manual.hint_for("T0.no-disk-pressure"),
     ))
