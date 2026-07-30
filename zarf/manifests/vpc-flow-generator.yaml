@@ -48,7 +48,7 @@ spec:
     spec:
       containers:
         - name: generator
-          image: localhost:5555/cybersec-dask:2025.2.0-notebook
+          image: localhost:5555/cybersec-dask:2025.2.0-74bc219d3a
           imagePullPolicy: IfNotPresent
           command:
             - python
