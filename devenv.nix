@@ -2876,6 +2876,14 @@ asyncio.run(main())
         exit 1
       fi
 
+      # sample-notebooks ConfigMap is a packaged file — re-embed so HDF5 +
+      # generate_hdf5.py + cluster_env.py land in JupyterHub in situ.
+      log_info "Embedding/verifying sample notebooks ConfigMap..."
+      python3 zarf/scripts/verify-sample-notebooks.py || {
+        log_error "sample notebooks gate failed — fix zarf/notebooks/ then retry"
+        exit 1
+      }
+
       cd zarf
       log_info "Running zarf package create..."
       zarf package create --confirm

@@ -2,7 +2,7 @@ kind: ZarfPackageConfig
 metadata:
   name: cybersec-dask
   description: Air-gap deployment package for Dask, JupyterHub, and Panel-Viz on RKE2
-  version: "1.6.6"
+  version: "1.6.7"
   architecture: amd64
   authors: Cyberphy Toolkit Team
   url: https://github.com/cloudera/cybersec
@@ -337,7 +337,11 @@ components:
   - name: sample-notebooks
     required: false
     default: true
-    description: Sample notebooks for OTEL data generation and Dask validation
+    description: >-
+      Sample notebooks ConfigMap for JupyterHub in situ (OTEL + Dask + HDF5).
+      Seeds /root/*.ipynb, generate_hdf5.py, cluster_env.py at singleuser start.
+      Rebuild with: python3 zarf/scripts/verify-sample-notebooks.py before package create.
+      Converge T5.sample-notebooks requires HDF5 keys + sidecars.
     manifests:
       - name: sample-notebooks-manifests
         namespace: jupyterhub

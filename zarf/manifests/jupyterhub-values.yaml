@@ -124,8 +124,11 @@ singleuser:
   # entry-point script, since the binary is not on PATH in the cybersec-dask image.
   # Writable home is /root. ConfigMap samples are RO at /root/sample-notebooks/
   # only — never mount over /app (breaks Lab). At start we *copy* samples into
-  # /root/*.ipynb so the File browser shows editable notebooks at home root;
+  # /root/*.ipynb so the File browser shows editable notebooks at home root
+  # (incl. HDF5_*.ipynb + generate_hdf5.py + cluster_env.py for in-situ HDF5).
   # "Duplicate" must not target the RO sample-notebooks/ folder.
+  # Converge T5.sample-notebooks requires those CM keys; after redeploy users
+  # must Stop/Start singleuser so this seed runs again.
   cmd:
     - bash
     - -lc
@@ -226,10 +229,13 @@ singleuser:
     # s3://$S3_BUCKET/ when unset at package time; operators may set OTEL_DATA_PATH
     OTEL_DATA_PATH: "s3://###ZARF_VAR_S3_BUCKET###/otel-notebook/"
     OTEL_PREFIX: "otel-notebook"
-    # Dask scheduler address in same cluster (aliases for notebook cluster_env)
+    # Distributed Client address only. Do NOT set DASK_SCHEDULER=tcp://… here:
+    # dask maps DASK_SCHEDULER env → config.scheduler *type* (threads|distributed|…),
+    # and dd.read_parquet planning then raises ValueError on the tcp:// string.
     DASK_SCHEDULER_ADDRESS: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
-    DASK_SCHEDULER: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
     USE_DASK: "1"
+    # HDF5_CPHY notebook profile (lab | lab_tiny | airgap) — generate_hdf5.PROFILES
+    HDF5_PROFILE: "lab"
     # Air-gap: do not load Bokeh/HoloViews JS from cdn.bokeh.org (blank plots otherwise)
     BOKEH_RESOURCES: "inline"
 

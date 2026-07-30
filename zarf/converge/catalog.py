@@ -4102,14 +4102,22 @@ def _rem_jupyterhub(ctx: Ctx) -> Fix:
     return fix
 
 
-# Must match zarf/scripts/embed-notebooks.py INCLUDE_NOTEBOOKS + package CM.
+# Must match zarf/scripts/embed-notebooks.py INCLUDE_NOTEBOOKS + sidecars.
 # Presence-only detect masked stale CMs (pre-HDF5) so T5.sample-notebooks was
 # green while JupyterLab only showed OTEL/Dask notebooks (converge-27).
+# JupyterHub singleuser seeds /root/*.ipynb + generate_hdf5.py + cluster_env.py
+# from this ConfigMap at server start (jupyterhub-values.yaml cmd).
 _SAMPLE_NOTEBOOK_KEYS = (
     "OTEL_Data_Generator.ipynb",
     "Dask_S3_Validation.ipynb",
+    "Dask_S3_Workers_OneCell.ipynb",
     "HDF5_CPHY_Acquisition_Generator.ipynb",
     "HDF5_Iceberg_Metadata_Provider.ipynb",
+)
+# HDF5 notebooks need these on the CM mount (copied to /root at singleuser start).
+_SAMPLE_NOTEBOOK_SIDECARS = (
+    "generate_hdf5.py",
+    "cluster_env.py",
 )
 
 
@@ -4124,18 +4132,29 @@ def _sample_notebooks_keys(ctx: Ctx) -> List[str]:
 def _det_sample_notebooks(ctx: Ctx) -> Probe:
     if not ctx.exists("configmap", "sample-notebooks", ns="jupyterhub"):
         return Probe(False, "sample-notebooks ConfigMap absent")
-    keys = _sample_notebooks_keys(ctx)
-    # Only *.ipynb matter for the Jupyter file browser seed
+    keys = set(_sample_notebooks_keys(ctx))
     nb_keys = {k for k in keys if k.endswith(".ipynb")}
-    missing = [k for k in _SAMPLE_NOTEBOOK_KEYS if k not in nb_keys]
-    if missing:
+    missing_nb = [k for k in _SAMPLE_NOTEBOOK_KEYS if k not in nb_keys]
+    missing_side = [k for k in _SAMPLE_NOTEBOOK_SIDECARS if k not in keys]
+    if missing_nb or missing_side:
+        parts = []
+        if missing_nb:
+            parts.append(f"notebooks {missing_nb}")
+        if missing_side:
+            parts.append(f"sidecars {missing_side} (HDF5 needs generate_hdf5.py + cluster_env.py)")
         return Probe(
             False,
-            f"sample-notebooks ConfigMap missing notebooks {missing} "
-            f"(have {sorted(nb_keys)}) — redeploy sample-notebooks from 1.6.6+ package; "
-            f"then stop/start the Jupyter singleuser server so copies refresh",
+            f"sample-notebooks ConfigMap missing {' and '.join(parts)} "
+            f"(have {sorted(keys)}) — re-embed + package create, then "
+            f"`zarf package deploy --components=sample-notebooks` (or full converge); "
+            f"stop/start Jupyter singleuser so /root seeds refresh",
         )
-    return Probe(True, f"sample-notebooks ConfigMap OK ({len(nb_keys)} notebooks incl. HDF5)")
+    hdf5 = [k for k in _SAMPLE_NOTEBOOK_KEYS if k.startswith("HDF5_")]
+    return Probe(
+        True,
+        f"sample-notebooks ConfigMap OK ({len(nb_keys)} notebooks incl. "
+        f"{len(hdf5)} HDF5 + sidecars) — singleuser start copies to /root",
+    )
 
 
 def _rem_sample_notebooks(ctx: Ctx) -> Fix:
@@ -4150,7 +4169,10 @@ def _rem_sample_notebooks(ctx: Ctx) -> Fix:
         "--ignore-not-found", "--wait=false",
     ])
     if r.returncode == 0:
-        actions.append("deleted jupyterhub singleuser pods (re-login to pick up notebooks)")
+        actions.append(
+            "deleted jupyterhub singleuser pods "
+            "(re-login / Start My Server to re-seed /root incl. HDF5 + generate_hdf5.py)"
+        )
     # Re-detect content
     if _det_sample_notebooks(ctx).ok:
         return Fix(True, " | ".join(actions))

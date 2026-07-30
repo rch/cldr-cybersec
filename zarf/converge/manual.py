@@ -623,7 +623,9 @@ HINTS = {
     ),
     "T5.sample-notebooks": zarf_deploy_recipe(
         "sample-notebooks",
-        note="sample-notebooks ConfigMap absent",
+        note="sample-notebooks CM missing required keys (HDF5_*.ipynb + "
+             "generate_hdf5.py + cluster_env.py) or absent — re-embed, package, "
+             "deploy sample-notebooks; Stop/Start Jupyter so /root seeds refresh",
     ),
     "T6.ingress": zarf_deploy_recipe(
         "ingress",

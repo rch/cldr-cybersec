@@ -89,6 +89,9 @@ do_image() {
   echo "[image] done: ${IMG}:${tag}"
 }
 do_package() {
+  # ConfigMap is packaged as a file — must re-embed before create or JH ships stale notebooks.
+  echo "[package] embed + verify sample notebooks (HDF5 + sidecars for in-situ JH seed)..."
+  python3 zarf/scripts/verify-sample-notebooks.py
   echo "[package] zarf package create (image tag $(current_tag))..."
   ( cd zarf && zarf package create --confirm )
   local pkg; pkg="$(ls -t zarf/zarf-package-${IMG}-amd64-*.tar.zst 2>/dev/null | head -1)"

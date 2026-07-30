@@ -30,6 +30,77 @@ def _truthy(name: str, default: str = "0") -> bool:
     return _env(name, default).lower() in ("1", "true", "yes", "on")
 
 
+# dask.config "scheduler" must be a *type* name (threads, distributed, …).
+# JupyterHub / panel often set DASK_SCHEDULER=tcp://… as an *address*; dask then
+# maps that env → config.scheduler and every Delayed.compute() during
+# dd.read_parquet planning raises:
+#   ValueError: Expected one of [distributed, threads, …]
+_DASK_SCHEDULER_TYPES = frozenset(
+    {
+        "distributed",
+        "multiprocessing",
+        "processes",
+        "single-threaded",
+        "sync",
+        "synchronous",
+        "threading",
+        "threads",
+    }
+)
+
+
+def sanitize_dask_scheduler_env() -> Optional[str]:
+    """Move tcp:// (etc.) out of ``DASK_SCHEDULER`` so dask.config is valid.
+
+    Returns the cluster address if one was rescued from the env collision.
+    Safe to call multiple times. Prefer ``DASK_SCHEDULER_ADDRESS`` for the
+    distributed Client; keep ``DASK_SCHEDULER`` unset or a type name only.
+    """
+    raw = (os.environ.get("DASK_SCHEDULER") or "").strip()
+    addr_env = (os.environ.get("DASK_SCHEDULER_ADDRESS") or "").strip()
+    rescued: Optional[str] = None
+
+    looks_like_addr = bool(raw) and (
+        "://" in raw
+        or raw.startswith(("tcp:", "tls:", "ucx:"))
+        or (":" in raw and raw not in _DASK_SCHEDULER_TYPES)
+    )
+    if looks_like_addr:
+        rescued = raw
+        if not addr_env:
+            os.environ["DASK_SCHEDULER_ADDRESS"] = raw
+        # Drop invalid type so dask does not treat tcp:// as scheduler name
+        os.environ.pop("DASK_SCHEDULER", None)
+
+    try:
+        import dask
+
+        current = dask.config.get("scheduler", default=None)
+        if current is not None and not callable(current):
+            name = current if isinstance(current, str) else None
+            if name is not None and name not in _DASK_SCHEDULER_TYPES:
+                # Clear poisoned config (from env or prior set)
+                dask.config.set({"scheduler": None})
+                try:
+                    dask.config.refresh()
+                except Exception:
+                    pass
+                # refresh may re-read env; ensure still clear
+                if (os.environ.get("DASK_SCHEDULER") or "").strip() and looks_like_addr:
+                    os.environ.pop("DASK_SCHEDULER", None)
+                still = dask.config.get("scheduler", default=None)
+                if (
+                    isinstance(still, str)
+                    and still not in _DASK_SCHEDULER_TYPES
+                    and "://" in still
+                ):
+                    dask.config.set({"scheduler": None})
+    except Exception:
+        pass
+
+    return rescued or addr_env or None
+
+
 def _parse_s3_uri(uri: str) -> tuple[str, str]:
     """s3://bucket/prefix/ → (bucket, prefix) with no leading/trailing slashes on prefix."""
     u = (uri or "").strip()
@@ -120,11 +191,13 @@ class ClusterConfig:
         """Return a ``distributed.Client`` (requires dask.distributed)."""
         from dask.distributed import Client
 
+        sanitize_dask_scheduler_env()
         if not self.dask_scheduler:
             raise RuntimeError(
                 "DASK_SCHEDULER_ADDRESS not set — JupyterHub should inject it from "
                 "the in-cluster scheduler Service"
             )
+        # Pass address explicitly — never rely on DASK_SCHEDULER env (type vs addr).
         return Client(self.dask_scheduler)
 
     def summary(self) -> str:
@@ -149,6 +222,9 @@ class ClusterConfig:
 
 def load_cluster_config() -> ClusterConfig:
     """Build config from process environment (JupyterHub singleuser extraEnv)."""
+    # Must run before any dd.read_parquet — see sanitize_dask_scheduler_env docstring.
+    rescued = sanitize_dask_scheduler_env()
+
     bucket = _env("S3_BUCKET")
     otel_path = _env("OTEL_DATA_PATH")
     if not otel_path and bucket:
@@ -172,7 +248,7 @@ def load_cluster_config() -> ClusterConfig:
     )
     scheduler = (
         _env("DASK_SCHEDULER_ADDRESS")
-        or _env("DASK_SCHEDULER")
+        or rescued
         or "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
     )
 
@@ -364,8 +440,11 @@ def load_active_spans_ddf(
     walks every partition. Use ``date=`` / ``under=`` to prune the LIST.
     """
     import time
+
+    import dask
     import dask.dataframe as dd
 
+    sanitize_dask_scheduler_env()
     stack = require_parquet_stack()
     print(
         f"parquet stack: dask={stack['dask']} pyarrow={stack['pyarrow']} "
@@ -404,23 +483,28 @@ def load_active_spans_ddf(
         )
 
     # Explicit URI list (otel-navigator pattern). aggregate_files fattens tiny tasks.
+    # Force a *local* scheduler for collection-plan .compute() inside read_parquet —
+    # workers are for later Client.submit, not for planning metadata on the client.
     t1 = time.time()
     kwargs: dict = {
         "storage_options": cfg.storage_options(),
         "columns": columns,
         "aggregate_files": aggregate_files,
     }
-    try:
-        ddf = dd.read_parquet(uris, **kwargs)
-    except TypeError:
-        # older dask without aggregate_files
-        kwargs.pop("aggregate_files", None)
-        ddf = dd.read_parquet(uris, **kwargs)
+    with dask.config.set({"scheduler": "synchronous"}):
+        try:
+            ddf = dd.read_parquet(uris, **kwargs)
+        except TypeError:
+            # older dask without aggregate_files
+            kwargs.pop("aggregate_files", None)
+            ddf = dd.read_parquet(uris, **kwargs)
+        nparts = ddf.npartitions  # materialize plan under safe scheduler
     t_graph = time.time() - t1
-    print(f"  graph built in {t_graph:.1f}s  partitions={ddf.npartitions}")
+    print(f"  graph built in {t_graph:.1f}s  partitions={nparts}")
 
-    cols = list(getattr(ddf, "columns", []) or [])
-    if not cols:
+    # ddf.columns is a pandas Index — never use `or []` (truth value is ambiguous).
+    cols = list(ddf.columns) if getattr(ddf, "columns", None) is not None else []
+    if len(cols) == 0:
         raise RuntimeError(
             f"dd.read_parquet returned columns=[] for {len(uris)} files; "
             f"sample={sample}"
@@ -492,4 +576,54 @@ except ImportError:
 print("partitions", ddf.npartitions, "columns", list(ddf.columns))
 assert list(ddf.columns), "columns=[] — still path/creds; not schema"
 ddf
+'''
+
+
+def paste_validate_workers_cell() -> str:
+    """Minimal one-cell paste: list once → read_parquet(uris) → workers.
+
+    No project imports — only s3fs / dask / env vars. For hand-carry to remotes.
+    """
+    return r'''# minimal: explicit LIST + distributed parquet read (no project imports)
+import os, time
+import s3fs
+import dask
+import dask.dataframe as dd
+from dask.distributed import Client
+
+endpoint = os.environ["S3_ENDPOINT"]
+bucket   = os.environ["S3_BUCKET"]
+prefix   = os.environ.get("OTEL_PREFIX", "otel-notebook").strip("/")
+date     = (os.environ.get("SPANS_DATE") or "").strip() or None
+sched    = os.environ.get("DASK_SCHEDULER_ADDRESS") or os.environ.get("DASK_SCHEDULER")
+assert sched and "://" in sched, "set DASK_SCHEDULER_ADDRESS=tcp://scheduler:8786"
+
+if os.environ.get("DASK_SCHEDULER", "").startswith(("tcp://", "tls://")):
+    os.environ.pop("DASK_SCHEDULER", None)
+    dask.config.set({"scheduler": None})
+
+storage_options = {
+    "key": os.environ.get("AWS_ACCESS_KEY_ID"),
+    "secret": os.environ.get("AWS_SECRET_ACCESS_KEY"),
+    "client_kwargs": {"endpoint_url": endpoint, "region_name": os.environ.get("AWS_REGION", "us-east-1")},
+    "config_kwargs": {"s3": {"addressing_style": "path"}},
+}
+
+root = f"{bucket}/{prefix}/spans" + (f"/date={date}" if date else "")
+fs = s3fs.S3FileSystem(**storage_options)
+keys = [k for k in fs.find(root) if k.endswith(".parquet")]
+print(f"listed {len(keys)} under s3://{root}/  sample={keys[:2]}")
+assert keys, "no parquet"
+
+uris = [f"s3://{k}" for k in keys]
+with dask.config.set({"scheduler": "synchronous"}):
+    ddf = dd.read_parquet(uris, storage_options=storage_options, aggregate_files=True)
+    print("partitions", ddf.npartitions, "cols", list(ddf.columns)[:6])
+
+client = Client(sched)
+n_workers = len(client.scheduler_info().get("workers", {}))
+t0 = time.time()
+nrows = int(ddf.shape[0].compute())
+print(f"rows≈{nrows:,}  workers={n_workers}  {time.time()-t0:.1f}s")
+print("ok — explicit list + worker parquet read")
 '''

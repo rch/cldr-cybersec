@@ -1,4 +1,4 @@
-# Air-Gap Convergent Deploy — Operator Runbook (v1.6.6)
+# Air-Gap Convergent Deploy — Operator Runbook (v1.6.7)
 
 **Audience.** You have a single-node, air-gapped Kubernetes (RKE2) and need to stand up the
 cybersec-dask / OTEL Navigator stack with **no internet**. The node may already carry a **partial
@@ -53,16 +53,16 @@ Verify integrity (`sha256sum -c SHA256SUMS`), then place each asset:
 
 | Asset | Destination |
 |-------|-------------|
-| `zarf-package-cybersec-dask-amd64-1.6.6.tar.zst` | `/var/tmp/` — **keep only ONE version there** (discovery is newest-by-mtime) |
+| `zarf-package-cybersec-dask-amd64-1.6.7.tar.zst` | `/var/tmp/` — **keep only ONE version there** (discovery is newest-by-mtime) |
 | `zarf-init-amd64-v0.70.1.tar.zst` *(Layer A — the piece partial procedures most often lack)* | `/var/tmp/` (beside the deploy package) |
 | `zarf` *(v0.70.1 binary)* | `/usr/local/bin/zarf` (`chmod +x`) |
-| `cybersec-converge-1.6.6.tar.gz` *(the engine)* | unpack anywhere writable |
+| `cybersec-converge-1.6.7.tar.gz` *(the engine)* | unpack anywhere writable |
 
 ```bash
 sha256sum -c SHA256SUMS
 install -m0755 zarf /usr/local/bin/zarf
-mv zarf-package-cybersec-dask-amd64-1.6.6.tar.zst zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
-mkdir -p ~/cybersec-converge && tar xzf cybersec-converge-1.6.6.tar.gz -C ~/cybersec-converge
+mv zarf-package-cybersec-dask-amd64-1.6.7.tar.zst zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
+mkdir -p ~/cybersec-converge && tar xzf cybersec-converge-1.6.7.tar.gz -C ~/cybersec-converge
 ```
 
 ## 4. Converge — one command
@@ -204,7 +204,7 @@ does not wipe the registry hostPath; new layers are added beside old ones (plan 
 | Deploy package | **exactly one** `zarf-package-cybersec-dask-amd64-*.tar.zst` in discovery paths (`/var/tmp` …) — remove every older tarball |
 | Init package | `zarf-init-amd64-v0.70.1.tar.zst` beside the deploy package (Layer A) |
 | `zarf` binary | **this kit’s** v0.70.x binary — format skew with a stale CLI is unrecoverable air-gapped |
-| Engine | **this kit’s** `cybersec-converge-1.6.6.tar.gz` unpacked (old engine + new package ⇒ wrong target tag) |
+| Engine | **this kit’s** `cybersec-converge-1.6.7.tar.gz` unpacked (old engine + new package ⇒ wrong target tag) |
 | S3 | same endpoint/bucket/creds the live stack already uses (`S3_BUCKET` required) |
 
 ### Procedure
@@ -216,13 +216,13 @@ install -m0755 zarf /usr/local/bin/zarf
 zarf version    # expect v0.70.x
 
 rm -f /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst
-mv zarf-package-cybersec-dask-amd64-1.6.6.tar.zst \
+mv zarf-package-cybersec-dask-amd64-1.6.7.tar.zst \
    zarf-init-amd64-v0.70.1.tar.zst /var/tmp/
 
 # Fresh engine tree (do not mix sources with a previous unpack)
 rm -rf ~/cybersec-converge
 mkdir -p ~/cybersec-converge
-tar xzf cybersec-converge-1.6.6.tar.gz -C ~/cybersec-converge
+tar xzf cybersec-converge-1.6.7.tar.gz -C ~/cybersec-converge
 
 # 2. Same S3 as the running deployment (secrets off argv)
 umask 077; cat > /dev/shm/s3-creds <<'EOF'
@@ -270,7 +270,7 @@ cp /root/sample-notebooks/HDF5_Iceberg_Metadata_Provider.ipynb /root/
 # plus OTEL_Data_Generator / Dask_S3_Validation as needed
 ```
 
-### Compatibility (pre-v1.6.5 → 1.6.6)
+### Compatibility (pre-v1.6.5 → 1.6.7)
 
 | Concern | Compatible? |
 |---------|-------------|
@@ -280,7 +280,7 @@ cp /root/sample-notebooks/HDF5_Iceberg_Metadata_Provider.ipynb /root/
 | S3 / OTEL / operator data | Yes — preserved |
 | CPHY prefix `datasets/hdf5/cphy/` | Additive — does not replace older keys |
 | Ingress `/ws` terminal route | Yes if **ingress** is re-applied (this package’s apply does) |
-| Old engine tarball + new deploy package | **No** — always unpack **this** `cybersec-converge-1.6.6` |
+| Old engine tarball + new deploy package | **No** — always unpack **this** `cybersec-converge-1.6.7` |
 | Multiple deploy packages in `/var/tmp` | **No** — remove extras (mtime discovery) |
 | Stale `zarf` CLI ≠ kit v0.70.x | **No** — install kit binary first |
 

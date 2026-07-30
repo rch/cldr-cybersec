@@ -1,78 +1,38 @@
 # Sample Notebooks
 
-These notebooks demonstrate out-of-core processing with Dask and S3.
+**Source of truth:** `zarf/notebooks/` (+ `snippets/cluster_env.py`, `zarf/scripts/generate_hdf5.py`).  
+Rebuild ConfigMap: `python3 zarf/scripts/verify-sample-notebooks.py` before `zarf package create`.
 
-## Available Notebooks
+## In situ (JupyterHub)
 
-| Notebook | Description | Data Size |
-|----------|-------------|-----------|
-| `OTEL_Data_Generator.ipynb` | Generate synthetic OTEL spans (same methodology as 1TB dataset) | Configurable |
-| `Dask_S3_Validation.ipynb` | Out-of-core Dask stress test with 30GB dataset | 30 GB |
-| `HDF5_CPHY_Acquisition_Generator.ipynb` | CPHY/OTel HDF5 + Dask/datashader (idempotent Run All) | lab ~10 GiB / lab_tiny ~6 MiB / airgap ~2 TiB |
+ConfigMap `sample-notebooks` mounts RO at `/root/sample-notebooks/`. On singleuser
+**start**, JH copies to writable `/root/`:
 
-## Getting Started
+- all `*.ipynb` (OTEL, Dask, **HDF5_***)
+- `generate_hdf5.py` (CPHY notebook import)
+- `cluster_env.py`
 
-These notebooks are **read-only** under `~/sample-notebooks/` (ConfigMap).
-JupyterLab opens in `$HOME` (`/root`); copy a notebook to the top level to edit:
+Converge **T5.sample-notebooks** fails if any of those are missing. After package
+deploy: **Stop My Server → Start My Server** so seeds refresh.
 
-```bash
-cp ~/sample-notebooks/HDF5_CPHY_Acquisition_Generator.ipynb ~/
-```
+Open `/root/HDF5_CPHY_Acquisition_Generator.ipynb` (not the RO mount).
 
-The CPHY HDF5 notebook is **idempotent by default**: Run All reuses existing
-full-size parts under `s3://…/datasets/hdf5/…`. Set `FORCE_REGENERATE = True`
-(or `HDF5_FORCE_REGENERATE=1`) only when you want a fresh write.
+## Notebooks
 
-## Environment Variables
+| Notebook | Role |
+|----------|------|
+| `OTEL_Data_Generator.ipynb` | Spans → `…/spans/date=*/batch_*.parquet` |
+| `Dask_S3_Validation.ipynb` | Explicit LIST + worker parquet |
+| `Dask_S3_Workers_OneCell.ipynb` | Minimal hand-carry (s3fs+dask only) |
+| `HDF5_CPHY_Acquisition_Generator.ipynb` | CPHY HDF5 + Dask (idempotent) |
+| `HDF5_Iceberg_Metadata_Provider.ipynb` | hdf5_iceberg metadata plane |
 
-The following are pre-configured (local lab: RustFS `admin`/`admin`, bucket `cyberphy`):
-- `DASK_SCHEDULER_ADDRESS`: Dask cluster endpoint
-- `S3_ENDPOINT`: S3 endpoint (RustFS on lab nodes; empty for AWS)
-- `S3_BUCKET`: data bucket (default `cyberphy` in notebooks)
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`: S3 credentials
-- `HDF5_PROFILE` / `HDF5_FORCE_REGENERATE`: optional CPHY generator overrides
+## Env (from converge / Zarf)
 
-## Cluster Resources
+- `DASK_SCHEDULER_ADDRESS` (not `DASK_SCHEDULER=tcp://…` — breaks dask planning)
+- `S3_ENDPOINT`, `S3_BUCKET`, AWS keys (lab RustFS: `admin`/`admin`)
+- `OTEL_DATA_PATH` / `OTEL_PREFIX`, `HDF5_PROFILE=lab`, `USE_DASK=1`, `BOKEH_RESOURCES=inline`
 
-Default package: **4 workers** × 2 threads × 6 GiB (multi-core baseline).  
-CPU limit is templated to match threads (avoid 1 CPU / 2 nthreads stall).
+## HDF5 notes
 
-| Workload | Replicas | Notes |
-|----------|----------|--------|
-| Smoke | 1–2 | tiny hosts |
-| Multi-core lab | 8–16 | this class of box |
-| Air-gap 2 TiB HDF5 | 16–32 | wide part fan-out |
-
-```bash
-# Prefer DaskCluster CR (operator source of truth)
-kubectl -n dask patch daskcluster cybersec-dask --type merge \
-  -p '{"spec":{"worker":{"replicas":8}}}'
-
-# At zarf deploy
-# --set DASK_WORKER_REPLICAS=8 --set DASK_WORKER_NTHREADS=2 --set DASK_WORKER_CPU=2
-```
-
-## Holoviews in air-gap
-
-Use embedded Bokeh resources (no CDN):
-
-```python
-import os
-os.environ.setdefault("BOKEH_RESOURCES", "inline")
-import holoviews as hv
-hv.config.image_rtol = 1.0
-hv.extension("bokeh", inline=True)
-```
-
-- **Dask_S3_Validation**: density plot uses `datashader.Canvas` + coords-only `hv.Image`
-  so zoom re-aggregates on Dask workers without the Holoviews 1.23 Image bounds error.
-- **HDF5_CPHY**: generation is idempotent (`ensure_parts`); viz uses INLINE/PNG fallback.
-
-### HDF5 + Dask
-
-`HDF5_CPHY_Acquisition_Generator.ipynb` builds a multi-file `dask.array` (one task
-per hive part). Reductions run on workers. The heatmap is **viewport-driven**: each
-pan/zoom slices `values_da` and `.compute()`s only overlapping parts (same contract
-for lab ~10 GiB and multi-TB). Tune with `SERIES_STRIDE`, `TIME_STRIDE`, `MAX_PARTS`,
-and `TARGET_WORKERS`.
-
+Idempotent by default (`ensure_parts`). Force rewrite: `HDF5_FORCE_REGENERATE=1`.
