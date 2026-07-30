@@ -528,17 +528,33 @@ def _pre_deploy_feasibility(ctx: Ctx, components: str) -> List[str]:
         issues.append(f"node not schedulable: {node['summary']}")
     issues.extend(_disk_pressure_issues(ctx))
     # Components with in-package Ready waits (zarf.yaml after actions)
-    if any(x in c for x in ("dask-cluster", "dask-operator")):
-        reg = _registry_census(ctx)
-        if reg.get("catalog_has_app") is False:
-            issues.append("registry catalog missing cybersec-dask — push images first")
+    # Registry v2 is SoR for pullability (alongside kubectl / helm secrets).
+    reg = _registry_census(ctx)
+    if any(x in c for x in (
+        "cybersec-images", "dask-cluster", "dask-operator",
+        "jupyterhub", "panel-viz", "navigator-engine",
+    )):
         if reg.get("registry_ready", 0) < 1 and reg.get("registry_total", 0) > 0:
             issues.append("zarf registry pods not Ready")
+        if reg.get("catalog_has_app") is False:
+            issues.append("registry catalog missing cybersec-dask — push images first")
+        if reg.get("partial_push"):
+            issues.append(
+                f"registry PARTIAL_PUSH for cybersec-dask:{reg.get('target_tag')} "
+                f"(catalog has repo, manifest HEAD 404) — re-push cybersec-images "
+                f"before deploy that would ImagePullBackOff"
+            )
+        elif reg.get("manifest_ok") is False and reg.get("target_tag"):
+            issues.append(
+                f"registry missing pullable manifest cybersec-dask:{reg.get('target_tag')} "
+                f"— push cybersec-images first"
+            )
+    if any(x in c for x in ("dask-cluster", "dask-operator")):
         sched = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
         if "dask-cluster" in c and sched["pending"] and not node["schedulable"]:
             issues.append(
                 "scheduler already Pending and node not schedulable — "
-                "resolve schedule before dask-cluster deploy (embedded 900s wait)"
+                "resolve schedule before dask-cluster deploy (embedded wait)"
             )
         if "dask-cluster" in c and sched["image_pull"]:
             issues.append(
@@ -973,8 +989,124 @@ def _pod_terminal_census(ctx: Ctx, ns: str, selector: str) -> dict:
     }
 
 
+def _registry_v2_bases(ctx: Ctx) -> List[str]:
+    """In-cluster registry HTTP bases (distribution v2) — part of the SoR set.
+
+    Prefer ClusterIP/NodePort of zarf-docker-registry; fall back to common NodePort.
+    Fully in-cluster; no external registry.
+    """
+    bases: List[str] = []
+    svc = (
+        ctx.get("svc", "zarf-docker-registry", ns=ZARF_NS)
+        or ctx.get("service", "zarf-docker-registry", ns=ZARF_NS)
+    )
+    if svc:
+        spec = svc.get("spec") or {}
+        ports = spec.get("ports") or []
+        port = 5000
+        for p in ports:
+            if p.get("name") in ("http", "registry", None) or p.get("port"):
+                port = int(p.get("port") or 5000)
+                np = p.get("nodePort")
+                if np:
+                    bases.append(f"http://127.0.0.1:{int(np)}")
+                break
+        cip = spec.get("clusterIP")
+        if cip and cip not in ("None", "none", ""):
+            bases.append(f"http://{cip}:{port}")
+    # Common zarf internal registry NodePort on single-node RKE2
+    for np in (31999, 30001):
+        b = f"http://127.0.0.1:{np}"
+        if b not in bases:
+            bases.append(b)
+    return bases
+
+
+def _registry_manifest_head(ctx: Ctx, repo: str, tag: str) -> dict:
+    """HEAD /v2/<repo>/manifests/<tag> against the zarf registry.
+
+    Distinguishes:
+      * 200 — manifest present (pullable)
+      * 404 — tag/manifest missing (partial push if catalog lists repo)
+      * 401/403 — auth; treat as unknown (not a false partial)
+      * other/unreachable — unknown
+
+    This is the only in-cluster place "blobs present, manifest absent" is knowable.
+    """
+    import urllib.error
+    import urllib.request
+
+    if not tag or not repo:
+        return {"ok": None, "status": None, "detail": "no target tag/repo"}
+    path = f"/v2/{repo}/manifests/{tag}"
+    accept = (
+        "application/vnd.docker.distribution.manifest.v2+json,"
+        "application/vnd.oci.image.manifest.v1+json,"
+        "application/vnd.docker.distribution.manifest.list.v2+json"
+    )
+    last_err = ""
+    for base in _registry_v2_bases(ctx):
+        url = base.rstrip("/") + path
+        try:
+            req = urllib.request.Request(
+                url, method="HEAD",
+                headers={"Accept": accept},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                code = getattr(resp, "status", None) or resp.getcode()
+                if code == 200:
+                    return {
+                        "ok": True,
+                        "status": 200,
+                        "detail": f"manifest HEAD 200 {repo}:{tag} via {base}",
+                        "base": base,
+                    }
+                last_err = f"{base} → HTTP {code}"
+        except urllib.error.HTTPError as e:
+            if e.code == 200:
+                return {
+                    "ok": True, "status": 200,
+                    "detail": f"manifest HEAD 200 {repo}:{tag} via {base}",
+                    "base": base,
+                }
+            if e.code == 404:
+                return {
+                    "ok": False,
+                    "status": 404,
+                    "detail": (
+                        f"manifest HEAD 404 {repo}:{tag} via {base} — "
+                        f"tag not pullable (partial push or never pushed)"
+                    ),
+                    "base": base,
+                }
+            if e.code in (401, 403):
+                return {
+                    "ok": None,
+                    "status": e.code,
+                    "detail": f"manifest HEAD {e.code} (auth) via {base} — unknown",
+                    "base": base,
+                }
+            last_err = f"{base} → HTTP {e.code}"
+        except Exception as e:  # noqa: BLE001 — census best-effort
+            last_err = f"{base} → {type(e).__name__}: {e}"
+            continue
+    return {
+        "ok": None,
+        "status": None,
+        "detail": f"manifest HEAD unreachable ({last_err})",
+    }
+
+
 def _registry_census(ctx: Ctx) -> dict:
-    """Knowable Layer-A registry state: pod Ready + catalog lists cybersec-dask."""
+    """Knowable Layer-A registry state (in-cluster SoR alongside kubectl/helm secrets).
+
+    - registry Deployment pods Ready
+    - ``zarf tools registry catalog`` lists cybersec-dask (repo presence)
+    - distribution v2 HEAD of the *package target tag* (manifest pullable)
+
+    Catalog-has-repo + HEAD 404 ⇒ partial push — the state that survives a
+    feasibility probe based only on catalog and then ImagePullBackOffs on deploy.
+    """
     reg_ready, reg_total = ctx.pods_ready(ZARF_NS, "app=docker-registry")
     if reg_total == 0:
         reg_ready, reg_total = ctx.pods_ready(ZARF_NS, "app.kubernetes.io/name=docker-registry")
@@ -991,15 +1123,42 @@ def _registry_census(ctx: Ctx) -> dict:
             )
         else:
             catalog_detail = f"catalog query rc={r.returncode}"
+
+    tag = _target_cybersec_tag(ctx)
+    # _target_cybersec_tag is defined later in this module — available at runtime
+    manifest = _registry_manifest_head(ctx, "cybersec-dask", tag) if tag else {
+        "ok": None, "status": None, "detail": "no package target tag in artifacts.manifest",
+    }
+    partial = (
+        catalog_ok is True
+        and manifest.get("ok") is False
+        and manifest.get("status") == 404
+    )
+    bits = [f"registry pods {reg_ready}/{reg_total}"]
+    if catalog_detail:
+        bits.append(catalog_detail)
+    if tag:
+        bits.append(manifest.get("detail") or f"manifest {tag}=?")
+    if partial:
+        bits.append("PARTIAL_PUSH (repo in catalog, target manifest 404)")
+
+    # healthy: pods up, not known-absent catalog, not partial push, manifest not 404
+    healthy = (
+        reg_ready >= 1
+        and catalog_ok is not False
+        and not partial
+        and manifest.get("ok") is not False
+    )
     return {
         "registry_ready": reg_ready,
         "registry_total": reg_total,
         "catalog_has_app": catalog_ok,
-        "detail": (
-            f"registry pods {reg_ready}/{reg_total}"
-            + (f"; {catalog_detail}" if catalog_detail else "")
-        ),
-        "healthy": reg_ready >= 1 and catalog_ok is not False,
+        "manifest_ok": manifest.get("ok"),
+        "manifest_status": manifest.get("status"),
+        "target_tag": tag,
+        "partial_push": partial,
+        "detail": "; ".join(bits),
+        "healthy": healthy,
     }
 
 
@@ -1433,25 +1592,26 @@ def _rem_registry_running(ctx: Ctx) -> Fix:
 # --------------------------------------------------------------------------- #
 
 def _det_images_pushed(ctx: Ctx) -> Probe:
-    # Proxy: if the operator / app pods are NOT in ImagePullBackOff and exist, the
-    # images are in the registry. Definitive when those components are deployed.
+    """App image pullable from in-cluster registry (catalog + v2 manifest HEAD)."""
     for ns, sel in (("dask-operator", "app.kubernetes.io/name=dask-kubernetes-operator"),
                     ("dask", "dask.org/component=scheduler")):
         miss = ctx.pod_image_missing(ns, sel)
         if miss is True:
             return Probe(False, f"{ns} pods in ImagePullBackOff — images not in registry")
-    if ctx.have_zarf():
-        r = ctx.zarf(["tools", "registry", "catalog"], timeout=60)
-        if r.returncode == 0:
-            if "cybersec-dask" in r.stdout:
-                return Probe(True, "registry catalog contains cybersec-dask")
-            # Evidence of ABSENCE: catalog reachable and the app repo isn't there.
-            # (Previously conservative-True — harmless only because required
-            # components re-push on every deploy; being precise keeps the report
-            # honest and pushes at T2 where it belongs.)
-            return Probe(False, "registry catalog reachable but cybersec-dask absent — push needed")
-    # Catalog unreachable / no pods to judge: defer to the component invariants.
-    return Probe(True, "no image-pull failures observed")
+    reg = _registry_census(ctx)
+    if reg.get("partial_push"):
+        return Probe(
+            False,
+            f"PARTIAL_PUSH — {reg['detail']}",
+        )
+    if reg.get("manifest_ok") is True:
+        return Probe(True, reg["detail"])
+    if reg.get("catalog_has_app") is False:
+        return Probe(False, f"registry catalog missing cybersec-dask — {reg['detail']}")
+    if reg.get("manifest_ok") is False:
+        return Probe(False, reg["detail"])
+    # Catalog/HEAD unknown: defer unless pods prove pull failure (above)
+    return Probe(True, reg["detail"] or "no image-pull failures observed")
 
 
 def _rem_images_pushed(ctx: Ctx) -> Fix:
