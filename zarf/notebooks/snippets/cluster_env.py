@@ -69,9 +69,8 @@ class ClusterConfig:
 
     @property
     def spans_glob(self) -> str:
-        """Glob matching app layout: {root}/spans/date=*/hour=*/*.parquet."""
-        root = self.dataset_root_key
-        return f"s3://{root}/spans/date=*/*/*.parquet"
+        """OTEL_Data_Generator layout: {root}/spans/date=*/*.parquet (no hour=)."""
+        return f"s3://{self.dataset_root_key}/spans/date=*/*.parquet"
 
     @property
     def spans_prefix_s3(self) -> str:
@@ -210,8 +209,13 @@ def list_span_parquet_keys(
 ) -> list:
     """List parquet object keys under ``{bucket}/{prefix}/spans/`` (recursive).
 
-    Prefer ``find()`` over ``**`` globs — s3fs/Dask often miss nested hour=
-    partitions with patterns like ``date=*/**/*.parquet`` (field notebooks-02).
+    Layouts (in priority order for discovery):
+      1. **OTEL_Data_Generator (pyarrow notebook)** — ``spans/date=YYYY-MM-DD/*.parquet``
+         (no hour= partition; batch_*.parquet directly under date=)
+      2. Production-style — ``spans/date=*/hour=*/*.parquet``
+      3. Shard layouts — ``spans/shard=*/date=*/…``
+
+    Prefer ``find()`` then explicit globs. Never use ``**`` (s3fs often empty).
     """
     import s3fs
 
@@ -221,7 +225,7 @@ def list_span_parquet_keys(
     spans = f"{root.rstrip('/')}/spans"
     files: list = []
 
-    # 1) Recursive find under spans/ only (most reliable for date=/hour= trees)
+    # 1) Recursive find under spans/ (covers date-only and date/hour trees)
     try:
         if fs.exists(spans):
             found = fs.find(spans)
@@ -229,12 +233,13 @@ def list_span_parquet_keys(
     except Exception:
         files = []
 
-    # 2) Explicit partition globs (no ** — s3fs is unreliable with **)
+    # 2) Explicit globs — notebook generator first (date=*/*.parquet, no hour=)
     if not files:
         for pat in (
-            f"{spans}/date=*/hour=*/*.parquet",
+            f"{spans}/date=*/*.parquet",  # OTEL_Data_Generator notebook
+            f"{spans}/date=*/batch_*.parquet",
+            f"{spans}/date=*/hour=*/*.parquet",  # production / 1TB style
             f"{spans}/date=*/*/*.parquet",
-            f"{spans}/date=*/*.parquet",
             f"{spans}/shard=*/date=*/*.parquet",
             f"{spans}/shard=*/date=*/batch_*.parquet",
             f"{spans}/shard=*/date=*/*/*.parquet",
@@ -246,6 +251,28 @@ def list_span_parquet_keys(
             if hits:
                 files = hits
                 break
+
+    # 3) One-level ls of each date= partition (robust when glob is picky)
+    if not files:
+        try:
+            date_dirs = fs.glob(f"{spans}/date=*") or []
+            for d in date_dirs:
+                try:
+                    for name in fs.ls(d):
+                        if str(name).endswith(".parquet"):
+                            files.append(name)
+                        else:
+                            # hour= subdir
+                            try:
+                                for sub in fs.ls(name):
+                                    if str(sub).endswith(".parquet"):
+                                        files.append(sub)
+                            except Exception:
+                                pass
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
     if len(files) > max_list:
         files = files[:max_list]
@@ -260,8 +287,11 @@ def load_active_spans_ddf(
 ):
     """Lazy Dask DataFrame over partitioned span parquet — never full pyarrow load.
 
-    Discovers files under ``{bucket}/{prefix}/spans/`` (date=/hour= or shard=)
-    via recursive listing — never ``date=*/**/*.parquet`` (misses partitions).
+    Default field layout from **OTEL_Data_Generator** notebook::
+
+        s3://{bucket}/{prefix}/spans/date=YYYY-MM-DD/batch_*.parquet
+
+    (date= only — no hour=). Also accepts production date=/hour= trees.
     """
     import dask.dataframe as dd
 
@@ -273,22 +303,21 @@ def load_active_spans_ddf(
     files = list_span_parquet_keys(cfg)
     if not files:
         raise FileNotFoundError(
-            f"no parquet under s3://{spans}/ (partitioned layout required).\n"
-            f"This is PATH config drift (wrong prefix), not schema drift — "
-            f"empty columns from a missing prefix look like a missing schema.\n"
-            f"Expected: s3://{{bucket}}/otel-notebook/spans/date=*/hour=*/*.parquet "
-            f"(or your OTEL_DATA_PATH + /spans/).\n"
-            f"Do not use validation-30gb or globs with '**' "
-            f"(s3://…/spans/date=*/**/*.parquet often matches nothing).\n"
-            f"Fix: OTEL_DATA_PATH / OTEL_PREFIX from JupyterHub env (converge → zarf)."
+            f"no parquet under s3://{spans}/.\n"
+            f"OTEL_Data_Generator writes: s3://{spans}/date=YYYY-MM-DD/*.parquet\n"
+            f"(date= only — no hour=). Not validation-30gb; not date=*/**/*.\n"
+            f"Empty columns after a bad glob is PATH drift, not schema drift.\n"
+            f"Fix: OTEL_DATA_PATH / prefix so root is …/otel-notebook/spans/."
         )
-    # dd.read_parquet wants s3:// URIs when using storage_options
     uris = [f"s3://{f}" if not str(f).startswith("s3://") else str(f) for f in files]
-    # Sample keys so operators can confirm hour= partitions
     sample = uris[:3]
+    # Detect layout for operator feedback
+    layout = "date=/*.parquet"
+    if any("/hour=" in u for u in sample):
+        layout = "date=/hour=/*.parquet"
     print(
-        f"load_active_spans_ddf: {len(uris)} parquet files under s3://{spans}/\n"
-        f"  sample: {sample}"
+        f"load_active_spans_ddf: {len(uris)} parquet under s3://{spans}/ "
+        f"(layout≈{layout})\n  sample: {sample}"
     )
     ddf = dd.read_parquet(
         uris,
