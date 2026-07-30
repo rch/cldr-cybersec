@@ -549,8 +549,6 @@ def _pre_deploy_feasibility(ctx: Ctx, components: str) -> List[str]:
 
 
 def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
-    from .discovery import write_journal  # local import avoids cycle at module load
-
     missing = []
     if not ctx.have_zarf():
         missing.append(f"zarf binary missing (zarf_bin={ctx.zarf_bin!r})")
@@ -574,7 +572,8 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
             ))
         # Pressure cleared — fall through to deploy
         print(f"    disk pressure resolved: {resolved.detail}", flush=True)
-    # Feasibility before procedures with embedded health gates (converge-09)
+    # Feasibility from *live* API/registry/node state only (no out-of-band journal).
+    # Converge-09 class: refuse deploys whose embedded waits are already doomed.
     feas = _pre_deploy_feasibility(ctx, components)
     if feas:
         return Fix(False, _manual.join_detail(
@@ -582,12 +581,6 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
             f"failed: {'; '.join(feas)}",
             _manual.zarf_deploy_recipe(components),
         ))
-    write_journal({
-        "last_procedure": f"zarf package deploy --components={components}",
-        "last_component": components.split(",")[0].strip(),
-        "last_status": "in_flight",
-        "last_start": __import__("datetime").datetime.utcnow().isoformat() + "Z",
-    })
     # Fail LOUD rather than render an empty S3_BUCKET. An S3-dependent component
     # deployed with a blank bucket renders OTEL_DATA_PATH=s3:/// and bricks the app
     # ("Invalid bucket name 's3:'"), so refuse instead of silently breaking it.
@@ -678,11 +671,6 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
             )
             r2 = ctx.zarf(args, env=env)
             if r2.returncode == 0:
-                write_journal({
-                    "last_status": "ok",
-                    "last_component": components,
-                    "last_end": __import__("datetime").datetime.utcnow().isoformat() + "Z",
-                })
                 return Fix(True, f"zarf deploy {components}: rc=0 "
                                  f"(retry after dead-release removal)  [{note}]{pre}")
             pre += f"  [{note}]"
@@ -695,29 +683,17 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
             except OSError:
                 pass
     if r.returncode == 0:
-        write_journal({
-            "last_status": "ok",
-            "last_component": components,
-            "last_end": __import__("datetime").datetime.utcnow().isoformat() + "Z",
-        })
         return Fix(True, f"zarf deploy {components}: rc=0{pre}")
     # Surface the actual zarf/Helm error tail, not a bare rc=1 — the deploy failures
     # (dask-operator/jupyterhub) only showed "rc=1" all afternoon. Last lines tend to
     # carry the cause (chart timeout, image pull, CRD hook); S3 secrets ride env, not
     # stdout, so this stays clean. Always attach in-situ DISCOVER/FIX so operators can
     # re-run the same ``zarf package deploy --components=…`` that unblocks installs.
+    # Failure leaves *cluster* evidence (helm failed-with-history, Pending pods,
+    # Deployment available=0) — next discover() reads that API state, not a journal.
     tail = (Ctx.out_text(r.stderr) or Ctx.out_text(r.stdout)).strip().splitlines()[-3:]
     suffix = f" — {' / '.join(s.strip() for s in tail)}" if tail else ""
     head = f"zarf deploy {components}: rc={r.returncode}{suffix}{pre}"
-    status = "timeout" if r.returncode == 124 or "timed out" in suffix.lower() else "fail"
-    if "signal: killed" in suffix.lower() or "killed" in (Ctx.out_text(r.stderr) or "").lower():
-        status = "killed"
-    write_journal({
-        "last_status": status,
-        "last_component": components,
-        "last_detail": head[:500],
-        "last_end": __import__("datetime").datetime.utcnow().isoformat() + "Z",
-    })
     return Fix(False, _manual.join_detail(
         head,
         _manual.zarf_deploy_recipe(

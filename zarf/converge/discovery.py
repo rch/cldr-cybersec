@@ -15,22 +15,15 @@ The sweep is idempotent and safe to run on a healthy converged cluster (no-ops).
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .kube import Ctx
 
 # Pending pods older than this become wedges (eviction fallout that never resumed).
+# Age is computed from pod metadata.creationTimestamp (kubectl/API SoR — not a journal).
 _PENDING_GRACE_S = 300
-
-# Node-side journal: last expensive procedure outcome (interrupted-upgrade memory).
-_JOURNAL_PATHS = (
-    Path("/var/tmp/cybersec-converge-journal.json"),
-    Path("/tmp/cybersec-converge-journal.json"),
-)
 
 # --------------------------------------------------------------------------- #
 # Scope: what we own vs what we must not touch
@@ -254,41 +247,17 @@ def _ready_count(pods: List[dict]) -> int:
     return n
 
 
-def journal_path() -> Path:
-    for p in _JOURNAL_PATHS:
-        try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            if os.access(p.parent, os.W_OK):
-                return p
-        except OSError:
-            continue
-    return _JOURNAL_PATHS[-1]
-
-
-def read_journal() -> dict:
-    p = journal_path()
-    if not p.is_file():
-        return {}
-    try:
-        return json.loads(p.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def write_journal(update: dict) -> None:
-    """Merge update into node-side journal (best-effort; never fails the engine)."""
-    try:
-        cur = read_journal()
-        cur.update(update)
-        cur["updated_at"] = datetime.now(timezone.utc).isoformat()
-        journal_path().write_text(json.dumps(cur, indent=2) + "\n")
-    except OSError:
-        pass
-
-
 # --------------------------------------------------------------------------- #
 # Discovery (read-only)
 # --------------------------------------------------------------------------- #
+
+# Design: discovery is *memoryless* by intent. The K8s API (and on-node Layer-A
+# paths like the zarf registry hostPath / package tarballs when present) is the
+# system of record. Other operators may have mutated the cluster since the last
+# converge run; a local journal cannot outrank live API state and must not gate
+# remediations. When we miss a failure class, we extend inspection of *current*
+# objects (Deployments, Pods, helm secrets, zarf package secrets, node conditions)
+# and the catalog logic table — not out-of-band procedural memory.
 
 def discover(ctx: Ctx) -> DiscoveryReport:
     """Full entry-point walk of managed scope + related cluster objects."""
@@ -473,23 +442,7 @@ def discover(ctx: Ctx) -> DiscoveryReport:
                      if "zarf" in k or k in ("package-deployed", "name", "version")}
             rep.add("info", f"zarf-ledger/{lns}/{name}",
                     f"labels={zlabs} data_keys={data_keys}",
-                    root="primary source for last package deploy; compare to journal")
-
-    # --- Run journal (procedural memory from prior apply) ---
-    j = read_journal()
-    if j.get("last_status") in ("fail", "timeout", "error", "killed"):
-        rep.add(
-            "wedge",
-            "journal/last-procedure",
-            f"status={j.get('last_status')} component={j.get('last_component')} "
-            f"proc={j.get('last_procedure')} at={j.get('last_end') or j.get('updated_at')}",
-            root="previous expensive procedure died in-flight — unwind target "
-                 "Deployment/helm before repeating the same deploy (converge-09 class)",
-        )
-    elif j.get("last_status") == "ok" and j.get("last_component"):
-        rep.add("info", "journal/last-procedure",
-                f"last ok component={j.get('last_component')} at={j.get('updated_at')}",
-                root="prior apply completed cleanly")
+                    root="cluster-resident record of package deploy (API SoR; not a journal)")
 
     # --- junk / ImagePull / Pending-beyond-grace pods ---
     for ns in MANAGED_NAMESPACES:
