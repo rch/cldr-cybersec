@@ -123,10 +123,17 @@ if [ -n "$PKG_ARG" ]; then
   if [ -f "$PKG_ARG" ] && [ -r "$PKG_ARG" ]; then
     PKG_ARG="$(cd "$(dirname "$PKG_ARG")" && pwd)/$(basename "$PKG_ARG")"
   else
-    echo "   ⚠ package path not readable as $(id -un): ${PKG_ARG}"
-    echo "     (common on NFS with root_squash when using sudo — copy to /var/tmp or"
-    echo "      run without sudo if kubeconfig allows; falling back to discovery)"
+    # Distinguish missing path vs permission (NFS root_squash) — both fail [ -f/-r ]
+    # under sudo but the operator fix differs (wrong path vs stage to /var/tmp).
+    if [ ! -e "$PKG_ARG" ]; then
+      echo "   ⚠ package path does not exist as $(id -un): ${PKG_ARG}"
+      echo "     (typo, wrong date dir, or mount not visible to this uid — check ls)"
+    else
+      echo "   ⚠ package path not readable as $(id -un): ${PKG_ARG}"
+      echo "     (common on NFS with root_squash when using sudo — copy to /var/tmp)"
+    fi
     ls -la "$PKG_ARG" 2>&1 | sed 's/^/     /' || true
+    echo "     falling back to discovery…"
     PKG_ARG=""
   fi
 fi
