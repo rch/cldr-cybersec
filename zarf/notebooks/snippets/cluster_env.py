@@ -162,7 +162,8 @@ def load_cluster_config() -> ClusterConfig:
     prefix = _env("OTEL_PREFIX") or _env("OTEL_DATASET_PREFIX") or prefix
     # If OTEL_DATA_PATH is s3://bucket/ only, allow PREFIX default for generators
     if not prefix:
-        prefix = _env("PREFIX", "")  # notebook may set later
+        # Field default matches panel OTEL_DATA_PATH …/otel-notebook/ (not validation-30gb)
+        prefix = _env("PREFIX", "") or "otel-notebook"
 
     region = (
         _env("AWS_REGION")
@@ -240,8 +241,13 @@ def load_active_spans_ddf(
         files = [e for e in fs.find(spans) if str(e).endswith(".parquet")]
     if not files:
         raise FileNotFoundError(
-            f"no parquet under s3://{spans}/ (partitioned layout required). "
-            f"Generate with OTEL_Data_Generator or set OTEL_DATA_PATH / marker."
+            f"no parquet under s3://{spans}/ (partitioned layout required).\n"
+            f"This is PATH config drift (wrong prefix), not schema drift — "
+            f"empty columns from a missing prefix look like a missing schema.\n"
+            f"Expected: s3://{{bucket}}/otel-notebook/spans/date=*/hour=*/*.parquet "
+            f"(or your OTEL_DATA_PATH + /spans/).\n"
+            f"Do not load validation-30gb / validation-dask unless you generated them.\n"
+            f"Fix: OTEL_DATA_PATH / OTEL_PREFIX from JupyterHub env (converge → zarf)."
         )
     # dd.read_parquet wants s3:// URIs when using storage_options
     uris = [f"s3://{f}" if not str(f).startswith("s3://") else str(f) for f in files]

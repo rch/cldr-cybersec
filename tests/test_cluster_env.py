@@ -33,3 +33,14 @@ def test_use_dask_default_on(monkeypatch):
     assert load_cluster_config().use_dask is True
     monkeypatch.setenv("USE_DASK", "0")
     assert load_cluster_config().use_dask is False
+
+
+def test_default_prefix_otel_notebook_not_validation(monkeypatch):
+    """Empty path env must not default to validation-30gb (path drift → empty cols)."""
+    monkeypatch.setenv("S3_BUCKET", "dhfo")
+    for k in ("OTEL_DATA_PATH", "OTEL_PREFIX", "PREFIX", "OTEL_DATASET_PREFIX"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = load_cluster_config()
+    assert cfg.otel_prefix == "otel-notebook"
+    assert "validation" not in cfg.spans_prefix_s3
+    assert cfg.spans_prefix_s3.endswith("/otel-notebook/spans/")
