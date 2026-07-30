@@ -72,13 +72,13 @@ singleuser:
   # Zarf rewrites registry and may append -zarf-<hash>.
   image:
     name: localhost:5555/cybersec-dask
-    tag: "2025.2.0-85f3d9ecf5"
+    tag: "2025.2.0-c97fce803d"
     pullPolicy: IfNotPresent
   # Network tools init container - same bundled image (air-gap, no extra pulls)
   networkTools:
     image:
       name: localhost:5555/cybersec-dask
-      tag: "2025.2.0-85f3d9ecf5"
+      tag: "2025.2.0-c97fce803d"
       pullPolicy: IfNotPresent
   # Disable block-cloud-metadata init container (requires iptables,
   # which is not present in the cybersec-dask image)

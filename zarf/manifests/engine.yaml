@@ -43,7 +43,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: navigator-engine
-          image: localhost:5555/cybersec-dask:2025.2.0-85f3d9ecf5
+          image: localhost:5555/cybersec-dask:2025.2.0-c97fce803d
           imagePullPolicy: IfNotPresent
           command:
             - python
