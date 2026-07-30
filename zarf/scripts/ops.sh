@@ -50,7 +50,29 @@ content_tag() {
 _tag_files() {
   printf '%s\n' zarf/zarf.yaml zarf/artifacts.manifest.json \
     zarf/manifests/engine.yaml zarf/manifests/panel-viz.yaml \
-    zarf/manifests/dask-cluster.yaml zarf/manifests/jupyterhub-values.yaml
+    zarf/manifests/dask-cluster.yaml zarf/manifests/jupyterhub-values.yaml \
+    zarf/manifests/vpc-flow-generator.yaml
+}
+
+# CLOSURE: every image REFERENCED by a k8s manifest must be DECLARED in
+# artifacts.manifest.json — a ref the package doesn't carry can never pull in
+# the closed world. (Field 2026-07-30: vpc-flow-generator.yaml escaped the
+# lockstep with a stale ':2025.2.0-notebook' tag — 550 ImagePullBackOffs on a
+# fresh air-gap node; masked on upgraded nodes by conserved-registry leftovers.)
+check_manifest_image_closure() {
+  local refs declared missing=0 r t
+  declared="$(grep -oE "${IMG}:[A-Za-z0-9._-]+" zarf/artifacts.manifest.json | sort -u)"
+  refs="$(grep -rhoE "image: *[a-z0-9.:/-]*${IMG}:[A-Za-z0-9._-]+" zarf/manifests/*.yaml \
+          | grep -oE "${IMG}:[A-Za-z0-9._-]+" | sort -u)"
+  for r in $refs; do
+    t="${r##*:}"
+    case "$t" in \#\#\#*|\**) continue ;; esac   # zarf-templated tags resolve at deploy
+    if ! printf '%s\n' "$declared" | grep -qx "$r"; then
+      echo "  ✗ CLOSURE: zarf/manifests references ${r} but artifacts.manifest.json does not declare it" >&2
+      missing=1
+    fi
+  done
+  return $missing
 }
 current_tag() { grep -hoE "${IMG}:[A-Za-z0-9._-]+" zarf/zarf.yaml | head -1 | cut -d: -f2-; }
 bump_tag() {  # idempotent — rewrites the tag in the source manifests only if it changed
@@ -89,6 +111,8 @@ do_image() {
   echo "[image] done: ${IMG}:${tag}"
 }
 do_package() {
+  echo "[package] manifest image-closure check (referenced vs declared)..."
+  check_manifest_image_closure || { echo "[package] ERROR: manifest references undeclared image(s) — fix before packaging"; exit 1; }
   echo "[package] zarf package create (image tag $(current_tag))..."
   ( cd zarf && zarf package create --confirm )
   local pkg; pkg="$(ls -t zarf/zarf-package-${IMG}-amd64-*.tar.zst 2>/dev/null | head -1)"
