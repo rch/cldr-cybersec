@@ -99,53 +99,91 @@ if [ -z "$KUBECTL_CMD" ]; then
 fi
 
 # --- locate the transported deploy package (optional for verify / kubectl-only) -
-# Search order (newest mtime wins within each step):
-#   1) explicit argv package.tar.zst (must be readable — NFS root_squash often
-#      makes root fail [ -f ] on /mnt/... while the file "exists" for a user)
-#   2) /var/tmp (runbook default staging)
-#   3) next to this script / engine unpack dir (field: package beside converge)
-#   4) parent of engine dir / CWD
-#   5) common air-gap mounts under /mnt (DHFO-style staging)
+# Prefer operator intent and co-located kit over global mtime (converge-16/17):
+# clearing argv2 and running ls -t across /mnt picked …/temp/ over the package
+# sitting next to this script (visible in field ll -a). Order:
+#   1) explicit argv2 if present AND readable
+#   2) same basename next to converge-node / CWD /var/tmp
+#   3) any package next to engine / CWD /var/tmp (first match, stable order)
+#   4) last resort: newest under /mnt (LOUD — may be the wrong archive)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_pkg_discover() {
-  # shellcheck disable=SC2086
-  ls -t \
-    /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst \
+_pkg_abs() {
+  local p="$1" d
+  [ -n "$p" ] && [ -f "$p" ] && [ -r "$p" ] || return 1
+  d="$(cd "$(dirname "$p")" && pwd)" || return 1
+  printf '%s\n' "$d/$(basename "$p")"
+}
+_pkg_discover_local() {
+  # Prefer kit staged with the engine (field: extract tarball, package beside it)
+  local c abs
+  shopt -s nullglob
+  for c in \
     "$SCRIPT_DIR"/zarf-package-cybersec-dask-amd64-*.tar.zst \
     "$SCRIPT_DIR"/../zarf-package-cybersec-dask-amd64-*.tar.zst \
     ./zarf-package-cybersec-dask-amd64-*.tar.zst \
+    /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst
+  do
+    abs="$(_pkg_abs "$c")" || continue
+    printf '%s\n' "$abs"
+    shopt -u nullglob
+    return 0
+  done
+  shopt -u nullglob
+  return 1
+}
+_pkg_discover_mnt_newest() {
+  local c abs
+  # Process substitution avoids pipeline subshell losing the match
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    abs="$(_pkg_abs "$c")" || continue
+    printf '%s\n' "$abs"
+    return 0
+  done < <(ls -t \
     /mnt/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
     /mnt/*/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
     /mnt/*/*/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
-    2>/dev/null | head -1 || true
+    2>/dev/null || true)
+  return 1
 }
+
+EXPLICIT_PKG="${PKG_ARG:-}"
 if [ -n "$PKG_ARG" ]; then
-  if [ -f "$PKG_ARG" ] && [ -r "$PKG_ARG" ]; then
-    PKG_ARG="$(cd "$(dirname "$PKG_ARG")" && pwd)/$(basename "$PKG_ARG")"
+  if RESOLVED="$(_pkg_abs "$PKG_ARG")"; then
+    PKG_ARG="$RESOLVED"
   else
-    # Distinguish missing path vs permission (NFS root_squash) — both fail [ -f/-r ]
-    # under sudo but the operator fix differs (wrong path vs stage to /var/tmp).
     if [ ! -e "$PKG_ARG" ]; then
       echo "   ⚠ package path does not exist as $(id -un): ${PKG_ARG}"
-      echo "     (typo, wrong date dir, or mount not visible to this uid — check ls)"
     else
       echo "   ⚠ package path not readable as $(id -un): ${PKG_ARG}"
-      echo "     (common on NFS with root_squash when using sudo — copy to /var/tmp)"
+      echo "     (NFS root_squash under sudo — copy next to converge-node.sh or /var/tmp)"
     fi
     ls -la "$PKG_ARG" 2>&1 | sed 's/^/     /' || true
-    echo "     falling back to discovery…"
-    PKG_ARG=""
+    # Co-located same basename (converge-17: kit was beside engine while argv2
+    # pointed at a missing July_30_2026 path)
+    base="$(basename "$PKG_ARG")"
+    if RESOLVED="$(_pkg_abs "$SCRIPT_DIR/$base" 2>/dev/null)" || \
+       RESOLVED="$(_pkg_abs "./$base" 2>/dev/null)" || \
+       RESOLVED="$(_pkg_abs "/var/tmp/$base" 2>/dev/null)"; then
+      echo "   → using co-located package instead: $RESOLVED"
+      PKG_ARG="$RESOLVED"
+    else
+      echo "   → no co-located $base; trying package next to engine /var/tmp"
+      PKG_ARG=""
+    fi
   fi
 fi
 if [ -z "$PKG_ARG" ]; then
-  PKG_ARG="$(_pkg_discover)"
-  [ -n "$PKG_ARG" ] && [ -f "$PKG_ARG" ] && [ -r "$PKG_ARG" ] && \
-    PKG_ARG="$(cd "$(dirname "$PKG_ARG")" && pwd)/$(basename "$PKG_ARG")"
-fi
-# Final gate: unreadable → clear so the engine does not get a false path
-if [ -n "$PKG_ARG" ] && { [ ! -f "$PKG_ARG" ] || [ ! -r "$PKG_ARG" ]; }; then
-  echo "   ⚠ discovered package unreadable: $PKG_ARG — clearing"
-  PKG_ARG=""
+  if RESOLVED="$(_pkg_discover_local)"; then
+    PKG_ARG="$RESOLVED"
+    echo "   → discovered package next to engine/staging: $PKG_ARG"
+  elif RESOLVED="$(_pkg_discover_mnt_newest)"; then
+    PKG_ARG="$RESOLVED"
+    echo "   ⚠ using newest package under /mnt (may not be the intended kit): $PKG_ARG"
+    echo "     pass an explicit *existing* path, or place the package next to converge-node.sh"
+  else
+    PKG_ARG=""
+  fi
 fi
 
 # `zarf init` needs the zarf-INIT package (registry/agent/injector images) IN the
