@@ -202,6 +202,38 @@ def load_cluster_config() -> ClusterConfig:
     )
 
 
+def require_parquet_stack() -> dict:
+    """Fail loud if Dask/PyArrow cannot be used for ``dd.read_parquet(..., engine='pyarrow')``.
+
+    The cybersec-dask image bakes pyarrow + dask and fails the image build if imports
+    break. Notebooks must not silently fall back to pandas / skip distributed reads.
+    """
+    info: dict = {}
+    try:
+        import dask
+        import dask.dataframe as dd
+        import pyarrow as pa
+        import pyarrow.parquet  # noqa: F401
+    except ImportError as e:
+        raise RuntimeError(
+            f"Missing Dask/PyArrow in this kernel: {e}. "
+            f"Use the cybersec-dask singleuser image (not a bare python kernel)."
+        ) from e
+    info["dask"] = getattr(dask, "__version__", "?")
+    info["pyarrow"] = getattr(pa, "__version__", "?")
+    # Resolve engine the same way read_parquet will
+    try:
+        from dask.dataframe.io.parquet.core import get_engine
+        eng = get_engine("pyarrow")
+        info["engine"] = f"pyarrow ({type(eng).__module__})"
+    except Exception as e:
+        raise RuntimeError(
+            f"dask cannot load parquet engine 'pyarrow': {e}. "
+            f"Install/repair pyarrow in the image; do not use engine=None/fastparquet."
+        ) from e
+    return info
+
+
 def list_span_parquet_keys(
     cfg: Optional[ClusterConfig] = None,
     *,
