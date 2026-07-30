@@ -117,6 +117,39 @@ class TestFunctionalSurface:
         assert any("dask:" in i for i in s["issues"])
 
 
+class TestRegistryReclaim:
+    """matrix case 15 — Bound-but-Delete must not converge healthy."""
+
+    def test_detect_fails_on_delete_reclaim(self):
+        from converge.catalog import _det_registry_pv, REGISTRY_PV_NAME
+        ctx = MagicMock(spec=Ctx)
+        ctx.get.return_value = {
+            "spec": {"persistentVolumeReclaimPolicy": "Delete"},
+        }
+        ctx.items.return_value = [
+            {"status": {"phase": "Bound"}},  # would have early-passed before fix
+        ]
+        p = _det_registry_pv(ctx)
+        assert p.ok is False
+        assert "Retain" in p.detail
+
+    def test_rem_patches_reclaim_only(self):
+        from converge.catalog import _rem_registry_pv, REGISTRY_PV_NAME
+        from types import SimpleNamespace
+        ctx = MagicMock(spec=Ctx)
+        ctx.get.return_value = {
+            "spec": {"persistentVolumeReclaimPolicy": "Delete"},
+        }
+        ctx.k.return_value = SimpleNamespace(returncode=0, stderr="", stdout="")
+        fix = _rem_registry_pv(ctx)
+        assert fix.changed is True
+        assert "Retain" in fix.detail
+        argv = ctx.k.call_args[0][0]
+        assert "patch" in argv and REGISTRY_PV_NAME in argv
+        assert "Retain" in " ".join(argv)
+        ctx.apply_yaml.assert_not_called()
+
+
 class TestVersion:
     def test_version(self):
-        assert __version__ == "0.5.1"
+        assert __version__ == "0.5.2"
