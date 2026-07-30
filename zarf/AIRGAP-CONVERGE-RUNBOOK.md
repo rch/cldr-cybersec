@@ -176,9 +176,12 @@ applies **surgical** worker sizing on a live `DaskCluster` (patch CR + bounce
 workers; no image re-push).
 
 **Validation scope.** This upgrade path is procedure-reviewed and its engine
-mechanism (image-tag drift → redeploy) is code-verified; it has **not** yet
-been runtime-validated by a cross-version matrix case. The preflight above is
-mandatory, not optional.
+mechanism (image-tag drift → redeploy) is code-verified. Task **#51** matrix
+inducers (cases **15–17** + **PARTIAL_PUSH** in `infra/aws/tofu-sandbox/test-fsm.sh`)
+are landed; flip this sentence only after that subset is green on a closed-world
+sandbox (`FSM_FILTER='15|16|17|PARTIAL' just sandbox-test-fsm --keep`). Until
+then it is **not** yet runtime-validated. The preflight above is mandatory, not
+optional.
 
 ### What the engine does on upgrade
 
@@ -660,6 +663,28 @@ mechanism-level post-asserts — dead agent (agent back AND canary-rewriting), w
 AND pods Running). Each storage case additionally asserts the registry PVC binds on
 `storageClassName=""`. The five v1.6.3 fixes were also validated individually by driving a live
 quadruple-wedged specimen to `✔ CONVERGED` with the engine alone.
+
+### Task #51 matrix extension (engine ≥ 0.5.0 — *inducers landed; runtime pending*)
+
+Harness: `infra/aws/tofu-sandbox/test-fsm.sh` (line of record: **cyberphy `rch/devenv`**).
+
+| Case | Inducer | Primary assert | Post-assert |
+|------|---------|----------------|-------------|
+| **15** legacy-registry Retain | hostPath marker + PV `reclaim=Delete` + delete ns zarf | T1 ok/fixed | reclaim=`Retain`, marker present |
+| **16** registry blip | delete registry Deploy/pods; PV+hostPath stay | T1 ok/fixed | Running + marker; catalog soft |
+| **17** SIGKILL mid-wait | delete scheduler + `timeout -s KILL` zarf deploy (± pending helm) | T1 ok/fixed | no pending helm; scheduler Running |
+| **PARTIAL_PUSH** | wipe target tag under `/var/lib/zarf-registry` (repo remains) | **T2** images-pushed | HEAD 200 or catalog restored |
+
+```bash
+# Full matrix (13 historical + 4 task #51)
+just sandbox-test-fsm --keep
+
+# Task #51 only (node already green / --keep from prior run)
+FSM_FILTER='15|16|17|PARTIAL' just sandbox-test-fsm --keep
+```
+
+When all four are green on a closed-world node, Part I § upgrade may claim the **first
+runtime-validated upgrade path** in this lineage (until then: procedure-reviewed only).
 
 ## Appendix D — anticipatory platform recovery (v1.6.4)
 
