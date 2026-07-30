@@ -121,16 +121,22 @@ _log "== in-cluster probe via $EXEC_NS/$EXEC_TARGET ${EXEC_C:-} =="
 # --------------------------------------------------------------------------- #
 # 3) In-pod check: auth + marker + span parquet (mirrors otel-navigator loader)
 # --------------------------------------------------------------------------- #
-# MIN_PARQUET / ALLOW_EMPTY / CFG_BUCKET injected via env on the exec so we never
-# embed operator secrets; the pod already has AWS_* and S3_ENDPOINT.
+# CRITICAL: kubectl exec needs -i so the heredoc reaches remote `python3 -`.
+# Without -i, the pod gets empty stdin → empty RESULT → host-side json.loads
+# blows up ("Expecting value...") and converge T5.s3-datapath fails as a
+# false negative even when S3 is fine.
+#
+# MIN_PARQUET / ALLOW_EMPTY / CFG_BUCKET injected via env on the exec so we
+# never embed operator secrets; the pod already has AWS_* and S3_ENDPOINT.
 # shellcheck disable=SC2086
-RESULT=$(kc -n "$EXEC_NS" exec $EXEC_TARGET $EXEC_C -- env \
+PROBE_RC=0
+RESULT=$(kc -n "$EXEC_NS" exec -i $EXEC_TARGET $EXEC_C -- env \
   CHECK_BUCKET="$CFG_BUCKET" \
   CHECK_MIN_PARQUET="$MIN_PARQUET" \
   CHECK_ALLOW_EMPTY="$ALLOW_EMPTY" \
   CHECK_CFG_PATH="$CFG_PATH" \
   python3 - <<'PY'
-import json, os, sys, traceback
+import json, os, sys
 
 def die(code, msg, **extra):
     out = {"ok": False, "error": msg, **extra}
@@ -279,14 +285,51 @@ if files and os.environ.get("CHECK_DEEP") == "1":
 print(json.dumps(info))
 sys.exit(0)
 PY
-) || {
-  # kubectl exec may wrap non-zero; try to still show JSON if present
-  _err "❌ in-cluster probe failed (kubectl exec rc=$?)"
-  if [ -n "${RESULT:-}" ]; then
-    echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
-  fi
-  exit 1
-}
+) || PROBE_RC=$?
+
+# Normalize RESULT to a single JSON object (strips kubectl warnings / empty).
+# Always emits valid JSON so host-side never raises JSONDecodeError.
+RESULT=$(printf '%s' "${RESULT:-}" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+raw_s = (raw or "").strip()
+if not raw_s:
+    print(json.dumps({
+        "ok": False,
+        "error": "empty probe output — kubectl exec did not deliver script stdin "
+                 "(need: kubectl exec -i … -- python3 -). Converge false-negative.",
+    }))
+    sys.exit(0)
+# Prefer last line that is a full JSON object (probe prints one line).
+for line in reversed(raw_s.splitlines()):
+    line = line.strip()
+    if line.startswith("{") and line.endswith("}"):
+        try:
+            json.loads(line)
+            print(line)
+            sys.exit(0)
+        except json.JSONDecodeError:
+            continue
+try:
+    json.loads(raw_s)
+    print(raw_s)
+except json.JSONDecodeError:
+    print(json.dumps({
+        "ok": False,
+        "error": "non-json probe output: " + repr(raw_s[:240]),
+    }))
+')
+
+# Annotate empty/non-json with exec rc when useful
+if [ "$PROBE_RC" -ne 0 ]; then
+  RESULT=$(printf '%s' "$RESULT" | python3 -c '
+import json,sys
+d=json.loads(sys.stdin.read())
+if not d.get("ok") and "kubectl exec" not in (d.get("error") or ""):
+    d["error"] = (d.get("error") or "probe failed") + f" (kubectl exec rc='"$PROBE_RC"')"
+print(json.dumps(d))
+')
+fi
 
 if [ "$JSON" = 1 ]; then
   echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
@@ -323,5 +366,5 @@ print("✔ S3 datapath OK — app can reach configured bucket and read span parq
 '
 fi
 
-# Propagate python exit via JSON ok field
+# Propagate python exit via JSON ok field (RESULT is always valid JSON now)
 echo "$RESULT" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("ok") else 1)'

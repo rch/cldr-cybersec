@@ -3302,42 +3302,36 @@ print(json.dumps(out))
 """
 
 
-def _det_s3_datapath(ctx: Ctx) -> Probe:
-    """Configured bucket reachable from the app pod; marker + span parquet readable.
+def _parse_s3_datapath_json(raw: str) -> dict:
+    """Extract probe JSON from script/kubectl stdout (tolerate warnings / pretty print).
 
-    Data is operator-provided (or notebook-generated) — engine never fetches.
-    Failures are MANUAL (fix endpoint/creds, or seed spans under the marker path).
+    Field failure mode: host-side ``json.loads`` on empty or mixed output made
+    T5.s3-datapath FAIL with a JSONDecodeError even when S3 was fine (script
+    bug: kubectl exec without -i → empty RESULT).
     """
-    s3i = _panel_s3_config_issue(ctx)
-    if s3i:
-        return Probe(False, s3i)
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    # Prefer last complete JSON object line (script prints one; json.tool may
+    # expand to multi-line — then fall through to full-text parse).
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                data = json.loads(line)
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                continue
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
 
-    # Prefer the staged script (full diagnosis, human + --json).
-    if _S3_DATAPATH_SCRIPT.is_file():
-        import subprocess
-        env = {**os.environ}
-        r = subprocess.run(
-            ["bash", str(_S3_DATAPATH_SCRIPT), "--quiet", "--json"],
-            capture_output=True, text=True, timeout=180, env=env,
-        )
-        raw = (r.stdout or "").strip() or (r.stderr or "").strip()
-        try:
-            # last JSON object in output
-            line = raw.strip().splitlines()[-1] if raw else "{}"
-            data = json.loads(line)
-        except (json.JSONDecodeError, IndexError):
-            data = {}
-        if r.returncode == 0 and data.get("ok"):
-            m = data.get("marker") or {}
-            return Probe(
-                True,
-                f"S3 OK bucket={data.get('bucket_configmap')} "
-                f"dataset={m.get('dataset')} parquet={data.get('parquet_count')}",
-            )
-        err = data.get("error") or raw[-300:] or f"verify-s3-datapath rc={r.returncode}"
-        return Probe(False, f"S3 datapath: {err}\n{_panel_live_state(ctx)}")
 
-    # Fallback: kubectl exec into otel-navigator (or dask scheduler).
+def _det_s3_datapath_inline(ctx: Ctx) -> Probe:
+    """kubectl exec python3 -c probe (no bash script / no stdin heredoc)."""
     target = None  # (ns, resource, extra_args)
     if ctx.pods_ready(_PANEL_NS, "app=otel-navigator")[0] >= 1:
         target = (_PANEL_NS, "deploy/otel-navigator", ["-c", "otel-navigator"])
@@ -3353,10 +3347,7 @@ def _det_s3_datapath(ctx: Ctx) -> Probe:
         timeout=120,
     )
     raw = (r.stdout or "").strip()
-    try:
-        data = json.loads(raw.splitlines()[-1]) if raw else {}
-    except json.JSONDecodeError:
-        data = {}
+    data = _parse_s3_datapath_json(raw)
     if r.returncode == 0 and data.get("ok"):
         return Probe(
             True,
@@ -3364,7 +3355,77 @@ def _det_s3_datapath(ctx: Ctx) -> Probe:
             f"parquet={data.get('parquet_count')}",
         )
     err = data.get("error") or (r.stderr or raw or f"rc={r.returncode}")[-300:]
+    if r.returncode == 124 or (isinstance(err, str) and err.strip() == "timeout"):
+        err = ("probe timed out (likely S3_ENDPOINT unreachable from pod, "
+               "or list/glob hang) — check endpoint_host in pod env + network")
     return Probe(False, f"S3 datapath: {err}\n{_panel_live_state(ctx)}")
+
+
+def _det_s3_datapath(ctx: Ctx) -> Probe:
+    """Configured bucket reachable from the app pod; marker + span parquet readable.
+
+    Data is operator-provided (or notebook-generated) — engine never fetches.
+    Failures are MANUAL (fix endpoint/creds, or seed spans under the marker path).
+
+    Prefer staged verify-s3-datapath.sh; on empty/non-JSON or script timeout,
+    fall back to inline kubectl exec so a script plumbing bug cannot brick
+    converge when the datapath is actually healthy.
+    """
+    s3i = _panel_s3_config_issue(ctx)
+    if s3i:
+        return Probe(False, s3i)
+
+    # Prefer the staged script (full diagnosis, human + --json).
+    if _S3_DATAPATH_SCRIPT.is_file():
+        import subprocess
+        env = {**os.environ}
+        try:
+            r = subprocess.run(
+                ["bash", str(_S3_DATAPATH_SCRIPT), "--quiet", "--json"],
+                capture_output=True, text=True, timeout=180, env=env,
+            )
+        except subprocess.TimeoutExpired:
+            # Script hung (usually s3fs to a bad endpoint). Still try inline
+            # only if we want a second opinion — skip; report clearly.
+            return Probe(
+                False,
+                "S3 datapath: verify-s3-datapath.sh timed out after 180s "
+                "(pod→S3 hang; check S3_ENDPOINT reachability from app pod)\n"
+                f"{_panel_live_state(ctx)}",
+            )
+        raw = (r.stdout or "").strip() or (r.stderr or "").strip()
+        data = _parse_s3_datapath_json(raw)
+        if r.returncode == 0 and data.get("ok"):
+            m = data.get("marker") or {}
+            return Probe(
+                True,
+                f"S3 OK bucket={data.get('bucket_configmap')} "
+                f"dataset={m.get('dataset')} parquet={data.get('parquet_count')}",
+            )
+        # Empty / non-JSON / stdin-not-delivered: fall back to inline -c probe
+        # so converge is not blocked by script plumbing (field: JSONDecodeError).
+        plumbing = (
+            not data
+            or "empty probe output" in (data.get("error") or "")
+            or "non-json probe output" in (data.get("error") or "")
+            or "JSONDecodeError" in raw
+            or "Expecting value" in raw
+        )
+        if plumbing:
+            fb = _det_s3_datapath_inline(ctx)
+            if fb.ok:
+                return Probe(True, f"{fb.detail} (inline fallback; script output unusable)")
+            script_err = data.get("error") or (raw[-200:] if raw else f"rc={r.returncode}")
+            return Probe(
+                False,
+                f"S3 datapath: {fb.detail.split(chr(10))[0]} "
+                f"[script also failed: {script_err[:160]}]\n"
+                f"{_panel_live_state(ctx)}",
+            )
+        err = data.get("error") or raw[-300:] or f"verify-s3-datapath rc={r.returncode}"
+        return Probe(False, f"S3 datapath: {err}\n{_panel_live_state(ctx)}")
+
+    return _det_s3_datapath_inline(ctx)
 
 
 # JupyterHub control-plane pods (hub + proxy). Singleuser servers are user-triggered.
