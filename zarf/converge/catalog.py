@@ -506,22 +506,71 @@ _S3_SECRET_KEYS = {"S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_SESSION_TOKEN"}
 _S3_DEPENDENT_COMPONENTS = ("panel-viz", "navigator-engine")
 
 
-def _zarf_deploy_timeout(components: str) -> int:
-    """Seconds for ``zarf package deploy --components=…``.
+def _zarf_deploy_retries(components: str) -> int:
+    """Zarf ``--retries`` — permanent failures (OOM, ImagePull) must not burn 10×.
 
-    Every deploy still pulls *required* package components (cybersec-images,
-    dask-operator, dask-cluster) even when only jupyterhub/panel is requested.
-    Image push + helm + scheduler wait regularly exceeds 30 minutes on a single
-    air-gap node — field operators succeed with the same CLI when given time.
+    converge-24/25: navigator-engine OOM drove ``--retries 10`` + 7200s wall with
+    no progress visibility. Prefer few retries; engine rem/abort handles terminal.
+    """
+    c = {x.strip() for x in components.lower().split(",") if x.strip()}
+    heavy = {"jupyterhub", "sample-notebooks", "dask-operator", "dask-cluster"}
+    if c & heavy:
+        return 3
+    if "cybersec-images" in c:
+        return 3
+    # Light chart-only redeploys (engine/panel already imaged)
+    return 2
+
+
+def _zarf_deploy_timeout(components: str) -> int:
+    """Seconds for ``zarf package deploy --components=…`` wall-clock kill.
+
+    Scaled down from blanket 7200s (converge-24). Heavy sets still get room for
+    air-gap image push + helm; light remediations fail fast and re-detect.
     """
     c = components.lower()
-    # Heavy / known-slow sets
-    if any(x in c for x in (
-        "cybersec-images", "jupyterhub", "sample-notebooks",
-        "panel-viz", "dask-operator", "dask-cluster",
-    )):
-        return 7200  # 2h — match manual operator patience on air-gap
-    return 3600
+    if any(x in c for x in ("jupyterhub", "sample-notebooks")):
+        return 3600  # hub chart is the slow path
+    if any(x in c for x in ("dask-operator", "dask-cluster")):
+        return 2400
+    if "cybersec-images" in c:
+        # Push can be long on first install; registry already populated → abort
+        # check / early success short-circuits well under this.
+        return 1800
+    if any(x in c for x in ("panel-viz", "navigator-engine")):
+        return 900
+    return 1200
+
+
+def _deploy_abort_signal(ctx: Ctx, components: str, *, started: float) -> Optional[str]:
+    """Return a short reason to kill an in-flight zarf deploy, or None.
+
+    Only arms after a grace period so we do not abort before pods are created.
+    """
+    import time as _time
+    if _time.monotonic() - started < 45.0:
+        return None
+    c = components.lower()
+    watch: List[tuple] = []  # (ns, selector, label)
+    if any(x in c for x in ("panel-viz", "cybersec-images")):
+        watch.append((_PANEL_NS, "app=otel-navigator", "otel-navigator"))
+    if any(x in c for x in ("navigator-engine", "cybersec-images")):
+        watch.append((_PANEL_NS, "app=navigator-engine", "navigator-engine"))
+    if any(x in c for x in ("dask-cluster", "dask-operator", "cybersec-images")):
+        watch.append(("dask", "dask.org/component=scheduler", "dask-scheduler"))
+    for ns, sel, label in watch:
+        for p in ctx.items("pods", ns=ns, selector=sel):
+            for cs in ((p.get("status") or {}).get("containerStatuses") or []):
+                waiting = ((cs.get("state") or {}).get("waiting") or {})
+                reason = waiting.get("reason") or ""
+                if reason in _IMAGE_WAIT_BAD:
+                    return f"{label} {reason} mid-deploy — fix images, not more zarf retries"
+                if reason == "CrashLoopBackOff":
+                    last = ((cs.get("lastState") or {}).get("terminated") or {})
+                    if last.get("reason") == "OOMKilled":
+                        return (f"{label} CrashLoop/OOM mid-deploy — raise memory "
+                                f"limits (not zarf retries)")
+    return None
 
 
 def _pre_deploy_feasibility(ctx: Ctx, components: str) -> List[str]:
@@ -638,8 +687,9 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
                + _strip_agent_ignore(ctx) + _unwedge_unmutated_pods(ctx)
                + _unwedge_broken_dask_cluster(ctx))
     pre = f"  [unwound: {'; '.join(unwound)}]" if unwound else ""
+    retries = _zarf_deploy_retries(components)
     args = ["package", "deploy", ctx.package_path, "--confirm",
-            f"--components={components}", "--retries", "10"]
+            f"--components={components}", "--retries", str(retries)]
     if not ctx.registry_pvc_enabled:
         args.append("--set-variables=REGISTRY_PVC_ENABLED=false")
     # Non-sensitive vars → --set-variables; secrets → ZARF_CONFIG tmpfs.
@@ -664,9 +714,23 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
                 f.write(f'{k} = "{esc}"\n')
         env["ZARF_CONFIG"] = cfg_path
     deploy_timeout = _zarf_deploy_timeout(components)
-    print(f"    $ zarf {' '.join(args)}  (timeout={deploy_timeout}s)", flush=True)
+    print(
+        f"    $ zarf {' '.join(args)}  (timeout={deploy_timeout}s retries={retries} stream+abort)",
+        flush=True,
+    )
+    import time as _time
+    t0 = _time.monotonic()
+
+    def _abort() -> Optional[str]:
+        return _deploy_abort_signal(ctx, components, started=t0)
+
     try:
-        r = ctx.zarf(args, env=env, timeout=deploy_timeout)
+        # Stream zarf so progress is visible; abort on terminal cluster signals
+        # (ImagePull/OOM loop) instead of burning the full wall-clock (converge-24).
+        r = ctx.zarf_stream(
+            args, env=env, timeout=deploy_timeout,
+            abort_check=_abort, abort_every=12.0,
+        )
 
         # DEAD HELM RELEASE — field-proven (2026-07-15): a chart whose FIRST install
         # failed leaves a release with only `failed` revisions; every later
@@ -703,7 +767,10 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
                 f"removed dead-release component(s) [{', '.join(notes)}] "
                 f"(helm 'has no deployed releases')"
             )
-            r2 = ctx.zarf(args, env=env)
+            r2 = ctx.zarf_stream(
+                args, env=env, timeout=deploy_timeout,
+                abort_check=_abort, abort_every=12.0,
+            )
             if r2.returncode == 0:
                 return Fix(True, f"zarf deploy {components}: rc=0 "
                                  f"(retry after dead-release removal)  [{note}]{pre}")
@@ -2787,8 +2854,14 @@ def _pod_container_issues(pod: dict, *, expect_containers: int = 0) -> List[str]
         if term.get("reason") == "OOMKilled":
             issues.append(f"{cname}: OOMKilled")
         last = ((cs.get("lastState") or {}).get("terminated") or {})
+        # Historical OOM: only fail when flapping or not ready. A single past OOM
+        # with Ready + low restarts was driving full zarf redeploys (converge-24/25:
+        # ready 1/1 + lastState OOMKilled → --retries 10 / 7200s). Memory rem
+        # still runs via _rem_engine_oom when limits are below target.
         if last.get("reason") == "OOMKilled":
-            issues.append(f"{cname}: lastState OOMKilled (restarts={cs.get('restartCount', 0)})")
+            rc = int(cs.get("restartCount") or 0)
+            if not cs.get("ready") or rc >= 3:
+                issues.append(f"{cname}: lastState OOMKilled (restarts={rc})")
         if (cs.get("restartCount") or 0) >= 5 and not cs.get("ready"):
             issues.append(f"{cname}: restartCount={cs.get('restartCount')} not ready")
     # no statuses yet while Running → still starting
@@ -2924,9 +2997,48 @@ def _panel_live_state(ctx: Ctx) -> str:
                          "(--creds-file) then converge --apply")
     else:
         lines.append("  config verdict: CM/Secret look populated")
+        # Pod env may lag Secret (no restart) — lengths/host only, never values.
+        pod_env = _pod_s3_env_census(ctx)
+        if pod_env:
+            lines.append(
+                f"  pod S3 env: endpoint_set={pod_env.get('endpoint_set')} "
+                f"host={pod_env.get('endpoint_host') or '—'} "
+                f"akid_len={pod_env.get('akid_len')} "
+                f"secret_len={pod_env.get('secret_len')} "
+                f"tcp_ok={pod_env.get('tcp_ok')}"
+                + (f" err={pod_env.get('error')}" if pod_env.get("error") else "")
+            )
+            if pod_env.get("endpoint_set") is False:
+                lines.append("  ⚠ Secret has keys but pod S3_ENDPOINT empty — "
+                             "rollout restart otel-navigator + navigator-engine")
+            elif pod_env.get("tcp_ok") is False:
+                lines.append("  ⚠ pod cannot TCP to S3_ENDPOINT host — "
+                             "fix network / endpoint URL (not creds quoting)")
         lines.append("  next: bash zarf/scripts/verify-s3-datapath.sh  "
                      "(auth + marker + span parquet)")
     return "\n".join(lines)
+
+
+def _pod_s3_env_census(ctx: Ctx) -> dict:
+    """In-pod AWS_*/S3_ENDPOINT presence + TCP reachability (no secret values)."""
+    target = None
+    if ctx.pods_ready(_PANEL_NS, "app=otel-navigator")[0] >= 1:
+        target = (_PANEL_NS, "deploy/otel-navigator", ["-c", "otel-navigator"])
+    elif ctx.pods_ready("dask", "dask.org/component=scheduler")[0] >= 1:
+        target = ("dask", "deploy/cybersec-dask-scheduler", [])
+    if not target:
+        return {}
+    ns, res, extra = target
+    r = ctx.run(
+        ctx.kubectl + ["exec", "-n", ns, res] + extra + ["--", "python3", "-c", _S3_POD_ENV_PY],
+        timeout=20,
+    )
+    raw = (r.stdout or "").strip()
+    try:
+        data = json.loads(raw.splitlines()[-1]) if raw else {}
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {"error": f"pod env census unparseable rc={r.returncode}"}
 
 
 def _panel_deployments_exist(ctx: Ctx) -> bool:
@@ -3163,6 +3275,111 @@ def _rem_otel_navigator(ctx: Ctx) -> Fix:
                    _manual.hint_for("T5.otel-navigator")))
 
 
+# Engine OOM target (field: 2Gi/4Gi OOMs when binding Dask frames — converge-24/25).
+_ENGINE_MEM_REQUEST = "4Gi"
+_ENGINE_MEM_LIMIT = "8Gi"
+
+
+def _parse_mem_to_mi(val: str) -> Optional[int]:
+    """Parse K8s memory quantity to MiB (approx). None if unparseable."""
+    if not val:
+        return None
+    s = str(val).strip()
+    try:
+        if s.endswith("Ki"):
+            return int(float(s[:-2]) / 1024)
+        if s.endswith("Mi"):
+            return int(float(s[:-2]))
+        if s.endswith("Gi"):
+            return int(float(s[:-2]) * 1024)
+        if s.endswith("Ti"):
+            return int(float(s[:-2]) * 1024 * 1024)
+        if s.endswith("m"):  # milli-bytes — ignore
+            return None
+        return int(float(s) / (1024 * 1024))
+    except ValueError:
+        return None
+
+
+def _engine_had_oom(ctx: Ctx) -> bool:
+    for p in ctx.items("pods", ns=_PANEL_NS, selector="app=navigator-engine"):
+        for cs in ((p.get("status") or {}).get("containerStatuses") or []):
+            term = ((cs.get("state") or {}).get("terminated") or {})
+            last = ((cs.get("lastState") or {}).get("terminated") or {})
+            if term.get("reason") == "OOMKilled" or last.get("reason") == "OOMKilled":
+                return True
+    return False
+
+
+def _engine_memory_below_target(ctx: Ctx) -> Optional[str]:
+    """None if deploy missing or already at/above target; else short reason."""
+    dep = ctx.get("deploy", "navigator-engine", ns=_PANEL_NS) or ctx.get(
+        "deployment", "navigator-engine", ns=_PANEL_NS)
+    if not dep:
+        return None
+    containers = (
+        ((dep.get("spec") or {}).get("template") or {}).get("spec") or {}
+    ).get("containers") or []
+    for c in containers:
+        if c.get("name") != "navigator-engine":
+            continue
+        res = c.get("resources") or {}
+        lim = ((res.get("limits") or {}).get("memory")) or ""
+        req = ((res.get("requests") or {}).get("memory")) or ""
+        lim_mi = _parse_mem_to_mi(lim) or 0
+        req_mi = _parse_mem_to_mi(req) or 0
+        want_lim = _parse_mem_to_mi(_ENGINE_MEM_LIMIT) or 8192
+        want_req = _parse_mem_to_mi(_ENGINE_MEM_REQUEST) or 4096
+        if lim_mi < want_lim or req_mi < want_req:
+            return (f"navigator-engine memory req={req or '?'} lim={lim or '?'} "
+                    f"(target {_ENGINE_MEM_REQUEST}/{_ENGINE_MEM_LIMIT})")
+        return None
+    return None
+
+
+def _rem_engine_oom_memory(ctx: Ctx) -> Fix:
+    """Surgical memory bump on navigator-engine Deployment — no zarf package."""
+    if not (ctx.exists("deploy", "navigator-engine", ns=_PANEL_NS)
+            or ctx.exists("deployment", "navigator-engine", ns=_PANEL_NS)):
+        return Fix(False, "navigator-engine Deployment absent")
+    patch = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [{
+                        "name": "navigator-engine",
+                        "resources": {
+                            "requests": {
+                                "cpu": "500m",
+                                "memory": _ENGINE_MEM_REQUEST,
+                            },
+                            "limits": {
+                                "cpu": "2",
+                                "memory": _ENGINE_MEM_LIMIT,
+                            },
+                        },
+                    }]
+                }
+            }
+        }
+    }
+    r = ctx.k([
+        "patch", "deployment", "navigator-engine", "-n", _PANEL_NS,
+        "--type", "strategic", "-p", json.dumps(patch),
+    ])
+    if r.returncode != 0:
+        return Fix(False, f"patch memory failed: {(r.stderr or r.stdout or '')[:200]}")
+    actions = [
+        f"patched navigator-engine memory → {_ENGINE_MEM_REQUEST}/{_ENGINE_MEM_LIMIT}",
+    ]
+    rr = ctx.k(["rollout", "restart", "deployment/navigator-engine", "-n", _PANEL_NS])
+    if rr.returncode == 0:
+        actions.append("rollout restart deployment/navigator-engine")
+    else:
+        actions.extend(_recycle_panel_pods(ctx, "app=navigator-engine"))
+    return Fix(True, "; ".join(actions))
+
+
 def _det_engine(ctx: Ctx) -> Probe:
     live = _panel_live_state(ctx)
     s3i = _panel_s3_config_issue(ctx)
@@ -3172,6 +3389,10 @@ def _det_engine(ctx: Ctx) -> Probe:
     # (dataset commands / S3 listing via Dask).
     if s3i and total > 0:
         return Probe(False, f"{s3i}; engine ready {ready}/{total}\n{live}")
+    # OOM history with undersized limits → fail so rem bumps memory (even if Ready).
+    mem = _engine_memory_below_target(ctx)
+    if mem and _engine_had_oom(ctx):
+        return Probe(False, f"OOM with undersized limits: {mem}\n{live}")
     if issues:
         return Probe(False, f"{'; '.join(issues[:4])}\n{live}")
     if ready < 1:
@@ -3180,11 +3401,12 @@ def _det_engine(ctx: Ctx) -> Probe:
 
 
 def _rem_engine(ctx: Ctx) -> Fix:
-    """Heal navigator-engine. Prefer config-only patch of shared S3 when that is
-    the only failure; otherwise zarf deploy navigator-engine (+ panel-viz if needed).
+    """Heal navigator-engine. Prefer lightest change:
 
-    Image drift uses surgical Deployment retarget (converge-11/12: restartCount
-    climbs if recycle-only leaves the old template).
+    1. Shared S3 config-only patch
+    2. **Surgical memory bump** on OOM (converge-24/25 — not full zarf redeploy)
+    3. Image-drift retarget
+    4. zarf deploy only if deploy missing / drift / above insufficient
     """
     actions: List[str] = []
     s3i = _panel_s3_config_issue(ctx)
@@ -3197,38 +3419,44 @@ def _rem_engine(ctx: Ctx) -> Fix:
         actions.append(cfg.detail)
         if _panel_s3_config_issue(ctx) is None and _det_engine(ctx).ok:
             return Fix(True, " | ".join(actions))
+    # OOM → raise limits before expensive package deploy
+    if _engine_had_oom(ctx) and _engine_memory_below_target(ctx):
+        oom = _rem_engine_oom_memory(ctx)
+        actions.append(oom.detail)
+        if oom.changed and _det_engine(ctx).ok:
+            return Fix(True, " | ".join(actions))
     # Image drift first (cheap surgical) before full chart redeploy
     if _image_drift(ctx, _PANEL_NS, "app=navigator-engine"):
         actions.extend(_rem_panel_image_drift(
             ctx, "navigator-engine", "cybersec-images,navigator-engine"))
         if _det_engine(ctx).ok:
             return Fix(True, " | ".join(actions))
-    if s3i and ctx.s3.get("S3_BUCKET") and ctx.have_zarf() and ctx.package_path:
-        pf = _zarf_deploy_components(ctx, "cybersec-images,panel-viz")
-        actions.append(f"panel-viz (S3 config): {pf.detail}")
-    if ctx.have_zarf() and ctx.package_path:
-        if not any("navigator-engine" in a for a in actions):
-            fix = _zarf_deploy_components(ctx, "cybersec-images,navigator-engine")
-            actions.append(fix.detail)
-        if _image_drift(ctx, _PANEL_NS, "app=navigator-engine"):
-            actions.extend(_retarget_deployments_cybersec(
-                ctx, _PANEL_NS, "app=navigator-engine"))
-            actions.extend(_recycle_panel_pods(ctx, "app=navigator-engine"))
-    elif not actions:
+    # Deploy missing entirely
+    eng_exists = (
+        ctx.exists("deploy", "navigator-engine", ns=_PANEL_NS)
+        or ctx.exists("deployment", "navigator-engine", ns=_PANEL_NS)
+    )
+    if not eng_exists and ctx.have_zarf() and ctx.package_path:
+        # Images usually already present — try engine-only first (shorter timeout)
+        fix = _zarf_deploy_components(ctx, "navigator-engine")
+        actions.append(fix.detail)
+        if not fix.changed or not _det_engine(ctx).ok:
+            fix2 = _zarf_deploy_components(ctx, "cybersec-images,navigator-engine")
+            actions.append(fix2.detail)
+    elif not eng_exists and not actions:
         return Fix(False, _manual.join_detail(
             f"MANUAL: cannot deploy navigator-engine without package\n{_panel_live_state(ctx)}",
             _manual.hint_for("T5.navigator-engine")))
-    re = _det_engine(ctx)
-    if not re.ok:
-        if _image_drift(ctx, _PANEL_NS, "app=navigator-engine"):
-            actions.extend(_rem_panel_image_drift(
-                ctx, "navigator-engine", "cybersec-images,navigator-engine"))
+    elif not _det_engine(ctx).ok:
+        # Still unhealthy: recycle; avoid full package redeploy for OOM/Ready cases
+        if _engine_had_oom(ctx) and _engine_memory_below_target(ctx):
+            actions.append(_rem_engine_oom_memory(ctx).detail)
         else:
             actions.extend(_recycle_panel_pods(ctx, "app=navigator-engine"))
     re = _det_engine(ctx)
-    detail = " | ".join(actions)
+    detail = " | ".join(a for a in actions if a)
     if re.ok:
-        return Fix(True, detail)
+        return Fix(True, detail or "navigator-engine already healthy")
     return Fix(bool(actions),
                _manual.join_detail(
                    f"{detail}; still: {re.detail.splitlines()[0]}; "
@@ -3247,26 +3475,57 @@ def _rem_engine(ctx: Ctx) -> Fix:
 _S3_DATAPATH_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "verify-s3-datapath.sh"
 
 # Compact in-pod probe (mirrors verify-s3-datapath.sh / otel-navigator loader).
+# TCP precheck + short botocore timeouts — field hang was empty/wrong endpoint
+# with 180s silent wait (converge-26).
 _S3_DATAPATH_PY = r"""
-import json, os, sys
+import json, os, sys, socket, urllib.parse
 bucket = (os.environ.get("S3_BUCKET") or "").strip()
 akid = os.environ.get("AWS_ACCESS_KEY_ID") or ""
 secret = os.environ.get("AWS_SECRET_ACCESS_KEY") or ""
 endpoint = (os.environ.get("S3_ENDPOINT") or "").strip()
 region = (os.environ.get("AWS_REGION") or "us-east-1").strip()
-out = {"ok": False, "bucket": bucket, "akid_len": len(akid), "endpoint_set": bool(endpoint)}
+out = {"ok": False, "bucket": bucket, "akid_len": len(akid),
+       "endpoint_set": bool(endpoint),
+       "endpoint_host": endpoint.split("://")[-1].split("/")[0] if endpoint else ""}
 if not bucket:
     out["error"] = "S3_BUCKET empty in pod"; print(json.dumps(out)); sys.exit(1)
 if not akid or not secret:
     out["error"] = "AWS keys empty in pod env"; print(json.dumps(out)); sys.exit(1)
+if not endpoint:
+    out["error"] = ("S3_ENDPOINT empty in pod env — Secret may have the key but "
+                    "container was not restarted; rollout restart panel + engine")
+    print(json.dumps(out)); sys.exit(1)
+# Fail fast on network before s3fs can hang for minutes
+try:
+    u = urllib.parse.urlparse(endpoint)
+    host = u.hostname or ""
+    port = u.port or (443 if (u.scheme or "https") == "https" else 80)
+    out["endpoint_host"] = host
+    out["endpoint_port"] = port
+    s = socket.create_connection((host, port), timeout=5)
+    s.close()
+    out["tcp_ok"] = True
+except Exception as e:
+    out["tcp_ok"] = False
+    out["error"] = f"TCP to S3_ENDPOINT failed: {type(e).__name__}: {e}"
+    print(json.dumps(out)); sys.exit(1)
 import s3fs
+try:
+    from botocore.config import Config as BotoConfig
+    boto_cfg = BotoConfig(connect_timeout=5, read_timeout=20,
+                          retries={"max_attempts": 2, "mode": "standard"})
+except Exception:
+    boto_cfg = None
 kw = {"key": akid, "secret": secret,
-      "client_kwargs": {"endpoint_url": endpoint or None, "region_name": region}}
-if endpoint:
-    kw["config_kwargs"] = {"s3": {"addressing_style": "path"}}
+      "client_kwargs": {"endpoint_url": endpoint, "region_name": region}}
+if boto_cfg is not None:
+    kw["client_kwargs"]["config"] = boto_cfg
+kw["config_kwargs"] = {"s3": {"addressing_style": "path"},
+                       "connect_timeout": 5, "read_timeout": 20}
 tok = os.environ.get("AWS_SESSION_TOKEN") or ""
 if tok:
     kw["token"] = tok
+socket.setdefaulttimeout(30)
 fs = s3fs.S3FileSystem(**kw)
 try:
     fs.ls(bucket)
@@ -3298,6 +3557,36 @@ with fs.open(files[0], "rb") as f:
     f.read(64)
 out["ok"] = True
 out["sample"] = files[0]
+print(json.dumps(out))
+"""
+
+# Fast pod env + TCP only (LIVE STATE / pre-s3fs gate). No secrets printed.
+_S3_POD_ENV_PY = r"""
+import json, os, socket, urllib.parse
+ep = (os.environ.get("S3_ENDPOINT") or "").strip()
+out = {
+  "bucket": (os.environ.get("S3_BUCKET") or "").strip(),
+  "endpoint_set": bool(ep),
+  "endpoint_host": ep.split("://")[-1].split("/")[0] if ep else "",
+  "endpoint_len": len(ep),
+  "akid_len": len(os.environ.get("AWS_ACCESS_KEY_ID") or ""),
+  "secret_len": len(os.environ.get("AWS_SECRET_ACCESS_KEY") or ""),
+  "tcp_ok": None, "error": "",
+}
+if not ep:
+    out["error"] = "S3_ENDPOINT empty in pod"
+    print(json.dumps(out)); raise SystemExit(0)
+try:
+    u = urllib.parse.urlparse(ep)
+    host = u.hostname or out["endpoint_host"]
+    port = u.port or (443 if (u.scheme or "https") == "https" else 80)
+    out["endpoint_host"] = host
+    s = socket.create_connection((host, port), timeout=5)
+    s.close()
+    out["tcp_ok"] = True
+except Exception as e:
+    out["tcp_ok"] = False
+    out["error"] = f"{type(e).__name__}: {e}"
 print(json.dumps(out))
 """
 
@@ -3342,9 +3631,10 @@ def _det_s3_datapath_inline(ctx: Ctx) -> Probe:
                      f"no Ready otel-navigator or dask scheduler to probe S3\n"
                      f"{_panel_live_state(ctx)}")
     ns, res, extra = target
+    # 75s wall: TCP 5s + s3fs with botocore 20s reads — never wait 180s silent
     r = ctx.run(
         ctx.kubectl + ["exec", "-n", ns, res] + extra + ["--", "python3", "-c", _S3_DATAPATH_PY],
-        timeout=120,
+        timeout=75,
     )
     raw = (r.stdout or "").strip()
     data = _parse_s3_datapath_json(raw)
@@ -3352,12 +3642,12 @@ def _det_s3_datapath_inline(ctx: Ctx) -> Probe:
         return Probe(
             True,
             f"S3 OK bucket={data.get('bucket')} dataset={data.get('dataset')} "
-            f"parquet={data.get('parquet_count')}",
+            f"parquet={data.get('parquet_count')} host={data.get('endpoint_host')}",
         )
     err = data.get("error") or (r.stderr or raw or f"rc={r.returncode}")[-300:]
     if r.returncode == 124 or (isinstance(err, str) and err.strip() == "timeout"):
-        err = ("probe timed out (likely S3_ENDPOINT unreachable from pod, "
-               "or list/glob hang) — check endpoint_host in pod env + network")
+        err = ("probe timed out after TCP/s3fs budgets — S3_ENDPOINT host unreachable "
+               "or list hang; see pod S3 env in LIVE STATE")
     return Probe(False, f"S3 datapath: {err}\n{_panel_live_state(ctx)}")
 
 
@@ -3375,6 +3665,23 @@ def _det_s3_datapath(ctx: Ctx) -> Probe:
     if s3i:
         return Probe(False, s3i)
 
+    # Fast gate: pod env + TCP before multi-minute s3fs (converge-26 hang).
+    pod_env = _pod_s3_env_census(ctx)
+    if pod_env.get("error") and pod_env.get("endpoint_set") is False:
+        return Probe(
+            False,
+            f"S3 datapath: {pod_env.get('error')} — Secret may be set but not in "
+            f"container env; config-only rem + rollout restart\n{_panel_live_state(ctx)}",
+        )
+    if pod_env.get("tcp_ok") is False:
+        return Probe(
+            False,
+            f"S3 datapath: pod cannot reach S3_ENDPOINT host="
+            f"{pod_env.get('endpoint_host')!r} ({pod_env.get('error')}) — "
+            f"fix network/URL from cluster, not creds-file quoting\n"
+            f"{_panel_live_state(ctx)}",
+        )
+
     # Prefer the staged script (full diagnosis, human + --json).
     if _S3_DATAPATH_SCRIPT.is_file():
         import subprocess
@@ -3382,16 +3689,17 @@ def _det_s3_datapath(ctx: Ctx) -> Probe:
         try:
             r = subprocess.run(
                 ["bash", str(_S3_DATAPATH_SCRIPT), "--quiet", "--json"],
-                capture_output=True, text=True, timeout=180, env=env,
+                capture_output=True, text=True, timeout=90, env=env,
             )
         except subprocess.TimeoutExpired:
-            # Script hung (usually s3fs to a bad endpoint). Still try inline
-            # only if we want a second opinion — skip; report clearly.
+            # Prefer inline (has TCP + botocore budgets) over bare timeout message
+            fb = _det_s3_datapath_inline(ctx)
+            if fb.ok:
+                return Probe(True, f"{fb.detail} (inline after script timeout)")
             return Probe(
                 False,
-                "S3 datapath: verify-s3-datapath.sh timed out after 180s "
-                "(pod→S3 hang; check S3_ENDPOINT reachability from app pod)\n"
-                f"{_panel_live_state(ctx)}",
+                f"S3 datapath: script timed out 90s; inline: "
+                f"{fb.detail.split(chr(10))[0]}\n{_panel_live_state(ctx)}",
             )
         raw = (r.stdout or "").strip() or (r.stderr or "").strip()
         data = _parse_s3_datapath_json(raw)

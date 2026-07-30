@@ -173,6 +173,26 @@ if len(akid) == 0 or len(secret) == 0:
     die(1, "AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY empty in pod env — redeploy with S3 creds", **info)
 if pod_bucket and pod_bucket != bucket:
     info["warning"] = f"pod S3_BUCKET={pod_bucket!r} != ConfigMap {bucket!r}"
+if not endpoint:
+    die(1, "S3_ENDPOINT empty in pod env — Secret may be set but container not restarted "
+           "(rollout restart otel-navigator)", **info)
+
+# Fail fast: TCP to endpoint before s3fs can hang (field converge-26: 180s timeout).
+import socket, urllib.parse
+try:
+    u = urllib.parse.urlparse(endpoint)
+    host = u.hostname or info.get("endpoint_host") or ""
+    port = u.port or (443 if (u.scheme or "https") == "https" else 80)
+    info["endpoint_host"] = host
+    info["endpoint_port"] = port
+    s = socket.create_connection((host, port), timeout=5)
+    s.close()
+    info["tcp_ok"] = True
+except Exception as e:
+    info["tcp_ok"] = False
+    die(1, f"TCP to S3_ENDPOINT failed: {type(e).__name__}: {e} — "
+           f"pod cannot reach endpoint host (network/URL), not a JSON/creds-quote issue",
+        **info)
 
 try:
     import s3fs
@@ -180,17 +200,30 @@ except ImportError as e:
     die(1, f"s3fs not installed in probe image: {e}", **info)
 
 # Match app / RUNBOOK: path-style when a custom endpoint is set (MinIO / gateway).
+# Short botocore timeouts so hangs fail loudly instead of multi-minute silence.
+try:
+    from botocore.config import Config as BotoConfig
+    boto_cfg = BotoConfig(connect_timeout=5, read_timeout=20,
+                          retries={"max_attempts": 2, "mode": "standard"})
+except Exception:
+    boto_cfg = None
 kw = {
     "key": akid,
     "secret": secret,
-    "client_kwargs": {"endpoint_url": endpoint or None, "region_name": region},
+    "client_kwargs": {"endpoint_url": endpoint, "region_name": region},
 }
-if endpoint:
-    kw["config_kwargs"] = {"s3": {"addressing_style": "path"}}
+if boto_cfg is not None:
+    kw["client_kwargs"]["config"] = boto_cfg
+kw["config_kwargs"] = {
+    "s3": {"addressing_style": "path"},
+    "connect_timeout": 5,
+    "read_timeout": 20,
+}
 # Session token for temporary IAM creds
 tok = os.environ.get("AWS_SESSION_TOKEN") or ""
 if tok:
     kw["token"] = tok
+socket.setdefaulttimeout(30)
 
 try:
     fs = s3fs.S3FileSystem(**kw)
