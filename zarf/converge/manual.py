@@ -455,6 +455,25 @@ HINTS = {
         note="scheduler: census node+registry+pod first. Recycle when schedulable; "
              "zarf dask-cluster only if CR/pods absent. Wait timeout ≠ missing objects.",
     ),
+    "T0.package-uniqueness": block(
+        [
+            "ls -lt /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst "
+            "./zarf-package-cybersec-dask-amd64-*.tar.zst /opt/zarf/zarf-package-*.tar.zst "
+            "/mnt/*/*/zarf-package-cybersec-dask-amd64-*.tar.zst 2>/dev/null",
+        ],
+        [
+            "# Preferred: pin the kit explicitly (engine will not fail uniqueness):",
+            'PKG=/var/tmp/zarf-package-cybersec-dask-amd64-1.6.6.tar.zst',
+            'cp -a "$PKG" /var/tmp/ 2>/dev/null || true',
+            'sudo converge-node.sh apply "$PKG"',
+            "# Optional cleanup (Layer-A — operator only; engine never deletes packages):",
+            "mkdir -p /var/tmp/pkg-archive",
+            "mv /var/tmp/zarf-package-cybersec-dask-amd64-<old-or-duplicate>.tar.zst "
+            "/var/tmp/pkg-archive/ 2>/dev/null || true",
+        ],
+        note="Multiple deploy packages only matter when discovery picks by mtime. "
+             "With explicit argv2/--package, converge treats siblings as archive OK.",
+    ),
     "T4.workers-capacity": block(
         [
             "kc get nodes -o custom-columns=NAME:.metadata.name,CPU:.status.allocatable.cpu,"

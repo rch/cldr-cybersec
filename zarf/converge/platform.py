@@ -461,11 +461,14 @@ def find_deploy_packages() -> List[Path]:
             found.extend(sorted(d.glob("zarf-package-cybersec-dask-amd64-*.tar.zst")))
         except OSError:
             continue
-    # de-dupe
+    # de-dupe by resolved path
     seen = set()
     out = []
     for p in found:
-        rp = p.resolve()
+        try:
+            rp = p.resolve()
+        except OSError:
+            continue
         if rp not in seen:
             seen.add(rp)
             out.append(p)
@@ -473,34 +476,65 @@ def find_deploy_packages() -> List[Path]:
 
 
 def det_package_uniqueness(ctx: Ctx) -> Probe:
-    """Multiple deploy packages → mtime discovery may pick the wrong version."""
+    """Multiple deploy packages → mtime discovery may pick the wrong version.
+
+    When ``--package`` / converge-node argv2 is explicit and readable, siblings on
+    disk are **not** a CLOSURE failure (converge-15): the operator pinned the kit;
+    Layer-A conservation forbids us deleting the extras. Report OK with a warn
+    detail so CONVERGED is possible while still naming the archive copies.
+    """
     pkgs = find_deploy_packages()
+    # Include the explicit package even if outside DEFAULT_PKG_DIRS (e.g. /mnt/…)
     if ctx.package_path:
-        # Explicit package wins; still warn if siblings exist
-        others = [p for p in pkgs if p.resolve() != Path(ctx.package_path).resolve()]
+        try:
+            exp = Path(ctx.package_path).resolve()
+        except OSError:
+            exp = Path(ctx.package_path)
+        if exp.is_file():
+            pkgs = [p for p in pkgs if p.resolve() != exp] + [exp]
+            # de-dupe preserving explicit last
+            seen = set()
+            uniq = []
+            for p in pkgs:
+                try:
+                    rp = p.resolve()
+                except OSError:
+                    rp = p
+                if rp not in seen:
+                    seen.add(rp)
+                    uniq.append(p)
+            pkgs = uniq
+        others = [p for p in pkgs if p.resolve() != exp]
         if others:
-            return Probe(False,
-                         f"multiple deploy packages staged ({len(pkgs)}): "
-                         f"using {Path(ctx.package_path).name}; also present: "
-                         f"{[p.name for p in others[:5]]} — remove extras to avoid "
-                         "mtime races on next transport")
-        return Probe(True, f"explicit package {Path(ctx.package_path).name}")
+            # Explicit pin wins — do not fail converge (archive copies are OK)
+            return Probe(
+                True,
+                f"explicit package {exp} (OK); {len(others)} other copy(ies) on disk "
+                f"ignored for deploy: {[str(p) for p in others[:4]]} — optional: "
+                f"mv extras to /var/tmp/pkg-archive/ to silence this note",
+            )
+        return Probe(True, f"explicit package {exp.name}")
     if len(pkgs) > 1:
         return Probe(False,
                      f"{len(pkgs)} deploy packages in search path "
-                     f"({[p.name for p in pkgs[:6]]}) — keep only ONE version")
+                     f"({[p.name for p in pkgs[:6]]}) — keep only ONE version "
+                     f"or pass an explicit package path as argv2 / --package")
     if len(pkgs) == 1:
         return Probe(True, f"single package {pkgs[0].name}")
     return Probe(True, "no package tarballs in default paths (engine may use --package)")
 
 
 def rem_package_uniqueness(ctx: Ctx) -> Fix:
-    """Cannot auto-delete packages (Layer-A). Report MANUAL."""
+    """Cannot auto-delete packages (Layer-A). Report MANUAL only when ambiguous."""
+    if ctx.package_path and Path(ctx.package_path).is_file():
+        return Fix(False, "explicit --package set — uniqueness OK (no Layer-A delete)")
     pkgs = find_deploy_packages()
-    names = ", ".join(p.name for p in pkgs)
+    names = ", ".join(str(p) for p in pkgs)
     return Fix(False, _manual.join_detail(
         f"MANUAL: leave only the intended package tarball on disk "
-        f"(found: {names}). Engine will not delete Layer-A artifacts.",
+        f"(found: {names}), or re-run with explicit path: "
+        f"converge-node.sh apply /var/tmp/zarf-package-….tar.zst. "
+        f"Engine will not delete Layer-A artifacts.",
         _manual.hint_for("T0.package-uniqueness")))
 
 
