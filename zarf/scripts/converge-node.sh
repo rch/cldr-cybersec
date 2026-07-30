@@ -100,22 +100,46 @@ fi
 
 # --- locate the transported deploy package (optional for verify / kubectl-only) -
 # Search order (newest mtime wins within each step):
-#   1) explicit argv package.tar.zst
+#   1) explicit argv package.tar.zst (must be readable — NFS root_squash often
+#      makes root fail [ -f ] on /mnt/... while the file "exists" for a user)
 #   2) /var/tmp (runbook default staging)
 #   3) next to this script / engine unpack dir (field: package beside converge)
-#   4) current working directory
-if [ -z "$PKG_ARG" ]; then
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  PKG_ARG="$(
-    ls -t \
-      /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst \
-      "$SCRIPT_DIR"/zarf-package-cybersec-dask-amd64-*.tar.zst \
-      "$SCRIPT_DIR"/../zarf-package-cybersec-dask-amd64-*.tar.zst \
-      ./zarf-package-cybersec-dask-amd64-*.tar.zst \
-      2>/dev/null | head -1 || true
-  )"
+#   4) parent of engine dir / CWD
+#   5) common air-gap mounts under /mnt (DHFO-style staging)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_pkg_discover() {
+  # shellcheck disable=SC2086
+  ls -t \
+    /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst \
+    "$SCRIPT_DIR"/zarf-package-cybersec-dask-amd64-*.tar.zst \
+    "$SCRIPT_DIR"/../zarf-package-cybersec-dask-amd64-*.tar.zst \
+    ./zarf-package-cybersec-dask-amd64-*.tar.zst \
+    /mnt/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
+    /mnt/*/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
+    /mnt/*/*/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
+    2>/dev/null | head -1 || true
+}
+if [ -n "$PKG_ARG" ]; then
+  if [ -f "$PKG_ARG" ] && [ -r "$PKG_ARG" ]; then
+    PKG_ARG="$(cd "$(dirname "$PKG_ARG")" && pwd)/$(basename "$PKG_ARG")"
+  else
+    echo "   ⚠ package path not readable as $(id -un): ${PKG_ARG}"
+    echo "     (common on NFS with root_squash when using sudo — copy to /var/tmp or"
+    echo "      run without sudo if kubeconfig allows; falling back to discovery)"
+    ls -la "$PKG_ARG" 2>&1 | sed 's/^/     /' || true
+    PKG_ARG=""
+  fi
 fi
-[ -n "$PKG_ARG" ] && [ -f "$PKG_ARG" ] && PKG_ARG="$(cd "$(dirname "$PKG_ARG")" && pwd)/$(basename "$PKG_ARG")"
+if [ -z "$PKG_ARG" ]; then
+  PKG_ARG="$(_pkg_discover)"
+  [ -n "$PKG_ARG" ] && [ -f "$PKG_ARG" ] && [ -r "$PKG_ARG" ] && \
+    PKG_ARG="$(cd "$(dirname "$PKG_ARG")" && pwd)/$(basename "$PKG_ARG")"
+fi
+# Final gate: unreadable → clear so the engine does not get a false path
+if [ -n "$PKG_ARG" ] && { [ ! -f "$PKG_ARG" ] || [ ! -r "$PKG_ARG" ]; }; then
+  echo "   ⚠ discovered package unreadable: $PKG_ARG — clearing"
+  PKG_ARG=""
+fi
 
 # `zarf init` needs the zarf-INIT package (registry/agent/injector images) IN the
 # closed world. It has NO --init-package flag and only looks in the CWD or next to the
@@ -167,12 +191,24 @@ ARGS=(--kubectl "$KUBECTL_CMD")
 # Always pass zarf when we have one — remediations need it even if package discovery
 # failed (clearer errors). Package is required for component deploy remediations.
 [ -n "$ZARF_BIN" ] && ARGS+=(--zarf "$ZARF_BIN")
-if [ -n "$PKG_ARG" ] && [ -f "$PKG_ARG" ]; then
+if [ -n "$PKG_ARG" ] && [ -f "$PKG_ARG" ] && [ -r "$PKG_ARG" ]; then
   ARGS+=(--package "$PKG_ARG")
   echo "   package: $PKG_ARG"
+  # Hint when multiple 1.6.x packages exist (mtime / content-tag skew)
+  _n_pkgs="$(ls /var/tmp/zarf-package-cybersec-dask-amd64-*.tar.zst \
+    /mnt/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
+    /mnt/*/*/zarf-package-cybersec-dask-amd64-*.tar.zst \
+    2>/dev/null | wc -l | tr -d ' ')"
+  if [ "${_n_pkgs:-0}" -gt 1 ]; then
+    echo "   ⚠ ${_n_pkgs} deploy packages visible — engine uses the path above;"
+    echo "     remove extras to avoid content-tag drift (image rem needs matching package)"
+  fi
 else
-  echo "   package: <none> — component-deploy fixes will MANUAL (pass package path as argv2)"
-  echo "            example: $0 apply /path/to/zarf-package-cybersec-dask-amd64-1.6.6.tar.zst"
+  echo "   package: <none> — component-deploy / image-push remediations will MANUAL"
+  echo "            pass a *readable* package as argv2, e.g.:"
+  echo "              cp -a /mnt/.../zarf-package-cybersec-dask-amd64-1.6.6.tar.zst /var/tmp/"
+  echo "              sudo $0 apply /var/tmp/zarf-package-cybersec-dask-amd64-1.6.6.tar.zst"
+  echo "            (NFS root_squash: root often cannot read /mnt — stage under /var/tmp)"
 fi
 [ -n "$CREDS_FILE" ] && ARGS+=(--creds-file "$CREDS_FILE")
 # Multi-core / air-gap baseline 4; set DASK_WORKER_REPLICAS=1 for tiny smoke hosts
