@@ -200,24 +200,18 @@ except ImportError as e:
     die(1, f"s3fs not installed in probe image: {e}", **info)
 
 # Match app / RUNBOOK: path-style when a custom endpoint is set (MinIO / gateway).
-# Short botocore timeouts so hangs fail loudly instead of multi-minute silence.
-try:
-    from botocore.config import Config as BotoConfig
-    boto_cfg = BotoConfig(connect_timeout=5, read_timeout=20,
-                          retries={"max_attempts": 2, "mode": "standard"})
-except Exception:
-    boto_cfg = None
+# Short botocore timeouts via config_kwargs only — do NOT also pass
+# client_kwargs["config"] (aiobotocore: multiple values for keyword 'config').
 kw = {
     "key": akid,
     "secret": secret,
     "client_kwargs": {"endpoint_url": endpoint, "region_name": region},
-}
-if boto_cfg is not None:
-    kw["client_kwargs"]["config"] = boto_cfg
-kw["config_kwargs"] = {
-    "s3": {"addressing_style": "path"},
-    "connect_timeout": 5,
-    "read_timeout": 20,
+    "config_kwargs": {
+        "s3": {"addressing_style": "path"},
+        "connect_timeout": 5,
+        "read_timeout": 20,
+        "retries": {"max_attempts": 2, "mode": "standard"},
+    },
 }
 # Session token for temporary IAM creds
 tok = os.environ.get("AWS_SESSION_TOKEN") or ""

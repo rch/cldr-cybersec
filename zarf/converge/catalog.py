@@ -3510,18 +3510,16 @@ except Exception as e:
     out["error"] = f"TCP to S3_ENDPOINT failed: {type(e).__name__}: {e}"
     print(json.dumps(out)); sys.exit(1)
 import s3fs
-try:
-    from botocore.config import Config as BotoConfig
-    boto_cfg = BotoConfig(connect_timeout=5, read_timeout=20,
-                          retries={"max_attempts": 2, "mode": "standard"})
-except Exception:
-    boto_cfg = None
-kw = {"key": akid, "secret": secret,
-      "client_kwargs": {"endpoint_url": endpoint, "region_name": region}}
-if boto_cfg is not None:
-    kw["client_kwargs"]["config"] = boto_cfg
-kw["config_kwargs"] = {"s3": {"addressing_style": "path"},
-                       "connect_timeout": 5, "read_timeout": 20}
+# config_kwargs only — not client_kwargs["config"] (duplicate config → TypeError)
+kw = {
+    "key": akid, "secret": secret,
+    "client_kwargs": {"endpoint_url": endpoint, "region_name": region},
+    "config_kwargs": {
+        "s3": {"addressing_style": "path"},
+        "connect_timeout": 5, "read_timeout": 20,
+        "retries": {"max_attempts": 2, "mode": "standard"},
+    },
+}
 tok = os.environ.get("AWS_SESSION_TOKEN") or ""
 if tok:
     kw["token"] = tok
@@ -4104,14 +4102,59 @@ def _rem_jupyterhub(ctx: Ctx) -> Fix:
     return fix
 
 
+# Must match zarf/scripts/embed-notebooks.py INCLUDE_NOTEBOOKS + package CM.
+# Presence-only detect masked stale CMs (pre-HDF5) so T5.sample-notebooks was
+# green while JupyterLab only showed OTEL/Dask notebooks (converge-27).
+_SAMPLE_NOTEBOOK_KEYS = (
+    "OTEL_Data_Generator.ipynb",
+    "Dask_S3_Validation.ipynb",
+    "HDF5_CPHY_Acquisition_Generator.ipynb",
+    "HDF5_Iceberg_Metadata_Provider.ipynb",
+)
+
+
+def _sample_notebooks_keys(ctx: Ctx) -> List[str]:
+    cm = ctx.get("configmap", "sample-notebooks", ns="jupyterhub")
+    if not cm:
+        return []
+    data = cm.get("data") or {}
+    return sorted(data.keys())
+
+
 def _det_sample_notebooks(ctx: Ctx) -> Probe:
-    ok = ctx.exists("configmap", "sample-notebooks", ns="jupyterhub")
-    return Probe(ok, "sample-notebooks ConfigMap present" if ok
-                 else "sample-notebooks ConfigMap absent")
+    if not ctx.exists("configmap", "sample-notebooks", ns="jupyterhub"):
+        return Probe(False, "sample-notebooks ConfigMap absent")
+    keys = _sample_notebooks_keys(ctx)
+    # Only *.ipynb matter for the Jupyter file browser seed
+    nb_keys = {k for k in keys if k.endswith(".ipynb")}
+    missing = [k for k in _SAMPLE_NOTEBOOK_KEYS if k not in nb_keys]
+    if missing:
+        return Probe(
+            False,
+            f"sample-notebooks ConfigMap missing notebooks {missing} "
+            f"(have {sorted(nb_keys)}) — redeploy sample-notebooks from 1.6.6+ package; "
+            f"then stop/start the Jupyter singleuser server so copies refresh",
+        )
+    return Probe(True, f"sample-notebooks ConfigMap OK ({len(nb_keys)} notebooks incl. HDF5)")
 
 
 def _rem_sample_notebooks(ctx: Ctx) -> Fix:
-    return _zarf_deploy_components(ctx, "sample-notebooks")
+    """Redeploy CM; recycle hub user pods so mounts/startup re-seed home copies."""
+    fix = _zarf_deploy_components(ctx, "sample-notebooks")
+    actions = [fix.detail]
+    # Singleuser pods mount the CM; without restart they keep the old volume
+    # snapshot and /root/*.ipynb from the previous startup copy.
+    r = ctx.k([
+        "delete", "pod", "-n", "jupyterhub",
+        "-l", "component=singleuser-server",
+        "--ignore-not-found", "--wait=false",
+    ])
+    if r.returncode == 0:
+        actions.append("deleted jupyterhub singleuser pods (re-login to pick up notebooks)")
+    # Re-detect content
+    if _det_sample_notebooks(ctx).ok:
+        return Fix(True, " | ".join(actions))
+    return Fix(fix.changed, " | ".join(actions) + f"; still: {_det_sample_notebooks(ctx).detail}")
 
 
 def _det_ingress(ctx: Ctx) -> Probe:
