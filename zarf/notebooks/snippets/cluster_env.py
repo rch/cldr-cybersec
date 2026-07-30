@@ -203,15 +203,20 @@ def load_cluster_config() -> ClusterConfig:
 
 
 def require_parquet_stack() -> dict:
-    """Fail loud if Dask/PyArrow cannot be used for ``dd.read_parquet(..., engine='pyarrow')``.
+    """Fail loud if Dask + PyArrow are missing (needed for distributed parquet I/O).
 
-    The cybersec-dask image bakes pyarrow + dask and fails the image build if imports
-    break. Notebooks must not silently fall back to pandas / skip distributed reads.
+    The cybersec-dask image bakes both and fails the image build if imports break.
+    Notebooks must not silently fall back to pandas / skip distributed reads.
+
+    Note: ``engine="pyarrow"`` on ``dd.read_parquet`` is a legacy kwarg from when
+    fastparquet was an alternative; modern Dask defaults to the Arrow path.
+    Passing it is harmless (or deprecated) and does not change behavior when
+    PyArrow is the only viable engine.
     """
     info: dict = {}
     try:
         import dask
-        import dask.dataframe as dd
+        import dask.dataframe as dd  # noqa: F401
         import pyarrow as pa
         import pyarrow.parquet  # noqa: F401
     except ImportError as e:
@@ -221,15 +226,13 @@ def require_parquet_stack() -> dict:
         ) from e
     info["dask"] = getattr(dask, "__version__", "?")
     info["pyarrow"] = getattr(pa, "__version__", "?")
-    # Resolve engine the same way read_parquet will
     try:
         from dask.dataframe.io.parquet.core import get_engine
-        eng = get_engine("pyarrow")
-        info["engine"] = f"pyarrow ({type(eng).__module__})"
+        eng = get_engine("auto")
+        info["parquet_backend"] = f"{type(eng).__module__}"
     except Exception as e:
         raise RuntimeError(
-            f"dask cannot load parquet engine 'pyarrow': {e}. "
-            f"Install/repair pyarrow in the image; do not use engine=None/fastparquet."
+            f"dask cannot resolve a parquet backend (need PyArrow): {e}."
         ) from e
     return info
 
@@ -324,12 +327,14 @@ def load_active_spans_ddf(
         s3://{bucket}/{prefix}/spans/date=YYYY-MM-DD/batch_*.parquet
 
     (date= only — no hour=). Also accepts production date=/hour= trees.
-    Always uses ``engine="pyarrow"`` (explicit — no silent engine auto-skip).
     """
     import dask.dataframe as dd
 
     stack = require_parquet_stack()
-    print(f"parquet stack: dask={stack['dask']} pyarrow={stack['pyarrow']} engine={stack['engine']}")
+    print(
+        f"parquet stack: dask={stack['dask']} pyarrow={stack['pyarrow']} "
+        f"backend={stack.get('parquet_backend', '?')}"
+    )
 
     cfg = cfg or load_cluster_config()
     if require_dask and not cfg.use_dask:
