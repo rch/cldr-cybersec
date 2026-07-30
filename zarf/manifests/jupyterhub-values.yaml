@@ -224,7 +224,8 @@ singleuser:
     AWS_DEFAULT_REGION: "###ZARF_VAR_S3_REGION###"
     S3_REGION: "###ZARF_VAR_S3_REGION###"
     # s3://$S3_BUCKET/ when unset at package time; operators may set OTEL_DATA_PATH
-    OTEL_DATA_PATH: "s3://###ZARF_VAR_S3_BUCKET###/"
+    OTEL_DATA_PATH: "s3://###ZARF_VAR_S3_BUCKET###/otel-notebook/"
+    OTEL_PREFIX: "otel-notebook"
     # Dask scheduler address in same cluster (aliases for notebook cluster_env)
     DASK_SCHEDULER_ADDRESS: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
     DASK_SCHEDULER: "tcp://cybersec-dask-scheduler.dask.svc.cluster.local:8786"
