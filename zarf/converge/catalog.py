@@ -1250,15 +1250,36 @@ def _det_registry_pv(ctx: Ctx) -> Probe:
     don't exist. OK if the registry PVC is already Bound (e.g. a resourced cluster's
     pre-existing default SC handled it) OR the prebound PV is present so a fresh
     ``zarf init``'s PVC binds on creation."""
+    # Reclaim policy FIRST — a Bound-but-Delete static PV converges "healthy"
+    # while primed to erase the registry data on the next PVC churn (matrix
+    # case 15). Retain is the conservation contract; reclaim is mutable on a
+    # Bound PV, so this is always normalizable in place.
+    pv = ctx.get("pv", REGISTRY_PV_NAME)
+    if pv is not None:
+        pol = (pv.get("spec") or {}).get("persistentVolumeReclaimPolicy")
+        if pol != "Retain":
+            return Probe(False,
+                         f"registry PV reclaim={pol!r} (want Retain — conservation)")
     if any(p.get("status", {}).get("phase") == "Bound"
            for p in ctx.items("pvc", ns="zarf")):
         return Probe(True, "zarf registry PVC already Bound")
-    if ctx.exists("pv", "zarf-registry-pv"):
+    if pv is not None:
         return Probe(True, "claimRef registry PV present (PVC will bind on init)")
     return Probe(False, "no Bound registry PVC and no prebound registry PV")
 
 
 def _rem_registry_pv(ctx: Ctx) -> Fix:
+    # Reclaim drift on an EXISTING PV: merge-patch just the policy — never
+    # re-apply the full object over a Bound PV (claimRef/uid conflicts).
+    pv = ctx.get("pv", REGISTRY_PV_NAME)
+    if pv is not None and \
+            (pv.get("spec") or {}).get("persistentVolumeReclaimPolicy") != "Retain":
+        r = ctx.k(["patch", "pv", REGISTRY_PV_NAME, "--type", "merge",
+                   "-p", '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'])
+        return Fix(r.returncode == 0,
+                   "normalized registry PV reclaim → Retain (conservation)"
+                   if r.returncode == 0 else
+                   f"failed to patch registry PV reclaim: rc={r.returncode}")
     # Apply the claimRef-prebound hostPath PV so the registry PVC binds with NO default
     # StorageClass. Idempotent; Layer-B (a disposable PV, not a transported artifact).
     # This is the single move that lets the resilient path skip the provisioner entirely.
