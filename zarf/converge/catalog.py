@@ -514,7 +514,43 @@ def _zarf_deploy_timeout(components: str) -> int:
     return 3600
 
 
+def _pre_deploy_feasibility(ctx: Ctx, components: str) -> List[str]:
+    """Knowable preconditions for package deploys that embed hard waits.
+
+    Converge-09 class: committing to ``dask-cluster`` while the scheduler is
+    already Pending/not Ready under pressure converts a long deploy into a
+    guaranteed after-action timeout and mints a failed helm revision.
+    """
+    issues: List[str] = []
+    c = components.lower()
+    node = _node_schedulability_census(ctx)
+    if not node["schedulable"]:
+        issues.append(f"node not schedulable: {node['summary']}")
+    issues.extend(_disk_pressure_issues(ctx))
+    # Components with in-package Ready waits (zarf.yaml after actions)
+    if any(x in c for x in ("dask-cluster", "dask-operator")):
+        reg = _registry_census(ctx)
+        if reg.get("catalog_has_app") is False:
+            issues.append("registry catalog missing cybersec-dask — push images first")
+        if reg.get("registry_ready", 0) < 1 and reg.get("registry_total", 0) > 0:
+            issues.append("zarf registry pods not Ready")
+        sched = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
+        if "dask-cluster" in c and sched["pending"] and not node["schedulable"]:
+            issues.append(
+                "scheduler already Pending and node not schedulable — "
+                "resolve schedule before dask-cluster deploy (embedded 900s wait)"
+            )
+        if "dask-cluster" in c and sched["image_pull"]:
+            issues.append(
+                f"scheduler ImagePull before deploy: {sched['image_pull'][:2]} — "
+                "push cybersec-images first"
+            )
+    return issues
+
+
 def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
+    from .discovery import write_journal  # local import avoids cycle at module load
+
     missing = []
     if not ctx.have_zarf():
         missing.append(f"zarf binary missing (zarf_bin={ctx.zarf_bin!r})")
@@ -538,6 +574,20 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
             ))
         # Pressure cleared — fall through to deploy
         print(f"    disk pressure resolved: {resolved.detail}", flush=True)
+    # Feasibility before procedures with embedded health gates (converge-09)
+    feas = _pre_deploy_feasibility(ctx, components)
+    if feas:
+        return Fix(False, _manual.join_detail(
+            f"refusing zarf deploy --components={components} — pre-deploy feasibility "
+            f"failed: {'; '.join(feas)}",
+            _manual.zarf_deploy_recipe(components),
+        ))
+    write_journal({
+        "last_procedure": f"zarf package deploy --components={components}",
+        "last_component": components.split(",")[0].strip(),
+        "last_status": "in_flight",
+        "last_start": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+    })
     # Fail LOUD rather than render an empty S3_BUCKET. An S3-dependent component
     # deployed with a blank bucket renders OTEL_DATA_PATH=s3:/// and bricks the app
     # ("Invalid bucket name 's3:'"), so refuse instead of silently breaking it.
@@ -628,6 +678,11 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
             )
             r2 = ctx.zarf(args, env=env)
             if r2.returncode == 0:
+                write_journal({
+                    "last_status": "ok",
+                    "last_component": components,
+                    "last_end": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+                })
                 return Fix(True, f"zarf deploy {components}: rc=0 "
                                  f"(retry after dead-release removal)  [{note}]{pre}")
             pre += f"  [{note}]"
@@ -640,6 +695,11 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
             except OSError:
                 pass
     if r.returncode == 0:
+        write_journal({
+            "last_status": "ok",
+            "last_component": components,
+            "last_end": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        })
         return Fix(True, f"zarf deploy {components}: rc=0{pre}")
     # Surface the actual zarf/Helm error tail, not a bare rc=1 — the deploy failures
     # (dask-operator/jupyterhub) only showed "rc=1" all afternoon. Last lines tend to
@@ -649,6 +709,15 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
     tail = (Ctx.out_text(r.stderr) or Ctx.out_text(r.stdout)).strip().splitlines()[-3:]
     suffix = f" — {' / '.join(s.strip() for s in tail)}" if tail else ""
     head = f"zarf deploy {components}: rc={r.returncode}{suffix}{pre}"
+    status = "timeout" if r.returncode == 124 or "timed out" in suffix.lower() else "fail"
+    if "signal: killed" in suffix.lower() or "killed" in (Ctx.out_text(r.stderr) or "").lower():
+        status = "killed"
+    write_journal({
+        "last_status": status,
+        "last_component": components,
+        "last_detail": head[:500],
+        "last_end": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+    })
     return Fix(False, _manual.join_detail(
         head,
         _manual.zarf_deploy_recipe(
@@ -1428,11 +1497,24 @@ def _rem_operator(ctx: Ctx) -> Fix:
 
 
 def _det_scheduler(ctx: Ctx) -> Probe:
-    """Scheduler Ready — census node/registry/pod when not Ready (air-gap local only)."""
+    """Scheduler Ready on *target* image — census node/registry/pod when not.
+
+    Ready-on-stale-image is a FAIL (dask operator does not roll children when the
+    CR image is rewritten by helm — converge-09 class upgrade silence).
+    """
     pods = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
+    drift = _image_drift(ctx, "dask", "dask.org/component=scheduler")
     if pods["ready"] >= 1:
+        if drift:
+            return Probe(
+                False,
+                f"scheduler Ready but {drift} — CR/helm advanced without rolling "
+                f"children; recycle scheduler pods or redeploy dask-cluster",
+            )
         return Probe(True, f"scheduler ready {pods['ready']}/{pods['total']}")
     orient = _cluster_orient_summary(ctx, pods)
+    if drift:
+        orient = f"{orient} | {drift}"
     has_cr = bool(ctx.items("daskcluster", ns="dask")) or bool(
         ctx.items("daskclusters", ns="dask"))
     if pods["image_pull"]:
@@ -1499,7 +1581,7 @@ def _rem_scheduler(ctx: Ctx) -> Fix:
                 _manual.hint_for("T0.no-disk-pressure"),
             ))
 
-    # 2) Image pull → ensure images in registry
+    # 2) Image pull / catalog → ensure images in registry
     if pods["image_pull"] or reg.get("catalog_has_app") is False:
         fix = _zarf_deploy_components(ctx, "cybersec-images")
         actions.append(fix.detail)
@@ -1508,10 +1590,26 @@ def _rem_scheduler(ctx: Ctx) -> Fix:
                "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
         actions.append("recycled scheduler pods after image push")
         again = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
-        if again["ready"] >= 1:
+        if again["ready"] >= 1 and not _image_drift(
+                ctx, "dask", "dask.org/component=scheduler"):
             return Fix(True, f"images+recycle → scheduler Ready — "
                              f"{_cluster_orient_summary(ctx, again)}")
         # continue toward cluster redeploy if still missing
+
+    # 2b) Ready-or-running on stale image: force roll (operator won't)
+    drift = _image_drift(ctx, "dask", "dask.org/component=scheduler")
+    if drift and node["schedulable"]:
+        ctx.k(["delete", "pod", "-n", "dask", "-l", "dask.org/component=scheduler",
+               "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
+        # workers often same tag — roll them too so CR children match package
+        ctx.k(["delete", "pod", "-n", "dask", "-l", "dask.org/component=worker",
+               "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
+        actions.append(f"rolled dask pods for image drift ({drift})")
+        again = _pod_terminal_census(ctx, "dask", "dask.org/component=scheduler")
+        if again["ready"] >= 1 and not _image_drift(
+                ctx, "dask", "dask.org/component=scheduler"):
+            return Fix(True, f"image-drift roll → scheduler Ready — "
+                             f"{_cluster_orient_summary(ctx, again)}")
 
     # 3/4) Recycle on CrashLoop or Pending-while-schedulable
     if pods["crash"] or (pods["pending"] and node["schedulable"]) or (

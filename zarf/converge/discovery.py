@@ -15,10 +15,22 @@ The sweep is idempotent and safe to run on a healthy converged cluster (no-ops).
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .kube import Ctx
+
+# Pending pods older than this become wedges (eviction fallout that never resumed).
+_PENDING_GRACE_S = 300
+
+# Node-side journal: last expensive procedure outcome (interrupted-upgrade memory).
+_JOURNAL_PATHS = (
+    Path("/var/tmp/cybersec-converge-journal.json"),
+    Path("/tmp/cybersec-converge-journal.json"),
+)
 
 # --------------------------------------------------------------------------- #
 # Scope: what we own vs what we must not touch
@@ -195,10 +207,83 @@ def _pod_chain(ctx: Ctx, ns: str, pod: dict) -> Tuple[str, List[str]]:
             if "Pending" in root or "Terminating" in root or "missing" in root:
                 return root, chain
     if phase == "Pending":
+        age = _pod_age_s(pod)
+        if age is not None and age > _PENDING_GRACE_S:
+            return (
+                f"Pod Pending beyond grace ({int(age)}s > {_PENDING_GRACE_S}s) — "
+                "eviction fallout or stalled rollout; recycle or fix schedule",
+                chain,
+            )
         return "Pod Pending — scheduling/mount/capacity", chain
     if phase in _POD_JUNK_PHASES:
         return f"Pod junk phase={phase} — delete Layer-B", chain
     return f"Pod phase={phase}", chain
+
+
+def _pod_age_s(pod: dict) -> Optional[float]:
+    ts = (pod.get("metadata") or {}).get("creationTimestamp")
+    if not ts:
+        return None
+    try:
+        if ts.endswith("Z"):
+            created = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        else:
+            created = datetime.fromisoformat(ts)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - created).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def _pods_matching_deploy(ctx: Ctx, ns: str, deploy: dict) -> List[dict]:
+    """Pods belonging to a Deployment via matchLabels — not namespace-wide."""
+    sel = ((deploy.get("spec") or {}).get("selector") or {}).get("matchLabels") or {}
+    if not sel:
+        return []
+    label = ",".join(f"{k}={v}" for k, v in sorted(sel.items()))
+    return ctx.items("pods", ns=ns, selector=label)
+
+
+def _ready_count(pods: List[dict]) -> int:
+    n = 0
+    for p in pods:
+        conds = {c["type"]: c["status"] for c in p.get("status", {}).get("conditions", [])}
+        if conds.get("Ready") == "True":
+            n += 1
+    return n
+
+
+def journal_path() -> Path:
+    for p in _JOURNAL_PATHS:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if os.access(p.parent, os.W_OK):
+                return p
+        except OSError:
+            continue
+    return _JOURNAL_PATHS[-1]
+
+
+def read_journal() -> dict:
+    p = journal_path()
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_journal(update: dict) -> None:
+    """Merge update into node-side journal (best-effort; never fails the engine)."""
+    try:
+        cur = read_journal()
+        cur.update(update)
+        cur["updated_at"] = datetime.now(timezone.utc).isoformat()
+        journal_path().write_text(json.dumps(cur, indent=2) + "\n")
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -251,25 +336,41 @@ def discover(ctx: Ctx) -> DiscoveryReport:
         sts = ctx.items("statefulsets", ns=ns)
         pods = ctx.items("pods", ns=ns)
         svcs = ctx.items("services", ns=ns)
-        ready_pods = sum(
-            1 for p in pods
-            if {c["type"]: c["status"] for c in p.get("status", {}).get("conditions", [])
-                }.get("Ready") == "True")
-        # Deployments/STS with replicas desired but no pods
+        ready_pods = _ready_count(pods)
+        # Deployments — readiness is **per-Deployment** (selector-scoped pods).
+        # Namespace-wide ready_pods hides a wedged scheduler beside healthy workers
+        # (converge-09 precondition).
         for d in deps:
             des = d.get("spec", {}).get("replicas")
             if des is None:
                 des = 1
             name = d.get("metadata", {}).get("name", "?")
             avail = d.get("status", {}).get("availableReplicas") or 0
-            if des and des > 0 and not pods:
+            dpods = _pods_matching_deploy(ctx, ns, d)
+            dready = _ready_count(dpods)
+            if des and des > 0 and not dpods:
                 rep.add("wedge", f"deploy/{ns}/{name}",
-                        f"desired={des} available={avail} but ZERO pods in ns",
-                        root="husk Deployment (force-finalize resurrection) — delete ns or drain")
-            elif des and des > 0 and avail == 0 and ready_pods == 0:
-                rep.add("warn", f"deploy/{ns}/{name}",
-                        f"desired={des} available=0 ready_pods={ready_pods}",
-                        root="controller not producing Ready pods — check events/images/PVC")
+                        f"desired={des} available={avail} but ZERO pods for this Deployment",
+                        root="husk/stalled Deployment — recycle pods or recreate controller")
+            elif des and des > 0 and avail == 0 and dready == 0:
+                # Promote to wedge: desired replicas, zero ready *for this deploy*
+                rep.add("wedge", f"deploy/{ns}/{name}",
+                        f"desired={des} available=0 deploy_ready_pods={dready} "
+                        f"(ns_ready_pods={ready_pods} — not used for this gate)",
+                        root="controller not producing Ready pods — Pending/ImagePull/"
+                             "CrashLoop; recycle or fix schedule (not ns-wide healthy)")
+            # CR image/spec may have advanced while children stay on old image
+            if ns == "dask" and name and "scheduler" in name.lower() and dpods:
+                imgs = sorted({
+                    c.get("image", "")
+                    for p in dpods
+                    for c in (p.get("spec") or {}).get("containers") or []
+                    if c.get("image")
+                })
+                if imgs:
+                    rep.add("info", f"deploy/{ns}/{name}",
+                            f"live images={imgs}",
+                            root="compare to package target tag for drift (T4.scheduler)")
         for s in sts:
             des = s.get("spec", {}).get("replicas") or 1
             name = s.get("metadata", {}).get("name", "?")
@@ -329,22 +430,68 @@ def discover(ctx: Ctx) -> DiscoveryReport:
         if key not in latest or ver > latest[key][0]:
             latest[key] = (ver, md.get("name"), lab.get("status"), md.get("namespace"))
     for (ns, rel), (ver, name, status, _) in latest.items():
+        hist = history.get((ns, rel), set())
         if status in _HELM_PENDING:
             rep.add("wedge", f"helm/{ns}/{rel}",
                     f"latest rev {ver} status={status}",
                     root="delete pending secret so next deploy can proceed")
-        elif (status == "failed"
-              and not (history.get((ns, rel), set()) & {"deployed", "superseded"})):
+        elif status == "failed" and not (hist & {"deployed", "superseded"}):
             # DEAD release (field-proven): first install failed, no revision ever
             # deployed → every `helm upgrade` refuses with "has no deployed releases".
-            # The deploy path auto-recovers (zarf package remove <component> + retry).
             rep.add("wedge", f"helm/{ns}/{rel}",
                     f"DEAD release: rev {ver} failed, no deployed revision in history",
                     root="helm upgrade will always fail 'has no deployed releases' — "
                          "remove the component's failed chart and redeploy (engine "
                          "auto-recovers on the next apply)")
+        elif status == "failed" and (hist & {"deployed", "superseded"}):
+            # Interrupted upgrade (converge-09 class): wait-killed or mid-flight fail
+            # leaves latest=failed while an older revision still "deployed"/superseded.
+            rep.add("wedge", f"helm/{ns}/{rel}",
+                    f"INTERRUPTED upgrade: latest rev {ver} failed; history has "
+                    f"prior deployed/superseded {sorted(hist)}",
+                    root="do not re-run full package deploy blindly — unwedge helm, "
+                         "verify target Deployment Ready, then targeted redeploy")
 
-    # --- junk / ImagePull pods (relationship walk sample) ---
+    # --- Zarf package ledger (which components last deployed) ---
+    # Prefer zarf ns + managed app ns; match name/label conventions (avoid cluster-wide
+    # secret dump).
+    ledger_ns = (PLATFORM_NS,) + APP_NAMESPACES
+    for lns in ledger_ns:
+        if rep.managed_ns.get(lns) == "Absent" and lns != PLATFORM_NS:
+            continue
+        zobj = ctx.kjson(["get", "secrets", "-n", lns]) or {}
+        for s in zobj.get("items", []) or []:
+            md = s.get("metadata") or {}
+            name = md.get("name") or ""
+            labs = md.get("labels") or {}
+            if not (name.startswith("zarf-package") or "zarf-package" in name
+                    or labs.get("zarf.dev/package-name")
+                    or labs.get("package-deployed") == "true"):
+                continue
+            data_keys = list((s.get("data") or {}).keys())[:12]
+            zlabs = {k: labs[k] for k in labs
+                     if "zarf" in k or k in ("package-deployed", "name", "version")}
+            rep.add("info", f"zarf-ledger/{lns}/{name}",
+                    f"labels={zlabs} data_keys={data_keys}",
+                    root="primary source for last package deploy; compare to journal")
+
+    # --- Run journal (procedural memory from prior apply) ---
+    j = read_journal()
+    if j.get("last_status") in ("fail", "timeout", "error", "killed"):
+        rep.add(
+            "wedge",
+            "journal/last-procedure",
+            f"status={j.get('last_status')} component={j.get('last_component')} "
+            f"proc={j.get('last_procedure')} at={j.get('last_end') or j.get('updated_at')}",
+            root="previous expensive procedure died in-flight — unwind target "
+                 "Deployment/helm before repeating the same deploy (converge-09 class)",
+        )
+    elif j.get("last_status") == "ok" and j.get("last_component"):
+        rep.add("info", "journal/last-procedure",
+                f"last ok component={j.get('last_component')} at={j.get('updated_at')}",
+                root="prior apply completed cleanly")
+
+    # --- junk / ImagePull / Pending-beyond-grace pods ---
     for ns in MANAGED_NAMESPACES:
         if rep.managed_ns.get(ns) == "Absent":
             continue
@@ -354,10 +501,23 @@ def discover(ctx: Ctx) -> DiscoveryReport:
             stuck_pull = any(
                 ((cs.get("state") or {}).get("waiting") or {}).get("reason") in _IMAGE_WAIT_BAD
                 for cs in (p.get("status", {}).get("containerStatuses") or []))
+            age = _pod_age_s(p)
+            pending_stale = (
+                phase == "Pending"
+                and age is not None
+                and age > _PENDING_GRACE_S
+            )
             if phase in _POD_JUNK_PHASES or stuck_pull or phase == "Pending":
                 root, chain = _pod_chain(ctx, ns, p)
-                sev = "wedge" if stuck_pull or phase in _POD_JUNK_PHASES else "warn"
-                rep.add(sev, f"pod/{ns}/{name}", f"phase={phase}", root=root, chain=chain)
+                # Pending-beyond-grace is a wedge (eviction fallout that never resumed)
+                sev = (
+                    "wedge"
+                    if stuck_pull or phase in _POD_JUNK_PHASES or pending_stale
+                    else "warn"
+                )
+                age_s = f" age={int(age)}s" if age is not None else ""
+                rep.add(sev, f"pod/{ns}/{name}", f"phase={phase}{age_s}",
+                        root=root, chain=chain)
 
     # --- VolumeAttachments (node-level mounts left after pod death) ---
     for va in ctx.items("volumeattachments"):
