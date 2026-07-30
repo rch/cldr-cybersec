@@ -170,7 +170,10 @@ export DASK_WORKER_REPLICAS=32 DASK_WORKER_NTHREADS=2 \
 ```
 
 The v1.6.5 docs' `DASK_WORKER_MEM_REQUEST` / `DASK_WORKER_MEM_LIMIT` names are
-**not** honored by this package — use the names above.
+**not** package template vars — use the names above for zarf. Engine **0.5.0+**
+folds those aliases (`MEM_LIMIT`→`MEMORY`, `MEM_REQUEST`→requests.memory) and
+applies **surgical** worker sizing on a live `DaskCluster` (patch CR + bounce
+workers; no image re-push).
 
 **Validation scope.** This upgrade path is procedure-reviewed and its engine
 mechanism (image-tag drift → redeploy) is code-verified; it has **not** yet
@@ -714,6 +717,6 @@ registry PVC with Ready registry is left intact during sweep.
 | Package mtime races | `T0.package-uniqueness` fails if multiple deploy tarballs | Never deletes packages (Layer-A MANUAL) |
 | Ingress class (traefik on RKE2) | Auto-detect `nginx`; stamp on every deploy; T6 checks class + `/ws` | Redeploy ingress only |
 | Hub SC-less | Package `sqlite-memory` + `storage: none`; T5 deletes any hub PVC/hub-db PV then redeploy | Hub DB ephemeral by design air-gap |
-| Worker default | Deploy path forces `DASK_WORKER_REPLICAS=1` if unset | Capacity cap still applies |
+| Worker default | Deploy path forces `DASK_WORKER_REPLICAS=4` (+ nthreads/cpu/memory defaults) if unset | Engine 0.5.0 capacity-caps by RAM headroom; surgical CR sizing |
 
 Discovery always prints SYSTEM/RKE2 PLANE, LAYER-A PACKAGES, and KUBELET GC POLICY lines.

@@ -459,17 +459,38 @@ HINTS = {
         [
             "kc get nodes -o custom-columns=NAME:.metadata.name,CPU:.status.allocatable.cpu,"
             "MEM:.status.allocatable.memory,SCHED:.spec.unschedulable",
-            "kc -n dask get deploy,pods -o wide",
-            "kc -n dask get pods --field-selector=status.phase=Pending -o wide",
+            "kc -n dask get daskcluster cybersec-dask -o jsonpath='"
+            "{.spec.worker.replicas}{\" replicas\\n\"}"
+            "{.spec.worker.spec.containers[0].args}{\"\\n\"}"
+            "{.spec.worker.spec.containers[0].resources}{\"\\n\"}'",
+            "kc -n dask get deploy,pods -l dask.org/component=worker -o wide",
+            "kc -n dask get pods -l dask.org/component=worker "
+            "--field-selector=status.phase=Pending -o wide",
         ],
         [
-            "# Cap workers to schedulable_nodes-1 (min 1); engine: _rem_workers_capacity",
-            "kc -n dask get daskcluster cybersec-dask -o yaml | head -80",
-            "# set DASK_WORKER_REPLICAS then:",
-            'zarf package deploy "$PKG" --confirm --components=dask-cluster --retries 10 "${SETV[@]}"',
-            "# or scale/reap excess worker Deployments after CR update",
+            "# Engine 0.5.0: surgical CR patch + worker bounce (no zarf re-push).",
+            "# Canonical: DASK_WORKER_REPLICAS / NTHREADS / CPU / MEMORY",
+            "# Aliases:   DASK_WORKER_MEM_LIMIT→MEMORY, MEM_REQUEST→requests.memory",
+            "export DASK_WORKER_REPLICAS=${DASK_WORKER_REPLICAS:-4}",
+            "export DASK_WORKER_NTHREADS=${DASK_WORKER_NTHREADS:-2}",
+            "export DASK_WORKER_CPU=${DASK_WORKER_CPU:-2}",
+            "export DASK_WORKER_MEMORY=${DASK_WORKER_MEMORY:-6Gi}",
+            "# Cap by RAM: floor((total_alloc_Gi − 8) / worker_Gi); Pending shrinks further",
+            "kc -n dask patch daskcluster cybersec-dask --type merge -p \"{\\\"spec\\\":{"
+            "\\\"worker\\\":{\\\"replicas\\\":${DASK_WORKER_REPLICAS}}}}\"",
+            "# Full sizing (replicas + args + limits) — prefer converge apply:",
+            "#   DASK_WORKER_*=… python3 -m converge --apply …",
+            "# Manual template edit: get CR, set --nthreads / --memory-limit / limits, apply;",
+            "# then bounce (operator often skips pod roll on template-only changes):",
+            "kc -n dask delete pod -l dask.org/component=worker "
+            "--force --grace-period=0 --wait=false",
+            "# Reap excess worker Deployments (Pending / least-ready first):",
+            "kc -n dask get deploy -l dask.org/component=worker "
+            "--sort-by=.status.readyReplicas -o name | "
+            "head -n -${DASK_WORKER_REPLICAS} | xargs -r -n1 kc -n dask delete --wait=false",
         ],
-        note="Workers Pending (oversubscribed) — strands panel memory",
+        note="Workers Pending or sizing drift (replicas/nthreads/cpu/memory) — "
+             "surgical CR patch; strands panel if oversubscribed",
     ),
     "T5.otel-navigator": block(
         _discover_for_components("cybersec-images,panel-viz") + [

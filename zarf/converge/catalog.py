@@ -25,10 +25,20 @@ from pathlib import Path
 from typing import List, Optional
 
 from .discovery import APP_NAMESPACES, DASK_CRD_KINDS
-from .kube import Ctx
+from .kube import Ctx, _mem_to_gib
 from .model import Cost, Fix, Invariant, Layer, Probe
 from . import manual as _manual
 from . import platform as _platform
+
+# Package defaults (zarf.yaml) — used when env is unset on first deploy / capacity math.
+_WORKER_DEFAULT_REPLICAS = 4
+_WORKER_DEFAULT_NTHREADS = "2"
+_WORKER_DEFAULT_CPU = "2"
+_WORKER_DEFAULT_MEMORY = "6Gi"
+_WORKER_DEFAULT_MEM_REQUEST = "2Gi"
+# Reserve RAM for kubelet + system + scheduler + panel + hub so workers do not
+# strand otel-navigator. Capacity target = floor((total − headroom) / worker_mem).
+_WORKER_MEM_HEADROOM_GIB = 8.0
 
 # Registry hostPath — non-root registry container; fsGroup does NOT chown hostPath.
 REGISTRY_HOSTPATH = "/var/lib/zarf-registry"
@@ -612,10 +622,18 @@ def _zarf_deploy_components(ctx: Ctx, components: str) -> Fix:
     # Unwind deploy-blocking wedges BEFORE zarf. Stamp detected INGRESS_CLASS so
     # redeploys never re-introduce traefik-on-RKE2 silent 404s.
     _platform.ensure_ingress_class_in_ctx(ctx)
-    # Default resilient worker count if unset (package default may be multi-node).
-    if not ctx.s3.get("DASK_WORKER_REPLICAS"):
+    # Worker sizing for package templates (canonical names). Aliases folded first;
+    # T4.workers-capacity still capacity-caps and surgically patches a live CR.
+    _normalize_worker_aliases(ctx)
+    if not _s3_lookup(ctx, "DASK_WORKER_REPLICAS"):
         # Multi-core lab / air-gap baseline; capacity cap (T4) still trims Pending
-        ctx.s3["DASK_WORKER_REPLICAS"] = "4"
+        ctx.s3["DASK_WORKER_REPLICAS"] = str(_WORKER_DEFAULT_REPLICAS)
+    if not _s3_lookup(ctx, "DASK_WORKER_NTHREADS"):
+        ctx.s3["DASK_WORKER_NTHREADS"] = _WORKER_DEFAULT_NTHREADS
+    if not _s3_lookup(ctx, "DASK_WORKER_CPU"):
+        ctx.s3["DASK_WORKER_CPU"] = _WORKER_DEFAULT_CPU
+    if not _s3_lookup(ctx, "DASK_WORKER_MEMORY"):
+        ctx.s3["DASK_WORKER_MEMORY"] = _WORKER_DEFAULT_MEMORY
     unwound = (_unwedge_pending_helm(ctx) + _unwedge_terminating_app_ns(ctx)
                + _strip_agent_ignore(ctx) + _unwedge_unmutated_pods(ctx)
                + _unwedge_broken_dask_cluster(ctx))
@@ -1795,41 +1813,445 @@ def _rem_scheduler(ctx: Ctx) -> Fix:
     return Fix(fix.changed or bool(actions), detail)
 
 
-def _det_workers_capacity(ctx: Ctx) -> Probe:
-    """No perpetually-Pending workers: requested replicas must fit schedulable
-    capacity. This is the oversubscription failure that strands otel-navigator."""
-    pods = ctx.items("pods", ns="dask", selector="dask.org/component=worker")
-    pending = [p["metadata"]["name"] for p in pods
-               if p.get("status", {}).get("phase") == "Pending"]
-    return Probe(not pending, f"{len(pending)} worker(s) Pending (oversubscribed)"
-                 if pending else f"{len(pods)} worker(s), none Pending")
+# --------------------------------------------------------------------------- #
+# T4.workers-capacity — surgical worker REPLICAS + SIZING (engine ≥ 0.5.0)
+# --------------------------------------------------------------------------- #
+# Package wire (zarf.yaml / dask-cluster.yaml):
+#   DASK_WORKER_REPLICAS  → spec.worker.replicas
+#   DASK_WORKER_NTHREADS  → container args --nthreads
+#   DASK_WORKER_CPU       → resources.limits.cpu  (≥ nthreads)
+#   DASK_WORKER_MEMORY    → resources.limits.memory + args --memory-limit
+# Aliases (v1.6.5 docs; not package vars — engine folds them):
+#   DASK_WORKER_MEM_LIMIT   → DASK_WORKER_MEMORY
+#   DASK_WORKER_MEM_REQUEST → resources.requests.memory (optional)
+#
+# The dask-kubernetes operator often only propagates *replicas* on a live CR;
+# template/sizing changes need a worker pod (or Deployment) bounce. We never
+# re-push images for scale/size — patch CR + recycle workers only.
 
 
-def _rem_workers_capacity(ctx: Ctx) -> Fix:
-    """Make the actual worker pods fit schedulable capacity so the viz pod gets a
-    node. Two parts — because the operator may leave ORPHANED worker Deployments it
-    never reaps (the "spec says 4 but 16 pods, 5 Pending" state we hit):
-      1. set DaskCluster spec.worker.replicas = target (the source of truth);
-      2. reap the EXCESS worker Deployments down to target, least-ready (Pending)
-         first — don't trust the spec, count the real Deployments.
-    target leaves one node's headroom for panel-viz/engine/jupyter. Layer-B; never
-    touches images."""
+def _s3_lookup(ctx: Ctx, *keys: str) -> str:
+    """First non-empty ctx.s3 value among keys (exact then upper/lower)."""
+    for k in keys:
+        for cand in (k, k.upper(), k.lower()):
+            v = ctx.s3.get(cand)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    return ""
+
+
+def _normalize_worker_aliases(ctx: Ctx) -> None:
+    """Fold DASK_WORKER_MEM_LIMIT / MEM_REQUEST into canonical keys on ctx.s3.
+
+    Package honors DASK_WORKER_MEMORY only; operators following older docs may
+    still export MEM_LIMIT / MEM_REQUEST. Mutates ctx.s3 in place so subsequent
+    zarf deploys also get the canonical names.
+    """
+    mem = _s3_lookup(ctx, "DASK_WORKER_MEMORY")
+    if not mem:
+        alt = _s3_lookup(ctx, "DASK_WORKER_MEM_LIMIT")
+        if not alt:
+            alt = _s3_lookup(ctx, "DASK_WORKER_MEM_REQUEST")
+        if alt:
+            ctx.s3["DASK_WORKER_MEMORY"] = alt
+
+
+def _normalize_k8s_qty(v: Optional[str]) -> str:
+    """Loose equality for CPU/memory quantities ('2'=='2.0', '6Gi'=='6gi')."""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if not s:
+        return ""
+    # CPU millicores
+    if s.endswith("m") and s[:-1].replace(".", "", 1).isdigit():
+        try:
+            return f"{float(s[:-1]) / 1000:g}"
+        except ValueError:
+            return s.lower()
+    # Bare number (CPU cores)
+    try:
+        return f"{float(s):g}"
+    except ValueError:
+        pass
+    # Memory → GiB then back to a canonical "Xgi" string
+    gib = _mem_to_gib(s)
+    if gib > 0:
+        return f"{gib:g}gi"
+    return s.lower()
+
+
+def _arg_after(args: list, flag: str) -> Optional[str]:
+    """Value following ``flag`` in a container args list, or None."""
+    for i, a in enumerate(args):
+        if a == flag and i + 1 < len(args):
+            return str(args[i + 1])
+        # also accept --flag=value
+        if isinstance(a, str) and a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def _set_arg(args: list, flag: str, value: str) -> list:
+    """Return a copy of args with ``flag value`` set (insert near dask-worker)."""
+    out = list(args or [])
+    for i, a in enumerate(out):
+        if a == flag and i + 1 < len(out):
+            out[i + 1] = str(value)
+            return out
+        if isinstance(a, str) and a.startswith(flag + "="):
+            out[i] = f"{flag}={value}"
+            return out
+    # Insert after binary name when present
+    insert_at = 1 if out and not str(out[0]).startswith("-") else len(out)
+    out[insert_at:insert_at] = [flag, str(value)]
+    return out
+
+
+def _desired_worker_sizing(ctx: Ctx) -> dict:
+    """Desired worker sizing from ctx.s3 (after alias fold).
+
+    ``replicas`` is int when DASK_WORKER_REPLICAS is set, else None (do not
+    force scale-up — only cap oversubscription). Sizing fields are None when
+    unset so we do not thrash a manually sized CR back to package defaults.
+    """
+    _normalize_worker_aliases(ctx)
+    rep_s = _s3_lookup(ctx, "DASK_WORKER_REPLICAS")
+    replicas = None
+    if rep_s:
+        try:
+            replicas = max(1, int(float(rep_s)))
+        except ValueError:
+            replicas = _WORKER_DEFAULT_REPLICAS
+    return {
+        "replicas": replicas,
+        "replicas_explicit": bool(rep_s),
+        "nthreads": _s3_lookup(ctx, "DASK_WORKER_NTHREADS") or None,
+        "cpu": _s3_lookup(ctx, "DASK_WORKER_CPU") or None,
+        "memory": _s3_lookup(ctx, "DASK_WORKER_MEMORY") or None,
+        "mem_request": _s3_lookup(ctx, "DASK_WORKER_MEM_REQUEST") or None,
+    }
+
+
+def _live_worker_sizing(ctx: Ctx) -> Optional[dict]:
+    """Read live DaskCluster/cybersec-dask worker sizing. None if CR absent."""
+    cr = ctx.get("daskcluster", "cybersec-dask", ns="dask")
+    if not cr:
+        return None
+    w = (cr.get("spec") or {}).get("worker") or {}
+    replicas = w.get("replicas")
+    try:
+        replicas_i = int(replicas) if replicas is not None else None
+    except (TypeError, ValueError):
+        replicas_i = None
+    containers = ((w.get("spec") or {}).get("containers") or [])
+    c = next((x for x in containers if x.get("name") == "worker"),
+             containers[0] if containers else {})
+    args = list(c.get("args") or [])
+    nthreads = _arg_after(args, "--nthreads")
+    mem_arg = _arg_after(args, "--memory-limit")
+    limits = ((c.get("resources") or {}).get("limits") or {})
+    requests = ((c.get("resources") or {}).get("requests") or {})
+    mem_limit = limits.get("memory") or mem_arg
+    return {
+        "replicas": replicas_i,
+        "nthreads": str(nthreads) if nthreads is not None else None,
+        "cpu": str(limits["cpu"]) if limits.get("cpu") is not None else None,
+        "memory": str(mem_limit) if mem_limit is not None else None,
+        "mem_request": str(requests["memory"]) if requests.get("memory") is not None else None,
+        "mem_arg": str(mem_arg) if mem_arg is not None else None,
+        "_cr": cr,
+        "_worker": w,
+        "_container": c,
+        "_args": args,
+    }
+
+
+def _mem_fit_workers(ctx: Ctx, per_worker_memory: str) -> int:
+    """Max workers that fit total allocatable RAM after headroom."""
     cap = ctx.node_capacity()
-    target = max(1, cap["schedulable_nodes"] - 1)
-    ctx.k(["patch", "daskcluster", "cybersec-dask", "-n", "dask", "--type", "merge",
-           "-p", json.dumps({"spec": {"worker": {"replicas": target}}})])
+    total = float(cap.get("total_mem_gib") or 0.0)
+    wgib = _mem_to_gib(per_worker_memory) or _mem_to_gib(_WORKER_DEFAULT_MEMORY) or 6.0
+    if wgib <= 0:
+        wgib = 6.0
+    usable = total - _WORKER_MEM_HEADROOM_GIB
+    if usable < wgib:
+        return 1
+    return max(1, int(usable // wgib))
+
+
+def _target_worker_replicas(ctx: Ctx, desired: dict, live: Optional[dict],
+                            pending_count: int = 0,
+                            non_pending_count: int = 0) -> int:
+    """Capacity-capped replica target.
+
+    * Explicit ``DASK_WORKER_REPLICAS`` → min(desired, mem_fit), then pending shrink.
+    * Unset → keep live count (min 1), only shrink for mem_fit / Pending.
+    Replaces the old ``schedulable_nodes − 1`` heuristic that pinned fat single
+    nodes to one worker.
+    """
+    per_mem = (desired.get("memory")
+               or (live or {}).get("memory")
+               or _WORKER_DEFAULT_MEMORY)
+    mem_fit = _mem_fit_workers(ctx, per_mem)
+    if desired.get("replicas") is not None:
+        want = int(desired["replicas"])
+    else:
+        want = int((live or {}).get("replicas") or _WORKER_DEFAULT_REPLICAS)
+        # Without an explicit desired, never scale *up* — only preserve/cap.
+        if live and live.get("replicas") is not None:
+            want = min(want, int(live["replicas"]))
+    target = max(1, min(want, mem_fit))
+    # Pending oversubscription: do not keep asking for pods that cannot schedule.
+    if pending_count > 0 and non_pending_count >= 1:
+        target = min(target, non_pending_count)
+    elif pending_count > 0 and non_pending_count == 0:
+        target = 1
+    return max(1, target)
+
+
+def _worker_sizing_drifts(live: dict, desired: dict, target_replicas: int) -> list:
+    """Human-readable field drifts (replicas + explicit sizing fields only)."""
+    drifts = []
+    live_rep = live.get("replicas")
+    if live_rep is None or int(live_rep) != int(target_replicas):
+        drifts.append(f"replicas {live_rep}→{target_replicas}")
+    for key, label in (("nthreads", "nthreads"), ("cpu", "cpu"),
+                       ("memory", "memory"), ("mem_request", "mem_request")):
+        want = desired.get(key)
+        if not want:
+            continue  # unset → do not force package default onto live CR
+        have = live.get(key)
+        if key == "memory" and not have:
+            have = live.get("mem_arg")
+        if _normalize_k8s_qty(have) != _normalize_k8s_qty(want):
+            drifts.append(f"{label} {have or '∅'}→{want}")
+    # --memory-limit arg can drift from limits.memory even when desired matches limits
+    if desired.get("memory") and live.get("mem_arg"):
+        if _normalize_k8s_qty(live["mem_arg"]) != _normalize_k8s_qty(desired["memory"]):
+            msg = f"memory-arg {live['mem_arg']}→{desired['memory']}"
+            if msg not in drifts and not any(d.startswith("memory ") for d in drifts):
+                drifts.append(msg)
+    return drifts
+
+
+def _stamp_worker_sizing(ctx: Ctx, desired: dict, target_replicas: int) -> None:
+    """Write effective sizing into ctx.s3 so later zarf deploys preserve it."""
+    ctx.s3["DASK_WORKER_REPLICAS"] = str(target_replicas)
+    if desired.get("nthreads"):
+        ctx.s3["DASK_WORKER_NTHREADS"] = str(desired["nthreads"])
+    if desired.get("cpu"):
+        ctx.s3["DASK_WORKER_CPU"] = str(desired["cpu"])
+    if desired.get("memory"):
+        ctx.s3["DASK_WORKER_MEMORY"] = str(desired["memory"])
+    if desired.get("mem_request"):
+        ctx.s3["DASK_WORKER_MEM_REQUEST"] = str(desired["mem_request"])
+
+
+def _patch_daskcluster_worker_sizing(ctx: Ctx, live: dict, desired: dict,
+                                     target_replicas: int) -> tuple:
+    """Merge-patch DaskCluster worker replicas + template sizing.
+
+    Returns (changed: bool, detail: str, template_changed: bool).
+    ``template_changed`` means nthreads/cpu/memory changed → must bounce workers.
+    """
+    w = dict(live.get("_worker") or {})
+    w["replicas"] = int(target_replicas)
+    # Deep-ish copy of pod template so we do not mutate the cached live dict oddly
+    spec = dict(w.get("spec") or {})
+    containers = [dict(c) for c in (spec.get("containers") or [])]
+    if not containers:
+        containers = [{"name": "worker", "args": ["dask-worker"]}]
+    # Prefer the container named worker
+    idx = next((i for i, c in enumerate(containers) if c.get("name") == "worker"), 0)
+    c = dict(containers[idx])
+    args = list(c.get("args") or live.get("_args") or ["dask-worker"])
+    template_changed = False
+
+    if desired.get("nthreads"):
+        before = _arg_after(args, "--nthreads")
+        args = _set_arg(args, "--nthreads", str(desired["nthreads"]))
+        if _normalize_k8s_qty(before) != _normalize_k8s_qty(desired["nthreads"]):
+            template_changed = True
+    if desired.get("memory"):
+        before = _arg_after(args, "--memory-limit")
+        args = _set_arg(args, "--memory-limit", str(desired["memory"]))
+        if _normalize_k8s_qty(before) != _normalize_k8s_qty(desired["memory"]):
+            template_changed = True
+    c["args"] = args
+
+    resources = dict(c.get("resources") or {})
+    limits = dict(resources.get("limits") or {})
+    requests = dict(resources.get("requests") or {})
+    if desired.get("cpu"):
+        if _normalize_k8s_qty(limits.get("cpu")) != _normalize_k8s_qty(desired["cpu"]):
+            template_changed = True
+        limits["cpu"] = str(desired["cpu"])
+    if desired.get("memory"):
+        if _normalize_k8s_qty(limits.get("memory")) != _normalize_k8s_qty(desired["memory"]):
+            template_changed = True
+        limits["memory"] = str(desired["memory"])
+    if desired.get("mem_request"):
+        if _normalize_k8s_qty(requests.get("memory")) != _normalize_k8s_qty(desired["mem_request"]):
+            template_changed = True
+        requests["memory"] = str(desired["mem_request"])
+    if limits:
+        resources["limits"] = limits
+    if requests:
+        resources["requests"] = requests
+    if resources:
+        c["resources"] = resources
+    containers[idx] = c
+    spec["containers"] = containers
+    w["spec"] = spec
+
+    rep_changed = live.get("replicas") != int(target_replicas)
+    if not rep_changed and not template_changed:
+        return False, f"DaskCluster worker already at target {target_replicas}", False
+
+    r = ctx.k(["patch", "daskcluster", "cybersec-dask", "-n", "dask", "--type", "merge",
+               "-p", json.dumps({"spec": {"worker": w}})])
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()[:300]
+        return False, f"daskcluster patch failed: {err}", False
+    parts = []
+    if rep_changed:
+        parts.append(f"replicas→{target_replicas}")
+    if template_changed:
+        fields = [k for k in ("nthreads", "cpu", "memory", "mem_request") if desired.get(k)]
+        parts.append("sizing " + ",".join(fields))
+    return True, "patched DaskCluster worker: " + ", ".join(parts), template_changed
+
+
+def _reap_excess_worker_deployments(ctx: Ctx, target: int) -> tuple:
+    """Delete excess worker Deployments (Pending/least-ready first). (reaped, detail)."""
     deps = ctx.items("deployments", ns="dask", selector="dask.org/component=worker")
     excess = len(deps) - target
     if excess <= 0:
-        return Fix(False, f"{len(deps)} worker deployment(s) ≤ target {target}; nothing to reap")
-    deps.sort(key=lambda d: d.get("status", {}).get("readyReplicas", 0))  # Pending first
+        return 0, f"{len(deps)} worker deployment(s) ≤ target {target}"
+    deps.sort(key=lambda d: d.get("status", {}).get("readyReplicas") or 0)
     reaped = 0
     for d in deps[:excess]:
         if ctx.k(["delete", "deployment", d["metadata"]["name"], "-n", "dask",
                   "--wait=false"]).returncode == 0:
             reaped += 1
-    return Fix(reaped > 0, f"capped to {target} (schedulable={cap['schedulable_nodes']}); "
-                           f"reaped {reaped} orphaned/excess worker deployment(s)")
+    return reaped, f"reaped {reaped}/{excess} excess worker deployment(s)"
+
+
+def _recycle_worker_pods(ctx: Ctx) -> str:
+    """Force worker pods to recreate so they pick up template sizing/image."""
+    r = ctx.k(["delete", "pod", "-n", "dask", "-l", "dask.org/component=worker",
+               "--force", "--grace-period=0", "--wait=false", "--ignore-not-found"])
+    if r.returncode == 0:
+        return "recycled worker pods (template pickup)"
+    return f"worker pod recycle rc={r.returncode}"
+
+
+def _det_workers_capacity(ctx: Ctx) -> Probe:
+    """Workers match desired sizing (when set), fit RAM capacity, none Pending.
+
+    Detects:
+      * Pending workers (oversubscription stranding panel memory)
+      * CR / Deployment count drift vs capacity-capped target
+      * Explicit DASK_WORKER_* sizing drift (nthreads / cpu / memory)
+    """
+    live = _live_worker_sizing(ctx)
+    if live is None:
+        return Probe(False, "DaskCluster cybersec-dask missing (T4.scheduler)")
+    desired = _desired_worker_sizing(ctx)
+    pods = ctx.items("pods", ns="dask", selector="dask.org/component=worker")
+    pending = [p for p in pods
+               if (p.get("status") or {}).get("phase") == "Pending"]
+    non_pending = len(pods) - len(pending)
+    target = _target_worker_replicas(ctx, desired, live, len(pending), non_pending)
+    drifts = _worker_sizing_drifts(live, desired, target)
+    deps = ctx.items("deployments", ns="dask", selector="dask.org/component=worker")
+    issues = []
+    if pending:
+        issues.append(f"{len(pending)} worker(s) Pending (oversubscribed)")
+    if drifts:
+        issues.append("sizing drift: " + ", ".join(drifts))
+    if len(deps) > target:
+        issues.append(f"{len(deps)} worker Deployments > target {target}")
+    # Under-count when operator asked for more and capacity allows (no Pending)
+    if (desired.get("replicas") is not None
+            and not pending
+            and (live.get("replicas") or 0) < target):
+        issues.append(f"under-provisioned: CR replicas {live.get('replicas')} < target {target}")
+    if issues:
+        return Probe(False, "; ".join(issues)
+                     + f"  [target={target} live={live.get('replicas')} "
+                     f"pods={len(pods)} pending={len(pending)} "
+                     f"mem_fit={_mem_fit_workers(ctx, desired.get('memory') or live.get('memory') or _WORKER_DEFAULT_MEMORY)}]")
+    size_bits = []
+    if live.get("nthreads"):
+        size_bits.append(f"nthreads={live['nthreads']}")
+    if live.get("cpu"):
+        size_bits.append(f"cpu={live['cpu']}")
+    if live.get("memory"):
+        size_bits.append(f"mem={live['memory']}")
+    extra = (" " + " ".join(size_bits)) if size_bits else ""
+    return Probe(True, f"{len(pods)} worker(s), none Pending, "
+                       f"replicas={live.get('replicas')} target={target}{extra}")
+
+
+def _rem_workers_capacity(ctx: Ctx) -> Fix:
+    """Surgical worker scale + sizing — no zarf re-push, no CR recreate.
+
+    1. Fold MEM_LIMIT/MEM_REQUEST aliases → canonical DASK_WORKER_* on ctx.s3.
+    2. Compute capacity-capped target (RAM headroom, Pending shrink).
+    3. Merge-patch DaskCluster worker.replicas + template (nthreads/cpu/memory).
+    4. If template sizing changed: recycle worker pods (operator often skips roll).
+    5. Reap orphaned/excess worker Deployments (least-ready first).
+    6. Stamp effective sizing into ctx.s3 so later component deploys preserve it.
+    """
+    live = _live_worker_sizing(ctx)
+    if live is None:
+        return Fix(False, "no DaskCluster cybersec-dask — T4.scheduler must create it first")
+    desired = _desired_worker_sizing(ctx)
+    pods = ctx.items("pods", ns="dask", selector="dask.org/component=worker")
+    pending = [p for p in pods
+               if (p.get("status") or {}).get("phase") == "Pending"]
+    non_pending = len(pods) - len(pending)
+    target = _target_worker_replicas(ctx, desired, live, len(pending), non_pending)
+    drifts = _worker_sizing_drifts(live, desired, target)
+    deps = ctx.items("deployments", ns="dask", selector="dask.org/component=worker")
+    needs_work = bool(drifts) or len(deps) > target or bool(pending)
+    if not needs_work and (live.get("replicas") or 0) >= target:
+        _stamp_worker_sizing(ctx, desired, target)
+        return Fix(False, f"workers already at target {target} "
+                          f"(replicas={live.get('replicas')}, pods={len(pods)}, "
+                          f"deploys={len(deps)}); nothing to do")
+
+    actions = []
+    # Always stamp before patch so concurrent zarf paths see the cap
+    _stamp_worker_sizing(ctx, desired, target)
+
+    changed, detail, template_changed = _patch_daskcluster_worker_sizing(
+        ctx, live, desired, target)
+    if detail:
+        actions.append(detail)
+    if not changed and "failed" in detail:
+        return Fix(False, detail)
+
+    if template_changed or any(
+            d.startswith(("nthreads", "cpu", "memory", "mem_request", "memory-arg"))
+            for d in drifts):
+        actions.append(_recycle_worker_pods(ctx))
+
+    reaped, reap_detail = _reap_excess_worker_deployments(ctx, target)
+    if reaped > 0:
+        actions.append(reap_detail)
+    elif len(deps) > target:
+        actions.append(reap_detail)
+
+    cap = ctx.node_capacity()
+    summary = (f"target={target} (desired={desired.get('replicas') or 'live'}, "
+               f"mem_fit={_mem_fit_workers(ctx, desired.get('memory') or live.get('memory') or _WORKER_DEFAULT_MEMORY)}, "
+               f"nodes={cap.get('schedulable_nodes')} mem={cap.get('total_mem_gib')}Gi)")
+    if not actions:
+        return Fix(False, f"no worker changes applied; {summary}")
+    return Fix(True, f"{' | '.join(actions)}  [{summary}]")
 
 
 # --- image-drift detection (so `apply` rolls a content/tag change) ----------
@@ -2961,7 +3383,8 @@ def build_catalog(dynamic_provisioning: bool = False,
                   _det_scheduler, _rem_scheduler, cost=Cost.EXPENSIVE,
                   depends_on=("T3.dask-operator",) + _disk,
                   manual_hint=H("T4.scheduler")),
-        Invariant("T4.workers-capacity", "T4", "Workers fit schedulable capacity (no oversubscription)",
+        Invariant("T4.workers-capacity", "T4",
+                  "Workers sized (replicas/nthreads/cpu/memory) and fit capacity",
                   Layer.B, _det_workers_capacity, _rem_workers_capacity,
                   depends_on=("T4.scheduler",), manual_hint=H("T4.workers-capacity")),
 

@@ -30,10 +30,13 @@
 # ZARF_CONFIG ([package.deploy.set]) — bare ZARF_VAR_* env does NOT template in
 # zarf v0.70.1. Never put secrets on argv / the process table.
 #
-# Env tunables: S3_BUCKET (required for a first deploy), DASK_WORKER_REPLICAS
-# (default 1 — the resilient single-node baseline; raise for bigger clusters, the
-# engine still caps to live capacity), KUBECONFIG, CONVERGE_DYNAMIC_PROVISIONING=1,
-# CONVERGE_NO_REGISTRY_PVC=1.
+# Env tunables: S3_BUCKET (required for a first deploy), worker sizing
+#   DASK_WORKER_REPLICAS (default 4 — multi-core / air-gap baseline; set 1 for
+#     tiny smoke hosts; engine capacity-caps by RAM headroom + Pending)
+#   DASK_WORKER_NTHREADS / DASK_WORKER_CPU / DASK_WORKER_MEMORY (optional;
+#     package defaults 2 / 2 / 6Gi — engine 0.5.0 applies surgically to live CR)
+#   Aliases: DASK_WORKER_MEM_LIMIT → MEMORY, DASK_WORKER_MEM_REQUEST → requests
+# KUBECONFIG, CONVERGE_DYNAMIC_PROVISIONING=1, CONVERGE_NO_REGISTRY_PVC=1.
 set -euo pipefail
 
 MODE="${1:-verify}"
@@ -174,10 +177,14 @@ fi
 [ -n "$CREDS_FILE" ] && ARGS+=(--creds-file "$CREDS_FILE")
 # Multi-core / air-gap baseline 4; set DASK_WORKER_REPLICAS=1 for tiny smoke hosts
 ARGS+=(--set "DASK_WORKER_REPLICAS=${DASK_WORKER_REPLICAS:-4}")
-# Optional sizing (must keep CPU limit >= nthreads)
+# Optional sizing (must keep CPU limit >= nthreads). Engine 0.5.0 patches the live
+# DaskCluster CR + recycles workers — no zarf re-push for scale/size alone.
 [[ -n "${DASK_WORKER_NTHREADS:-}" ]] && ARGS+=(--set "DASK_WORKER_NTHREADS=${DASK_WORKER_NTHREADS}")
 [[ -n "${DASK_WORKER_CPU:-}" ]] && ARGS+=(--set "DASK_WORKER_CPU=${DASK_WORKER_CPU}")
 [[ -n "${DASK_WORKER_MEMORY:-}" ]] && ARGS+=(--set "DASK_WORKER_MEMORY=${DASK_WORKER_MEMORY}")
+# v1.6.5 doc aliases (engine folds → DASK_WORKER_MEMORY / requests.memory)
+[[ -n "${DASK_WORKER_MEM_LIMIT:-}" ]] && ARGS+=(--set "DASK_WORKER_MEM_LIMIT=${DASK_WORKER_MEM_LIMIT}")
+[[ -n "${DASK_WORKER_MEM_REQUEST:-}" ]] && ARGS+=(--set "DASK_WORKER_MEM_REQUEST=${DASK_WORKER_MEM_REQUEST}")
 # Optional terminal-WS override (NodePort/tunnel access; empty = auto-detect / ingress /ws)
 [ -n "${PTY_PROXY_WS:-}" ] && ARGS+=(--set "PTY_PROXY_WS=${PTY_PROXY_WS}")
 # Optional explicit ingress class; engine auto-detects nginx on RKE2 when unset
