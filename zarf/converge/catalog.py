@@ -2226,7 +2226,11 @@ def _det_workers_capacity(ctx: Ctx) -> Probe:
     """
     live = _live_worker_sizing(ctx)
     if live is None:
-        return Probe(False, "DaskCluster cybersec-dask missing (T4.scheduler)")
+        # CR absent is T4.scheduler's job — not a capacity failure. Returning
+        # FAIL here thrashes rem every pass while scheduler Deployment may
+        # already be healthy (converge-11/12: "missing" spam + false progress).
+        return Probe(True, "DaskCluster CR absent — capacity N/A until T4.scheduler "
+                           "creates it (not a worker oversubscription failure)")
     desired = _desired_worker_sizing(ctx)
     pods = ctx.items("pods", ns="dask", selector="dask.org/component=worker")
     pending = [p for p in pods
@@ -2399,6 +2403,54 @@ def _running_cybersec_ref(ctx: Ctx, ns: str, selector: str) -> str:
     return ""
 
 
+def _retarget_deployments_cybersec(ctx: Ctx, ns: str,
+                                   selector: Optional[str] = None,
+                                   target_tag: str = "") -> List[str]:
+    """Patch Deployments in ``ns`` whose containers use cybersec-dask → target_tag.
+
+    Used for Dask children and panel-viz (otel-navigator, navigator-engine).
+    Caller must recycle pods after — Deployment template change alone is not
+    enough under IfNotPresent + stale RS.
+    """
+    actions: List[str] = []
+    target_tag = target_tag or _target_cybersec_tag(ctx)
+    if not target_tag:
+        return actions
+    deps = (ctx.items("deployments", ns=ns, selector=selector) if selector
+            else ctx.items("deployments", ns=ns))
+    for dep in deps:
+        name = (dep.get("metadata") or {}).get("name")
+        if not name:
+            continue
+        tpl = (((dep.get("spec") or {}).get("template") or {}).get("spec") or {})
+        containers = tpl.get("containers") or []
+        new_containers = []
+        dep_changed = False
+        pairs: List[str] = []
+        for c in containers:
+            c = dict(c)
+            img = c.get("image") or ""
+            if "cybersec-dask" in img:
+                new = _retarget_image_ref(img, target_tag)
+                if new != img:
+                    c["image"] = new
+                    dep_changed = True
+                    pairs.append(f"{c.get('name', 'app')}={new}")
+            new_containers.append(c)
+        if not dep_changed:
+            continue
+        r = ctx.k(["set", "image", f"deployment/{name}", "-n", ns, *pairs])
+        if r.returncode != 0:
+            patch = {"spec": {"template": {"spec": {"containers": new_containers}}}}
+            r = ctx.k(["patch", "deployment", name, "-n", ns,
+                       "--type", "strategic", "-p", json.dumps(patch)])
+        actions.append(
+            f"retargeted {ns}/Deployment/{name} → {target_tag}"
+            if r.returncode == 0 else
+            f"{ns}/Deployment/{name} retarget rc={r.returncode}")
+    return actions
+
+
 def _retarget_dask_workload_images(ctx: Ctx, target_tag: str) -> List[str]:
     """Patch DaskCluster CR + Deployments so children recreate on target tag.
 
@@ -2435,53 +2487,36 @@ def _retarget_dask_workload_images(ctx: Ctx, target_tag: str) -> List[str]:
                 if r.returncode == 0 else
                 f"DaskCluster image patch rc={r.returncode}")
 
-    # --- Live Deployments (operator often leaves these on old tag) ---
+    # --- Live Deployments ---
     for sel in ("dask.org/component=scheduler", "dask.org/component=worker"):
-        for dep in ctx.items("deployments", ns="dask", selector=sel):
-            name = (dep.get("metadata") or {}).get("name")
-            if not name:
-                continue
-            tpl = (((dep.get("spec") or {}).get("template") or {})
-                   .get("spec") or {})
-            containers = tpl.get("containers") or []
-            new_containers = []
-            dep_changed = False
-            for c in containers:
-                c = dict(c)
-                img = c.get("image") or ""
-                if "cybersec-dask" in img:
-                    new = _retarget_image_ref(img, target_tag)
-                    if new != img:
-                        c["image"] = new
-                        dep_changed = True
-                new_containers.append(c)
-            if not dep_changed:
-                continue
-            # Strategic merge on pod template containers by name
-            patch = {
-                "spec": {
-                    "template": {
-                        "spec": {
-                            "containers": new_containers,
-                        }
-                    }
-                }
-            }
-            r = ctx.k(["patch", "deployment", name, "-n", "dask",
-                       "--type", "strategic", "-p", json.dumps(patch)])
-            if r.returncode != 0:
-                # fallback: set image via kubectl set image
-                pairs = []
-                for c in new_containers:
-                    if "cybersec-dask" in (c.get("image") or ""):
-                        pairs.append(f"{c.get('name', 'scheduler')}={c['image']}")
-                if pairs:
-                    r = ctx.k(["set", "image", f"deployment/{name}",
-                               "-n", "dask", *pairs])
-            actions.append(
-                f"retargeted Deployment/{name} → {target_tag}"
-                if r.returncode == 0 else
-                f"Deployment/{name} retarget rc={r.returncode}")
+        actions.extend(_retarget_deployments_cybersec(ctx, "dask", sel, target_tag))
+    return actions
+
+
+def _rem_panel_image_drift(ctx: Ctx, app: str, components: str) -> List[str]:
+    """Clear cybersec-dask image drift on a panel-viz app (converge-11/12 class).
+
+    Same pathology as scheduler: zarf/helm updates leave Deployment on old tag;
+    recycle-only recreates from the old template. Push → retarget Deployment →
+    recycle; package redeploy if still drifted.
+    """
+    actions: List[str] = []
+    sel = f"app={app}"
+    drift = _image_drift(ctx, _PANEL_NS, sel)
+    if not drift:
+        return actions
+    target = _target_cybersec_tag(ctx)
+    actions.append(f"{app} {drift}")
+    if ctx.have_zarf() and ctx.package_path:
+        fix = _zarf_deploy_components(ctx, "cybersec-images")
+        actions.append(fix.detail)
+    actions.extend(_retarget_deployments_cybersec(ctx, _PANEL_NS, sel, target))
+    actions.extend(_recycle_panel_pods(ctx, sel))
+    if _image_drift(ctx, _PANEL_NS, sel) and ctx.have_zarf() and ctx.package_path:
+        fix = _zarf_deploy_components(ctx, components)
+        actions.append(fix.detail)
+        actions.extend(_retarget_deployments_cybersec(ctx, _PANEL_NS, sel, target))
+        actions.extend(_recycle_panel_pods(ctx, sel))
     return actions
 
 
@@ -2870,10 +2905,21 @@ def _rem_otel_navigator(ctx: Ctx) -> Fix:
         if cap_fix.changed:
             actions.append(cap_fix.detail)
 
+    # Image drift — surgical retarget (do not recycle-only; converge-11/12)
+    if any("image drift" in w for w in workload):
+        actions.extend(_rem_panel_image_drift(
+            ctx, "otel-navigator", "cybersec-images,panel-viz"))
+
     if needs_package or _panel_s3_config_issue(ctx) or not _det_otel_navigator(ctx).ok:
         if ctx.have_zarf() and ctx.package_path:
-            fix = _zarf_deploy_components(ctx, "cybersec-images,panel-viz")
-            actions.append(fix.detail)
+            # Skip full package if image-drift path already ran a deploy
+            if not any("panel-viz" in a or "retargeted" in a for a in actions):
+                fix = _zarf_deploy_components(ctx, "cybersec-images,panel-viz")
+                actions.append(fix.detail)
+                if any("image drift" in w for w in workload):
+                    actions.extend(_retarget_deployments_cybersec(
+                        ctx, _PANEL_NS, "app=otel-navigator"))
+                    actions.extend(_recycle_panel_pods(ctx, "app=otel-navigator"))
         elif _panel_s3_config_issue(ctx) and ctx.s3.get("S3_BUCKET"):
             # No package — config-only is the only lever
             cfg = _patch_panel_s3_config(ctx)
@@ -2886,7 +2932,12 @@ def _rem_otel_navigator(ctx: Ctx) -> Fix:
 
     re = _det_otel_navigator(ctx)
     if not re.ok:
-        actions.extend(_recycle_panel_pods(ctx, "app=otel-navigator"))
+        if any("image drift" in w for w in _panel_workload_issues(
+                ctx, "app=otel-navigator", expect_containers=2)):
+            actions.extend(_rem_panel_image_drift(
+                ctx, "otel-navigator", "cybersec-images,panel-viz"))
+        else:
+            actions.extend(_recycle_panel_pods(ctx, "app=otel-navigator"))
         if (ctx.have_zarf() and ctx.package_path
                 and not any("panel-viz" in a for a in actions)):
             fix2 = _zarf_deploy_components(ctx, "panel-viz")
@@ -2931,7 +2982,11 @@ def _det_engine(ctx: Ctx) -> Probe:
 
 def _rem_engine(ctx: Ctx) -> Fix:
     """Heal navigator-engine. Prefer config-only patch of shared S3 when that is
-    the only failure; otherwise zarf deploy navigator-engine (+ panel-viz if needed)."""
+    the only failure; otherwise zarf deploy navigator-engine (+ panel-viz if needed).
+
+    Image drift uses surgical Deployment retarget (converge-11/12: restartCount
+    climbs if recycle-only leaves the old template).
+    """
     actions: List[str] = []
     s3i = _panel_s3_config_issue(ctx)
     if s3i and not ctx.s3.get("S3_BUCKET"):
@@ -2943,19 +2998,34 @@ def _rem_engine(ctx: Ctx) -> Fix:
         actions.append(cfg.detail)
         if _panel_s3_config_issue(ctx) is None and _det_engine(ctx).ok:
             return Fix(True, " | ".join(actions))
+    # Image drift first (cheap surgical) before full chart redeploy
+    if _image_drift(ctx, _PANEL_NS, "app=navigator-engine"):
+        actions.extend(_rem_panel_image_drift(
+            ctx, "navigator-engine", "cybersec-images,navigator-engine"))
+        if _det_engine(ctx).ok:
+            return Fix(True, " | ".join(actions))
     if s3i and ctx.s3.get("S3_BUCKET") and ctx.have_zarf() and ctx.package_path:
         pf = _zarf_deploy_components(ctx, "cybersec-images,panel-viz")
         actions.append(f"panel-viz (S3 config): {pf.detail}")
     if ctx.have_zarf() and ctx.package_path:
-        fix = _zarf_deploy_components(ctx, "cybersec-images,navigator-engine")
-        actions.append(fix.detail)
+        if not any("navigator-engine" in a for a in actions):
+            fix = _zarf_deploy_components(ctx, "cybersec-images,navigator-engine")
+            actions.append(fix.detail)
+        if _image_drift(ctx, _PANEL_NS, "app=navigator-engine"):
+            actions.extend(_retarget_deployments_cybersec(
+                ctx, _PANEL_NS, "app=navigator-engine"))
+            actions.extend(_recycle_panel_pods(ctx, "app=navigator-engine"))
     elif not actions:
         return Fix(False, _manual.join_detail(
             f"MANUAL: cannot deploy navigator-engine without package\n{_panel_live_state(ctx)}",
             _manual.hint_for("T5.navigator-engine")))
     re = _det_engine(ctx)
     if not re.ok:
-        actions.extend(_recycle_panel_pods(ctx, "app=navigator-engine"))
+        if _image_drift(ctx, _PANEL_NS, "app=navigator-engine"):
+            actions.extend(_rem_panel_image_drift(
+                ctx, "navigator-engine", "cybersec-images,navigator-engine"))
+        else:
+            actions.extend(_recycle_panel_pods(ctx, "app=navigator-engine"))
     re = _det_engine(ctx)
     detail = " | ".join(actions)
     if re.ok:

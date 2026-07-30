@@ -87,6 +87,7 @@ _FUNCTIONAL_SURFACE: Tuple[Tuple[str, Tuple[str, ...], int], ...] = (
     ("dask-operator", ("app.kubernetes.io/name=dask-kubernetes-operator",), 1),
     ("dask", ("dask.org/component=scheduler",), 1),
     ("panel-viz", ("app=otel-navigator",), 1),
+    ("panel-viz", ("app=navigator-engine",), 1),  # terminal stack (converge-11/12)
     ("jupyterhub", ("component=hub",), 1),
 )
 
@@ -709,6 +710,35 @@ def functional_surface(ctx: Ctx) -> dict:
     if not any_ns:
         return {"ready": False, "issues": ["no managed namespaces yet (pre-deploy)"],
                 "checks": checks, "partial": False}
+    # Content-tag drift (converge-10/11/12): Ready pods on stale cybersec-dask
+    # must not count as a Ready surface — arm partial-rollout unwind.
+    target = ""
+    manifest = getattr(ctx, "manifest", None) or {}
+    for img in (manifest.get("package_images") or {}).get("images", []) or []:
+        ref = img.get("ref") or ""
+        if "cybersec-dask" in ref and ":" in ref.rsplit("/", 1)[-1]:
+            tag = ref.rsplit(":", 1)[-1].split("-zarf-", 1)[0]
+            target = tag
+            break
+    if target:
+        for ns, sels in (
+            ("dask", ("dask.org/component=scheduler",)),
+            ("panel-viz", ("app=otel-navigator", "app=navigator-engine")),
+        ):
+            if not ctx.get("namespace", ns):
+                continue
+            for sel in sels:
+                for p in ctx.items("pods", ns=ns, selector=sel):
+                    for c in (p.get("spec") or {}).get("containers") or []:
+                        img = c.get("image") or ""
+                        if "cybersec-dask" not in img:
+                            continue
+                        last = img.split("@", 1)[0].rsplit("/", 1)[-1]
+                        run = (last.rsplit(":", 1)[-1].split("-zarf-", 1)[0]
+                               if ":" in last else "")
+                        if run and run != target:
+                            issues.append(
+                                f"{ns}/{sel}: image drift running={run} target={target}")
     partial = bool(issues)
     return {
         "ready": not issues,

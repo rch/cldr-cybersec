@@ -166,6 +166,17 @@ class TestImageRetarget:
             "localhost:5555/cybersec-dask:2025.2.0-new"
 
 
+class TestWorkersAbsentCR:
+    def test_capacity_ok_when_no_cr(self):
+        from converge.catalog import _det_workers_capacity
+        ctx = MagicMock(spec=Ctx)
+        ctx.get.side_effect = lambda *a, **k: None  # no daskcluster
+        ctx.items.return_value = []
+        p = _det_workers_capacity(ctx)
+        assert p.ok is True
+        assert "N/A" in p.detail or "absent" in p.detail.lower()
+
+
 class TestVersion:
     def test_version(self):
-        assert __version__ == "0.5.3"
+        assert __version__ == "0.5.4"
