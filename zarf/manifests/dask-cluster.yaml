@@ -47,7 +47,7 @@ spec:
         - name: scheduler
           # Image will be rewritten by Zarf to use internal registry
           # Notebook image includes h5py/holoviews (HDF5 Dask tasks). Zarf rewrites tag.
-          image: localhost:5555/cybersec-dask:2025.2.0-c97fce803d
+          image: localhost:5555/cybersec-dask:2025.2.0-74bc219d3a
           imagePullPolicy: IfNotPresent
           args:
             - dask-scheduler
@@ -106,7 +106,7 @@ spec:
       containers:
         - name: worker
           # Same notebook image as Jupyter — workers must import h5py for HDF5 tasks
-          image: localhost:5555/cybersec-dask:2025.2.0-c97fce803d
+          image: localhost:5555/cybersec-dask:2025.2.0-74bc219d3a
           imagePullPolicy: IfNotPresent
           args:
             - dask-worker

@@ -133,10 +133,10 @@ components:
     description: Container images for Cyberphy Dask deployment
     images:
       # Single air-gap app image: Dask + Jupyter + Panel + h5py/holoviews (requirements-airgap.txt).
-      # Build: podman build -t localhost:5555/cybersec-dask:2025.2.0-c97fce803d \
+      # Build: podman build -t localhost:5555/cybersec-dask:2025.2.0-74bc219d3a \
       #          -f zarf/images/Dockerfile.cybersec-dask .
       # FAIL the package create if this tag is missing or lacks h5py — no runtime pip.
-      - localhost:5555/cybersec-dask:2025.2.0-c97fce803d
+      - localhost:5555/cybersec-dask:2025.2.0-74bc219d3a
       # Dask Kubernetes Operator
       - ghcr.io/dask/dask-kubernetes-operator:2024.1.0
 
@@ -198,7 +198,7 @@ components:
                       missing.append('%s (%s)' % (m, e))
               if missing:
                   print('AIRGAP IMAGE MISSING DEPS:', ', '.join(missing))
-                  print('Rebuild cybersec-dask:2025.2.0-c97fce803d from Dockerfile.cybersec-dask')
+                  print('Rebuild cybersec-dask:2025.2.0-74bc219d3a from Dockerfile.cybersec-dask')
                   sys.exit(1)
               import h5py, holoviews
               print('airgap image OK: h5py', h5py.__version__, 'holoviews', holoviews.__version__)
@@ -261,7 +261,7 @@ components:
       - quay.io/jupyterhub/k8s-hub:4.0.0
       - quay.io/jupyterhub/configurable-http-proxy:4.5.5
       # User notebook environment uses the custom cybersec-dask image
-      - localhost:5555/cybersec-dask:2025.2.0-c97fce803d
+      - localhost:5555/cybersec-dask:2025.2.0-74bc219d3a
     charts:
       - name: jupyterhub
         namespace: jupyterhub
