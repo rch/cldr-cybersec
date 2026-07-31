@@ -232,14 +232,19 @@ import base64, gzip, json, subprocess
 KC = "/var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml".split()
 def k(*a, inp=None):
     return subprocess.run(KC + list(a), capture_output=True, text=True, input=inp)
-o = json.loads(k("get", "secrets", "-n", "dask-operator", "-l", "owner=helm", "-o", "json").stdout)
+# zarf stores component release secrets HASHED in ns zarf (not the component ns)
+o = json.loads(k("get", "secrets", "-A", "-l", "owner=helm", "-o", "json").stdout)
 by = {}
 for s in o.get("items", []):
+    ns = s["metadata"]["namespace"]
+    if ns == "kube-system":
+        continue  # RKE2 system charts — never wedge those
     lab = s["metadata"]["labels"]; v = int(lab["version"])
-    if lab["name"] not in by or v > by[lab["name"]][0]:
-        by[lab["name"]] = (v, s)
-assert by, "no helm release found in ns dask-operator"
-rel_name, (ver, last) = sorted(by.items())[0]
+    key = (ns, lab["name"])
+    if key not in by or v > by[key][0]:
+        by[key] = (v, s)
+assert by, "no zarf-managed helm release found (searched all ns except kube-system)"
+(rel_ns, rel_name), (ver, last) = sorted(by.items())[0]
 new = ver + 1
 gz = base64.b64decode(base64.b64decode(last["data"]["release"]))
 rel = json.loads(gzip.decompress(gz))
@@ -250,7 +255,7 @@ secret = {
     "apiVersion": "v1", "kind": "Secret", "type": "helm.sh/release.v1",
     "metadata": {
         "name": "sh.helm.release.v1.%s.v%d" % (rel_name, new),
-        "namespace": "dask-operator",
+        "namespace": rel_ns,
         "labels": {"name": rel_name, "owner": "helm",
                    "status": "pending-upgrade", "version": str(new)},
     },
@@ -519,7 +524,7 @@ post_registry_blip() {
   local marker ready catalog
   marker="$(_sb_marker_present || true)"
   ready="$(on_node "$KCTL -n zarf get pods --no-headers 2>/dev/null" | grep -ciE 'Running' || true)"
-  catalog="$(on_node "sudo zarf tools registry catalog 2>/dev/null | grep -c cybersec-dask" 2>/dev/null || true)"
+  catalog="$(on_node "sudo env KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf tools registry catalog 2>/dev/null | grep -c cybersec-dask" 2>/dev/null || true)"
   if [ -z "$marker" ]; then
     echo "    ✗ hostPath marker missing after blip recovery"; return 1
   fi
@@ -685,7 +690,7 @@ post_partial_push() {
     echo "    ✗ hostPath marker missing after PARTIAL_PUSH rem"; return 1
   fi
   # Prefer engine-reported recovery; also probe registry if possible
-  catalog="$(on_node "sudo zarf tools registry catalog 2>/dev/null" || true)"
+  catalog="$(on_node "sudo env KUBECONFIG=/etc/rancher/rke2/rke2.yaml zarf tools registry catalog 2>/dev/null" || true)"
   tag="$(on_node "python3 -c \"
 import json
 from pathlib import Path
